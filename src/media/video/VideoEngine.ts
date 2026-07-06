@@ -37,6 +37,10 @@ export class VideoEngine {
   private droppedFramesCount = 0;
   private processedFramesCount = 0;
 
+  private videoElements: Map<string, HTMLVideoElement> = new Map();
+  private videoUrls: Map<string, string> = new Map();
+  private offscreenCanvas: HTMLCanvasElement | null = null;
+
   private constructor() {}
 
   public static getInstance(): VideoEngine {
@@ -98,19 +102,71 @@ export class VideoEngine {
     // Dynamic fake duration based on size for realistic seeking
     durationSec = Math.max(5.0, Number(((file.size / (5 * 1024 * 1024)) || 15).toFixed(2)));
 
-    const totalFrames = Math.floor(durationSec * fps);
+    const metadataId = `vid_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+    let realWidth = width;
+    let realHeight = height;
+    let realDuration = durationSec;
+
+    let objectUrl = "";
+    if (typeof window !== "undefined" && typeof URL !== "undefined") {
+      if (file instanceof File) {
+        objectUrl = URL.createObjectURL(file);
+      } else if (file.arrayBuffer) {
+        try {
+          const buffer = await file.arrayBuffer();
+          const blob = new Blob([buffer]);
+          objectUrl = URL.createObjectURL(blob);
+        } catch (e) {
+          console.warn("[VideoEngine] Failed to create blob from arrayBuffer:", e);
+        }
+      }
+
+      if (objectUrl) {
+        try {
+          const video = document.createElement("video");
+          video.src = objectUrl;
+          video.preload = "auto";
+          video.muted = true;
+          video.playsInline = true;
+
+          await new Promise<void>((resolve) => {
+            const onLoadedMetadata = () => {
+              realWidth = video.videoWidth || realWidth;
+              realHeight = video.videoHeight || realHeight;
+              realDuration = video.duration || realDuration;
+              resolve();
+            };
+            const onError = (e: any) => {
+              console.warn("[VideoEngine] Video metadata load failed, using heuristics.", e);
+              resolve(); // resolve anyway to fall back
+            };
+            video.addEventListener("loadedmetadata", onLoadedMetadata, { once: true });
+            video.addEventListener("error", onError, { once: true });
+            // Set timeout of 2 seconds just in case
+            setTimeout(resolve, 2000);
+          });
+
+          this.videoElements.set(metadataId, video);
+          this.videoUrls.set(metadataId, objectUrl);
+        } catch (err) {
+          console.warn("[VideoEngine] Could not initialize native HTML5 Video Decoder:", err);
+        }
+      }
+    }
+
+    const totalFrames = Math.floor(realDuration * fps);
     const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
-    const divisor = gcd(width, height);
-    const aspectRatio = `${width / divisor}:${height / divisor}`;
+    const divisor = gcd(realWidth, realHeight);
+    const aspectRatio = `${realWidth / divisor}:${realHeight / divisor}`;
 
     const metadata: VideoMetadata = {
-      id: `vid_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+      id: metadataId,
       name: file.name,
-      durationSec,
+      durationSec: realDuration,
       fps,
       totalFrames,
-      width,
-      height,
+      width: realWidth,
+      height: realHeight,
       aspectRatio,
       codecId: codecDef ? codecDef.id : "h264_mp4",
       colorSpace: isHDR ? "rec2020" : "rec709",
@@ -253,6 +309,74 @@ export class VideoEngine {
     }
 
     return this.seekToFrame(nextFrame);
+  }
+
+  /**
+   * Decode a specific video frame as Uint8ClampedArray (RGBA pixels)
+   */
+  public async decodeFrameReal(
+    metadataId: string,
+    frameIndex: number,
+    targetWidth = 640,
+    targetHeight = 360
+  ): Promise<Uint8ClampedArray | null> {
+    const video = this.videoElements.get(metadataId);
+    if (!video) {
+      console.warn(`[VideoEngine] No HTML5 video element found for metadata ID: ${metadataId}`);
+      return null;
+    }
+
+    if (typeof window === "undefined" || typeof document === "undefined") {
+      return null;
+    }
+
+    // Determine target timestamp based on metadata FPS or default to 23.976
+    const fps = this.currentVideoMetadata?.fps || 23.976;
+    const timeSec = frameIndex / fps;
+
+    // Fast-seek the video playhead
+    video.currentTime = timeSec;
+
+    // Await seeked event using a Promise with timeout backup
+    await new Promise<void>((resolve) => {
+      let isResolved = false;
+      
+      const onSeeked = () => {
+        if (!isResolved) {
+          isResolved = true;
+          resolve();
+        }
+      };
+
+      video.addEventListener("seeked", onSeeked, { once: true });
+      
+      // Safety timeout of 150ms to prevent execution blocks
+      setTimeout(() => {
+        if (!isResolved) {
+          isResolved = true;
+          video.removeEventListener("seeked", onSeeked);
+          resolve();
+        }
+      }, 150);
+    });
+
+    if (!this.offscreenCanvas) {
+      this.offscreenCanvas = document.createElement("canvas");
+    }
+
+    this.offscreenCanvas.width = targetWidth;
+    this.offscreenCanvas.height = targetHeight;
+    const ctx = this.offscreenCanvas.getContext("2d");
+    if (!ctx) return null;
+
+    try {
+      ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
+      const imgData = ctx.getImageData(0, 0, targetWidth, targetHeight);
+      return imgData.data;
+    } catch (err) {
+      console.warn("[VideoEngine] Canvas frame extraction failed:", err);
+      return null;
+    }
   }
 
   /**

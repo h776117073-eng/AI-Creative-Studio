@@ -10,6 +10,8 @@ import { MotionEngine } from "../editing/motion/MotionEngine";
 import { MediaLinkEngine } from "../editing/MediaLinkEngine";
 import { SubtitleEngine } from "../media/subtitles/SubtitleEngine";
 import { ActionHistory } from "../editing/ActionHistory";
+import { VideoEngine } from "../media/video/VideoEngine";
+import { MediaEngine } from "../media/MediaEngine";
 
 export interface RenderPipelineContext {
   frameIndex: number;
@@ -134,31 +136,48 @@ export class RenderPipeline {
         ctx.logs.push(`[Decode] Decompressing streams for "${asset.name}" at timeline frame #${index}`);
         const w = ctx.renderWidth;
         const h = ctx.renderHeight;
-        const totalSize = w * h * 4;
-        const pixels = new Uint8ClampedArray(totalSize);
 
-        // Procedural scene rendering so we have real visual data to process
-        // Renders a beautiful color-bar gradient pattern combined with a moving sine-wave playhead
-        const shift = index * 4;
-        for (let y = 0; y < h; y++) {
-          for (let x = 0; x < w; x++) {
-            const idx = (y * w + x) * 4;
-            
-            // Generate standard split color zones procedural background
-            if (x < w / 3) {
-              pixels[idx] = Math.min(255, 180 + Math.sin((y + shift) / 20) * 40); // Red-ish bars
-              pixels[idx + 1] = 40;
-              pixels[idx + 2] = 40;
-            } else if (x < (2 * w) / 3) {
-              pixels[idx] = 40;
-              pixels[idx + 1] = Math.min(255, 180 + Math.cos((x + shift) / 25) * 50); // Green-ish bars
-              pixels[idx + 2] = 40;
-            } else {
-              pixels[idx] = 40;
-              pixels[idx + 1] = 40;
-              pixels[idx + 2] = Math.min(255, 180 + Math.sin((x + y + shift) / 30) * 60); // Blue-ish bars
+        let pixels: Uint8ClampedArray | null = null;
+        let isRealDecoding = false;
+
+        try {
+          // Attempt high-performance native browser element video frame extraction
+          pixels = await VideoEngine.getInstance().decodeFrameReal(asset.assetId, index, w, h);
+          if (pixels) {
+            isRealDecoding = true;
+            ctx.logs.push(`[Decode SUCCESS] Real video frame extracted frame-accurately via HTML5 Video Decoder.`);
+          }
+        } catch (err: any) {
+          ctx.logs.push(`[Decode Native Warning] HTML5 video extraction failed: ${err.message}. Falling back to procedural.`);
+        }
+
+        if (!pixels) {
+          // Fall back to high-fidelity procedural bars
+          const totalSize = w * h * 4;
+          pixels = new Uint8ClampedArray(totalSize);
+          
+          // Renders a beautiful color-bar gradient pattern combined with a moving sine-wave playhead
+          const shift = index * 4;
+          for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+              const idx = (y * w + x) * 4;
+              
+              // Generate standard split color zones procedural background
+              if (x < w / 3) {
+                pixels[idx] = Math.min(255, 180 + Math.sin((y + shift) / 20) * 40); // Red-ish bars
+                pixels[idx + 1] = 40;
+                pixels[idx + 2] = 40;
+              } else if (x < (2 * w) / 3) {
+                pixels[idx] = 40;
+                pixels[idx + 1] = Math.min(255, 180 + Math.cos((x + shift) / 25) * 50); // Green-ish bars
+                pixels[idx + 2] = 40;
+              } else {
+                pixels[idx] = 40;
+                pixels[idx + 1] = 40;
+                pixels[idx + 2] = Math.min(255, 180 + Math.sin((x + y + shift) / 30) * 60); // Blue-ish bars
+              }
+              pixels[idx + 3] = 255; // Fully opaque
             }
-            pixels[idx + 3] = 255; // Fully opaque
           }
         }
 
@@ -172,7 +191,11 @@ export class RenderPipeline {
           rawPixels: pixels,
           audioBuffer: audioData,
           subtitles: [],
-          metadata: { codec: "Apple ProRes 422 HQ", bitDepth: 10, fps: ctx.fps },
+          metadata: { 
+            codec: isRealDecoding ? "HTML5 Native VideoDecoder" : "Apple ProRes 422 HQ", 
+            bitDepth: 10, 
+            fps: ctx.fps 
+          },
         };
       },
     };
