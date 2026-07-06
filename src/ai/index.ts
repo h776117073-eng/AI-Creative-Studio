@@ -1,4 +1,5 @@
 export * from "./types";
+export * from "./agents";
 export { AiOrchestrator } from "./core/AiOrchestrator";
 export { PromptParser } from "./parser/PromptParser";
 export { AiPlanner } from "./planner/AiPlanner";

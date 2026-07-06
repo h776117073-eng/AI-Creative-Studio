@@ -8,6 +8,7 @@ import { TimelineUnderstanding } from "../timeline/TimelineUnderstanding";
 import { ExecutionEngine, ExecutionState } from "../execution/ExecutionEngine";
 import { WorkflowGenerator } from "../workflows/WorkflowGenerator";
 import { IAiExecutionPlan, IAiPlugin } from "../types";
+import { SupervisorAgent } from "../agents";
 
 export class AiOrchestrator {
   private static instance: AiOrchestrator;
@@ -21,6 +22,7 @@ export class AiOrchestrator {
   private timelineInspector = TimelineUnderstanding.getInstance();
   private executionEngine = ExecutionEngine.getInstance();
   private workflowGenerator = WorkflowGenerator.getInstance();
+  private supervisor = new SupervisorAgent();
 
   private plugins: Map<string, IAiPlugin> = new Map();
 
@@ -129,6 +131,7 @@ Plan mapped [${plan.graph.priorityQueue.length}] distinct task nodes with an est
   }
 
   // Exposure utilities to maintain architectural compliance across files
+  public getSupervisor() { return this.supervisor; }
   public getParser() { return this.parser; }
   public getPlanner() { return this.planner; }
   public getMemory() { return this.memory; }
