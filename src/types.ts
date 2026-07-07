@@ -7,6 +7,7 @@ export type PageId =
   | "timeline"
   | "ai-command-center"
   | "ai-workflows"
+  | "ai-creation"
   | "video-editing"
   | "audio-editing"
   | "motion-graphics"

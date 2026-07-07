@@ -71,6 +71,7 @@ export default function Sidebar({
     {
       title: "AI Co-Creation",
       items: [
+        { id: "ai-creation", label: "AI Creative Studio", icon: Sparkles },
         { id: "ai-command-center", label: "AI Command Center", icon: Sparkles },
         { id: "ai-workflows", label: "AI Workflows", icon: Workflow },
       ]

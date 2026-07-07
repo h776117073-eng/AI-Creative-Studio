@@ -27,6 +27,7 @@ import Timeline from "./pages/Timeline";
 // AI and Module views
 import AICommandCenter from "./pages/AICommandCenter";
 import AIWorkflows from "./pages/AIWorkflows";
+import AiFirstCreator from "./pages/AiFirstCreator";
 import VideoEditing from "./pages/VideoEditing";
 import AudioEditing from "./pages/AudioEditing";
 import MotionGraphics from "./pages/MotionGraphics";
@@ -343,6 +344,8 @@ export default function App() {
             onAddWorkflow={handleAddWorkflow}
           />
         );
+      case "ai-creation":
+        return <AiFirstCreator onNavigate={setActivePage} />;
       case "video-editing":
         return <VideoEditing onNavigate={setActivePage} />;
       case "audio-editing":
