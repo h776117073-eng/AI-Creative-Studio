@@ -3,7 +3,7 @@ import { Routes, Route, Navigate } from 'react-router-dom';
 import { Workspace } from './components/workspace/Workspace';
 import { AuthPage } from './pages/AuthPage';
 import { DashboardPage } from './pages/DashboardPage';
-import { supabase } from './lib/supabase';
+import { isSupabaseConfigured, supabase } from './lib/supabase';
 import type { User } from '@supabase/supabase-js';
 
 function App() {
@@ -11,6 +11,12 @@ function App() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    if (!isSupabaseConfigured) {
+      setUser(null);
+      setLoading(false);
+      return undefined;
+    }
+
     supabase.auth.getSession().then(({ data: { session } }) => {
       setUser(session?.user ?? null);
       setLoading(false);
@@ -34,23 +40,25 @@ function App() {
     );
   }
 
+  const canUseDashboard = Boolean(user) || !isSupabaseConfigured;
+
   return (
     <Routes>
       <Route
         path="/auth"
-        element={user ? <Navigate to="/dashboard" /> : <AuthPage />}
+        element={canUseDashboard ? <Navigate to="/dashboard" /> : <AuthPage />}
       />
       <Route
         path="/dashboard"
-        element={user ? <DashboardPage /> : <Navigate to="/auth" />}
+        element={canUseDashboard ? <DashboardPage /> : <Navigate to="/auth" />}
       />
       <Route
         path="/project/:projectId"
-        element={user ? <Workspace /> : <Navigate to="/auth" />}
+        element={canUseDashboard ? <Workspace /> : <Navigate to="/auth" />}
       />
       <Route
         path="/"
-        element={<Navigate to={user ? '/dashboard' : '/auth'} />}
+        element={<Navigate to={canUseDashboard ? '/dashboard' : '/auth'} />}
       />
     </Routes>
   );
