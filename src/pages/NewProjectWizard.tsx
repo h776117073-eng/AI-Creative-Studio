@@ -11,6 +11,7 @@ import {
   ArrowLeft 
 } from "lucide-react";
 import { PageId, Project } from "../types";
+import { useApp } from "../context/AppContext";
 
 interface NewProjectWizardProps {
   onNavigate: (page: PageId) => void;
@@ -18,6 +19,7 @@ interface NewProjectWizardProps {
 }
 
 export default function NewProjectWizard({ onNavigate, onCreateProject }: NewProjectWizardProps) {
+  const { commandDispatcher } = useApp();
   const [name, setName] = useState("My Unnamed Studio Project");
   const [aspect, setAspect] = useState("16:9");
   const [resolution, setResolution] = useState("3840x2160 (4K)");
@@ -53,30 +55,33 @@ export default function NewProjectWizard({ onNavigate, onCreateProject }: NewPro
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsCreating(true);
 
-    setTimeout(() => {
-      // Create project model
-      const mockThumbnails = [
-        "https://images.unsplash.com/photo-1462331940025-496dfbfc7564?auto=format&fit=crop&w=400&q=80",
-        "https://images.unsplash.com/photo-1469334031218-e382a71b716b?auto=format&fit=crop&w=400&q=80",
-        "https://images.unsplash.com/photo-1515621061946-eff1c2a352bd?auto=format&fit=crop&w=400&q=80"
-      ];
-
-      onCreateProject({
-        name,
-        aspectRatio: aspect,
-        resolution,
-        fps,
-        thumbnail: mockThumbnails[Math.floor(Math.random() * mockThumbnails.length)],
-        tags: ["Studio", aspect === "9:16" ? "Vertical" : "Cinematic", "AI Init"],
+    try {
+      const result = await commandDispatcher.dispatch({
+        name: 'project:create',
+        payload: {
+          name,
+          type: 'video',
+          resolution,
+          fps,
+        },
+        priority: 90,
       });
 
+      if (result.success && result.data) {
+        onCreateProject(result.data);
+        onNavigate("workspace");
+      } else {
+        console.error('Failed to create project:', result.error);
+      }
+    } catch (e) {
+      console.error('Project creation error:', e);
+    } finally {
       setIsCreating(false);
-      onNavigate("projects");
-    }, 1500);
+    }
   };
 
   return (

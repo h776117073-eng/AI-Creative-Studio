@@ -30,23 +30,26 @@ const showRuntimeCrashOverlay = (title: string, errorLike: unknown): void => {
 };
 
 window.addEventListener('error', event => {
-  showRuntimeCrashOverlay('🚨 RUNTIME CRASH DETECTED', event.error ?? event.message);
+  showRuntimeCrashOverlay('RUNTIME CRASH DETECTED', event.error ?? event.message);
 });
 
 window.addEventListener('unhandledrejection', event => {
-  showRuntimeCrashOverlay('🚨 UNHANDLED PROMISE REJECTION DETECTED', event.reason);
+  showRuntimeCrashOverlay('UNHANDLED PROMISE REJECTION DETECTED', event.reason);
 });
 
-import {StrictMode} from 'react';
-import {createRoot} from 'react-dom/client';
-import App from './App.tsx';
+import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
+import App from './App';
 import './index.css';
-import { PlatformProvider } from './context/PlatformContext.tsx';
+import { PlatformProvider } from './context/PlatformContext';
+import { AppProvider } from './context/AppContext';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <PlatformProvider>
-      <App />
+      <AppProvider>
+        <App />
+      </AppProvider>
     </PlatformProvider>
   </StrictMode>,
 );

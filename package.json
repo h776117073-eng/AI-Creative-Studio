@@ -2,6 +2,7 @@
   "name": "ai-creative-studio",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "workspaces": [
     "packages/*",
     "apps/*"
@@ -10,7 +11,7 @@
     "dev": "concurrently \"npm run dev:web\" \"npm run dev:services\"",
     "dev:web": "npm run dev -w @ai-creative-studio/web",
     "dev:services": "npm run dev -w @ai-creative-studio/services",
-    "build": "npm run build:core && npm run build:engines && npm run build:apps",
+    "build": "vite build",
     "build:core": "npm run build -w @ai-creative-studio/core",
     "build:engines": "npm run build -w @ai-creative-studio/creative-engine -w @ai-creative-studio/timeline-engine -w @ai-creative-studio/rendering-engine -w @ai-creative-studio/animation-engine -w @ai-creative-studio/asset-engine -w @ai-creative-studio/media-engine -w @ai-creative-studio/audio-engine -w @ai-creative-studio/image-engine -w @ai-creative-studio/video-engine -w @ai-creative-studio/effects-engine -w @ai-creative-studio/project-engine -w @ai-creative-studio/ai-engine -w @ai-creative-studio/command-engine -w @ai-creative-studio/state-engine -w @ai-creative-studio/plugin-engine -w @ai-creative-studio/export-engine -w @ai-creative-studio/template-engine -w @ai-creative-studio/collaboration-engine",
     "build:apps": "npm run build -w @ai-creative-studio/web",
@@ -32,10 +33,13 @@
   "dependencies": {
     "@ffmpeg/ffmpeg": "^0.12.15",
     "@ffmpeg/util": "^0.12.2",
+    "@google/genai": "^2.11.0",
+    "@tailwindcss/vite": "^4.3.2",
     "better-sqlite3": "^11.1.2",
     "jsonwebtoken": "^9.0.2",
     "pg": "^8.12.0",
     "stripe": "^16.2.0",
+    "tailwindcss": "^4.3.2",
     "zod": "^3.23.8"
   }
 }

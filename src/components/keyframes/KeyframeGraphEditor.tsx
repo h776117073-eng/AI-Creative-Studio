@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Play, Pause, Plus, Trash2, Copy, Move, Grid3x2 as Grid3X3, ZoomIn, ZoomOut, ChevronDown, ChevronUp, Lock, Clock as Unlock } from "lucide-react";
+import { Play, Pause, Plus, Trash2, Copy, Move, Grid2x2 as Grid3X3, ZoomIn, ZoomOut, ChevronDown, ChevronUp, Lock, Clock as Unlock } from "lucide-react";
 import {
   KeyframeEngine,
   KeyframePoint,

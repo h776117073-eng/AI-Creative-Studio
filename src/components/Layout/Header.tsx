@@ -13,6 +13,7 @@ import {
   Database
 } from "lucide-react";
 import { PageId, SystemStats } from "../../types";
+import { useApp } from "../../context/AppContext";
 
 interface HeaderProps {
   currentProjectName: string;
@@ -31,6 +32,7 @@ export default function Header({
   onToggleRightPanel,
   isRightPanelOpen
 }: HeaderProps) {
+  const { commandDispatcher, addNotification, notifications } = useApp();
   const [searchQuery, setSearchQuery] = useState("");
   const [showRecentSearch, setShowRecentSearch] = useState(false);
   const [aiCommand, setAiCommand] = useState("");
@@ -45,46 +47,47 @@ export default function Header({
     "Speech to text"
   ];
 
-  const handleAiCommandSubmit = (e: React.FormEvent) => {
+  const handleAiCommandSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!aiCommand.trim()) return;
 
     setIsAiLoading(true);
     setAiResult(null);
 
-    // Simulate AI response and routing
-    setTimeout(() => {
-      setIsAiLoading(false);
-      const commandLower = aiCommand.toLowerCase();
-      if (commandLower.includes("color") || commandLower.includes("grade") || commandLower.includes("lut")) {
-        setAiResult("Command recognized. Redirecting to Color Studio and applying 'Cinematic Retro' template...");
+    try {
+      const result = await commandDispatcher.dispatch({
+        name: 'ai:execute',
+        payload: { query: aiCommand },
+        priority: 90,
+      });
+
+      if (result.success && result.data) {
+        const { interpretation, result: aiResultText } = result.data;
+        setAiResult(interpretation);
+
+        const commandLower = aiCommand.toLowerCase();
+        if (commandLower.includes("color") || commandLower.includes("grade") || commandLower.includes("lut")) {
+          setTimeout(() => onNavigate("color-studio"), 1500);
+        } else if (commandLower.includes("subtitle") || commandLower.includes("transcribe") || commandLower.includes("caption")) {
+          setTimeout(() => onNavigate("subtitle-studio"), 1500);
+        } else if (commandLower.includes("render") || commandLower.includes("export")) {
+          setTimeout(() => onNavigate("render-center"), 1500);
+        } else if (commandLower.includes("audio") || commandLower.includes("noise") || commandLower.includes("voice")) {
+          setTimeout(() => onNavigate("audio-editing"), 1500);
+        }
+
         setTimeout(() => {
-          onNavigate("color-studio");
           setAiResult(null);
           setAiCommand("");
-        }, 1500);
-      } else if (commandLower.includes("subtitle") || commandLower.includes("transcribe") || commandLower.includes("caption")) {
-        setAiResult("Dialogue detected. Opening Subtitle Studio to generate auto-captions...");
-        setTimeout(() => {
-          onNavigate("subtitle-studio");
-          setAiResult(null);
-          setAiCommand("");
-        }, 1500);
-      } else if (commandLower.includes("render") || commandLower.includes("export")) {
-        setAiResult("Preparing Render queue... Opening Render Center.");
-        setTimeout(() => {
-          onNavigate("render-center");
-          setAiResult(null);
-          setAiCommand("");
-        }, 1500);
+        }, 2500);
       } else {
-        setAiResult(`AI system parsed: "${aiCommand}". Auto-configuring workspace for optimal output.`);
-        setTimeout(() => {
-          setAiResult(null);
-          setAiCommand("");
-        }, 2000);
+        setAiResult(result.error || "AI command failed.");
       }
-    }, 1000);
+    } catch (err) {
+      setAiResult(`Error: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    } finally {
+      setIsAiLoading(false);
+    }
   };
 
   return (
@@ -218,7 +221,9 @@ export default function Header({
               className="p-1.5 hover:bg-btn-bg rounded-lg transition-colors cursor-pointer text-gray-700"
             >
               <Bell className="w-4 h-4" />
-              <span className="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full"></span>
+              {notifications.filter(n => !n.read).length > 0 && (
+                <span className="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full"></span>
+              )}
             </button>
 
             {/* Notifications quick menu */}
@@ -237,16 +242,17 @@ export default function Header({
                   </button>
                 </div>
                 <div className="space-y-2">
-                  <div className="p-1.5 rounded bg-panel text-[11px]">
-                    <span className="font-semibold text-text-dark block">Render Complete!</span>
-                    <span className="text-gray-500">Cyberpunk City Loop finished exporting.</span>
-                    <span className="text-[9px] text-gray-400 block mt-1 font-mono">2 mins ago</span>
-                  </div>
-                  <div className="p-1.5 rounded bg-panel text-[11px]">
-                    <span className="font-semibold text-text-dark block">Cloud Sync Succeeded</span>
-                    <span className="text-gray-500">All local changes saved securely.</span>
-                    <span className="text-[9px] text-gray-400 block mt-1 font-mono">1 hour ago</span>
-                  </div>
+                  {notifications.length === 0 ? (
+                    <div className="text-center py-4 text-gray-400 text-[11px]">No notifications</div>
+                  ) : (
+                    notifications.slice(0, 5).map((notif) => (
+                      <div key={notif.id} className="p-1.5 rounded bg-panel text-[11px]">
+                        <span className="font-semibold text-text-dark block">{notif.title}</span>
+                        <span className="text-gray-500">{notif.description}</span>
+                        <span className="text-[9px] text-gray-400 block mt-1 font-mono">{notif.timestamp}</span>
+                      </div>
+                    ))
+                  )}
                 </div>
               </div>
             )}

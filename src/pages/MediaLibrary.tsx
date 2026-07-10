@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { 
   FolderOpen, 
   Search, 
@@ -17,6 +17,7 @@ import {
   Sparkles
 } from "lucide-react";
 import { PageId, MediaAsset } from "../types";
+import { useApp } from "../context/AppContext";
 
 interface MediaLibraryProps {
   media: MediaAsset[];
@@ -31,6 +32,8 @@ export default function MediaLibrary({
   onAddMedia,
   onDeleteMedia
 }: MediaLibraryProps) {
+  const { commandDispatcher, addNotification, addHistory } = useApp();
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [activeTab, setActiveTab] = useState<"all" | "video" | "audio" | "image" | "3d" | "document">("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedAsset, setSelectedAsset] = useState<MediaAsset | null>(null);
@@ -62,25 +65,45 @@ export default function MediaLibrary({
     }
   };
 
-  // Mock adding an asset
-  const handleAddMockAsset = () => {
-    const mockNames = [
-      { name: "Symphonic_Drums_Loop.wav", type: "audio" as const, size: "32 MB", duration: "01:15" },
-      { name: "Camera_Pan_Cityscape.mp4", type: "video" as const, size: "185 MB", duration: "00:15", resolution: "1920x1080" },
-      { name: "Lowpoly_Character_Mesh.obj", type: "3d" as const, size: "4.1 MB" },
-      { name: "Glossy_Metallic_Texture.png", type: "image" as const, size: "8.2 MB", resolution: "2048x2048" }
-    ];
+  // Real file import via AssetService
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
 
-    const pick = mockNames[Math.floor(Math.random() * mockNames.length)];
-    onAddMedia({
-      id: "mock_" + Date.now(),
-      name: pick.name,
-      type: pick.type,
-      size: pick.size,
-      duration: pick.duration,
-      resolution: pick.resolution,
-      addedAt: "Just now"
-    });
+    for (const file of Array.from(files)) {
+      try {
+        const result = await commandDispatcher.dispatch({
+          name: 'asset:import',
+          payload: { file },
+          priority: 70,
+        });
+        if (result.success && result.data) {
+          onAddMedia(result.data);
+          addNotification({
+            title: 'Asset Imported',
+            description: `${file.name} has been imported successfully.`,
+            type: 'system',
+          });
+          addHistory({
+            action: `Imported asset: ${file.name}`,
+            user: 'You',
+            type: 'edit',
+          });
+        }
+      } catch (err) {
+        addNotification({
+          title: 'Import Failed',
+          description: `Failed to import ${file.name}: ${err instanceof Error ? err.message : 'Unknown error'}`,
+          type: 'warning',
+        });
+      }
+    }
+    // Reset input
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const handleImportClick = () => {
+    fileInputRef.current?.click();
   };
 
   return (
@@ -93,12 +116,20 @@ export default function MediaLibrary({
         </div>
 
         <div className="flex space-x-2">
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept="video/*,audio/*,image/*,.obj,.fbx,.pdf"
+            onChange={handleFileSelect}
+            className="hidden"
+          />
           <button 
-            onClick={handleAddMockAsset}
+            onClick={handleImportClick}
             className="px-3.5 py-1.5 bg-btn-bg border border-border-light rounded-xl text-xs font-semibold hover:border-gray-400 transition-all cursor-pointer flex items-center space-x-1.5"
           >
-            <Plus className="w-4 h-4 text-gray-700" />
-            <span>Simulate Import</span>
+            <Upload className="w-4 h-4 text-gray-700" />
+            <span>Import Media</span>
           </button>
         </div>
       </div>

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Play, Pause, SkipBack, SkipForward, Scissors, Magnet, ZoomIn, ZoomOut, Eye, EyeOff, Volume2, VolumeX, Lock, Clock as Unlock, Plus, Trash2, Copy, Grid3x2 as Grid3X3, Layers, ChevronDown, ChevronUp } from "lucide-react";
+import { Play, Pause, SkipBack, SkipForward, Scissors, Magnet, ZoomIn, ZoomOut, Eye, EyeOff, Volume2, VolumeX, Lock, Clock as Unlock, Plus, Trash2, Copy, Grid2x2 as Grid3X3, Layers, ChevronDown, ChevronUp } from "lucide-react";
 import { PageId } from "../types";
 import { TimelineEngine, TimelineSequence } from "../timeline/TimelineEngine";
 import { ClipEngine, Clip } from "../timeline/ClipEngine";
