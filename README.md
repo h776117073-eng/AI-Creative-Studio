@@ -19,7 +19,7 @@ This branch integrates the executable video-editing core into the Creative Studi
 
 ## Local requirements
 
-Node.js 20+ and FFmpeg/FFprobe.
+Node.js 22+ and FFmpeg/FFprobe.
 
 ```bash
 npm install
