@@ -1,5 +1,6 @@
 import type { Express } from 'express';
 import type Database from 'better-sqlite3';
+import { randomUUID } from 'node:crypto';
 import { parseWithOpenAI, type EditCommand } from './aiProvider.js';
 
 export function registerAIRoute(app:Express,db:Database.Database){
@@ -13,10 +14,9 @@ export function registerAIRoute(app:Express,db:Database.Database){
       if(!target){for(const track of out.tracks){if(track.clips?.length){owner=track;target=track.clips[0];break;}}}
       if(!target)return res.json({provider:'local',command:{type:'noop',message:'لا يوجد مقطع يمكن تعديله.'},timeline});
       target.effects=Array.isArray(target.effects)?target.effects:[];
-
       if(command.type==='split'){
         const t=Number(command.time);if(!(t>target.startTime&&t<target.endTime))return res.json({provider:'local',command:{type:'noop',message:`نقطة التقسيم ${t} ثانية خارج المقطع.`},timeline});
-        const ratio=(t-target.startTime)/(target.endTime-target.startTime);const second=structuredClone(target);second.id=crypto.randomUUID?.()||`${Date.now()}-split`;second.startTime=t;second.endTime=target.endTime;second.duration=second.endTime-second.startTime;if(owner.type==='video'||owner.type==='audio'){second.trimStart=target.trimStart+(target.trimEnd-target.trimStart)*ratio;target.endTime=t;target.duration=t-target.startTime;}owner.clips.splice(owner.clips.indexOf(target),1,target,second);
+        const ratio=(t-target.startTime)/(target.endTime-target.startTime);const second=structuredClone(target);second.id=randomUUID();second.startTime=t;second.endTime=target.endTime;second.duration=second.endTime-second.startTime;if(owner.type==='video'||owner.type==='audio'){second.trimStart=target.trimStart+(target.trimEnd-target.trimStart)*ratio;target.endTime=t;target.duration=t-target.startTime;}owner.clips.splice(owner.clips.indexOf(target),1,target,second);
       } else if(command.type==='delete') owner.clips=owner.clips.filter((c:any)=>c.id!==target.id);
       else if(command.type==='move'){const s=Math.max(0,Number(command.startTime||0));target.startTime=s;target.endTime=s+target.duration;}
       else if(command.type==='trim_start'){const s=Math.max(0,Number(command.time||0));if(s>=target.trimEnd)return res.json({provider:'local',command:{type:'noop',message:'قيمة القص أكبر من مدة المقطع.'},timeline});const d=s-target.trimStart;target.trimStart=s;target.startTime=Math.max(0,target.startTime+d);target.duration=Math.max(.01,target.endTime-target.startTime);}
@@ -32,7 +32,6 @@ export function registerAIRoute(app:Express,db:Database.Database){
       else if(command.type==='grayscale')target.grayscale=!target.grayscale;
       else if(command.type==='fade_in')target.fadeIn=Math.max(.1,Number(command.value??1));
       else if(command.type==='fade_out')target.fadeOut=Math.max(.1,Number(command.value??1));
-
       out.tracks.forEach((t:any)=>t.clips.sort((a:any,b:any)=>a.startTime-b.startTime));out.duration=Math.max(0,...out.tracks.flatMap((t:any)=>t.clips.map((c:any)=>c.endTime)));
       const history=JSON.parse(p.history_json).slice(0,Number(p.history_index)+1);history.push(out);const bounded=history.slice(-100);db.prepare('UPDATE projects SET timeline_json=?,history_json=?,history_index=?,updated_at=? WHERE id=?').run(JSON.stringify(out),JSON.stringify(bounded),bounded.length-1,new Date().toISOString(),projectId);
       res.json({provider:process.env.AI_BASE_URL||process.env.AI_API_KEY||process.env.OPENAI_API_KEY?'ai':'local',command,timeline:out});
