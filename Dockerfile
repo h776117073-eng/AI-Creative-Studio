@@ -1,14 +1,8 @@
 FROM node:22-bookworm-slim AS build
 
 WORKDIR /app
-
-COPY package*.json ./
-COPY apps/api/package*.json apps/api/
-COPY packages/*/package*.json packages/
-
-RUN npm ci
-
 COPY . .
+RUN npm ci
 RUN npm run build:api
 
 FROM node:22-bookworm-slim
