@@ -58,7 +58,7 @@ jobs:
 
       - name: Run native Kotlin/Compose unit tests
         working-directory: android-build/clearcut
-        run: ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace -Dorg.gradle.dependency.verification=off
+        run: ./gradlew :app:testQaUnitTest --no-daemon --stacktrace -Dorg.gradle.dependency.verification=off
 
       - name: Build installable debug APK
         working-directory: android-build/clearcut
@@ -86,7 +86,7 @@ jobs:
         with:
           name: ai-creative-studio-kotlin-test-reports
           path: |
-            android-build/clearcut/app/build/reports/tests/testDebugUnitTest/**
-            android-build/clearcut/app/build/test-results/testDebugUnitTest/**
+            android-build/clearcut/app/build/reports/tests/testQaUnitTest/**
+            android-build/clearcut/app/build/test-results/testQaUnitTest/**
           if-no-files-found: ignore
           retention-days: 7
