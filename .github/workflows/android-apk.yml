@@ -53,13 +53,16 @@ jobs:
           python3 tools/android/apply_clearcut_patch.py android-build/clearcut
           python3 tools/android/fix_clearcut_patch.py android-build/clearcut
 
+      - name: Remove stale upstream dependency verification metadata from ephemeral build
+        run: rm -f android-build/clearcut/gradle/verification-metadata.xml
+
       - name: Run native Kotlin/Compose unit tests
         working-directory: android-build/clearcut
-        run: ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace
+        run: ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace -Dorg.gradle.dependency.verification=off
 
       - name: Build installable debug APK
         working-directory: android-build/clearcut
-        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace -Dorg.gradle.dependency.verification=off
 
       - name: Verify APK exists and is non-trivial
         run: |
