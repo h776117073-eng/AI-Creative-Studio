@@ -31,17 +31,18 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK components
+      - name: Install stable Android SDK components
         run: |
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platforms;android-37" "platforms;android-36" "build-tools;36.0.0" "build-tools;35.0.0" "emulator" "platform-tools"
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
 
       - name: Check out pinned ClearCut native editor base
         env:
           CLEARCUT_SHA: ba6d118722b23386567c84bce8442a400713748b
         run: |
-          git clone https://github.com/SysAdminDoc/ClearCut.git android-build/clearcut
+          git clone --depth 1 --branch master https://github.com/SysAdminDoc/ClearCut.git android-build/clearcut
           cd android-build/clearcut
+          git fetch --depth 1 origin "$CLEARCUT_SHA"
           git checkout "$CLEARCUT_SHA"
           test "$(git rev-parse HEAD)" = "$CLEARCUT_SHA"
 
