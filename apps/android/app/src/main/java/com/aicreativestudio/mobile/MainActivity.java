@@ -1,6 +1,5 @@
 package com.aicreativestudio.mobile;
 
-import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
 import android.net.Uri;
@@ -39,7 +38,8 @@ public class MainActivity extends AppCompatActivity {
                 fileCallback = callback;
                 Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
                 i.addCategory(Intent.CATEGORY_OPENABLE);
-                i.setType("video/*");
+                i.setType("*/*");
+                i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"video/*","audio/*","image/*"});
                 i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
                 startActivityForResult(i, FILE_PICKER);
                 return true;
@@ -49,19 +49,21 @@ public class MainActivity extends AppCompatActivity {
         webView.loadUrl(WEB_URL);
     }
 
+    @Override public void onBackPressed() {
+        if (webView.canGoBack()) webView.goBack(); else super.onBackPressed();
+    }
+
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode != FILE_PICKER || fileCallback == null) return;
         Uri[] results = null;
         if (resultCode == Activity.RESULT_OK && data != null) {
             if (data.getClipData() != null) {
-                int n = data.getClipData().getItemCount();
-                results = new Uri[n];
+                int n = data.getClipData().getItemCount(); results = new Uri[n];
                 for (int i = 0; i < n; i++) results[i] = data.getClipData().getItemAt(i).getUri();
             } else if (data.getData() != null) results = new Uri[]{data.getData()};
         }
-        fileCallback.onReceiveValue(results);
-        fileCallback = null;
+        fileCallback.onReceiveValue(results); fileCallback = null;
     }
 
     private class NativeBridge {
@@ -70,9 +72,7 @@ public class MainActivity extends AppCompatActivity {
             long duration = kind.equals("success") ? 35 : kind.equals("error") ? 90 : 20;
             if (Build.VERSION.SDK_INT >= 26) v.vibrate(VibrationEffect.createOneShot(duration, VibrationEffect.DEFAULT_AMPLITUDE)); else v.vibrate(duration);
         }
-        @JavascriptInterface public String understandCommand(String text) {
-            return LocalCommandModel.infer(text);
-        }
+        @JavascriptInterface public String understandCommand(String text) { return LocalCommandModel.infer(text); }
         @JavascriptInterface public boolean isAndroid() { return true; }
     }
 }
