@@ -12,8 +12,8 @@ s = gradle.read_text()
 s = s.replace('applicationId = "com.novacut.editor"', 'applicationId = "com.aicreativestudio.mobile"')
 s = s.replace('versionName = "3.81.0"', 'versionName = "1.0.0"')
 s = s.replace('versionCode = 299', 'versionCode = 1')
-s = s.replace('compileSdk = 37', 'compileSdk = 36')
-s = s.replace('targetSdk = 37', 'targetSdk = 36')
+s = s.replace('compileSdk = 37', 'compileSdk = 37')
+s = s.replace('targetSdk = 37', 'targetSdk = 37')
 gradle.write_text(s)
 
 strings = APP / "src/main/res/values/strings.xml"
