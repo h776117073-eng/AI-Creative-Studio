@@ -7,14 +7,13 @@ APP = ROOT / "app"
 JAVA = APP / "src/main/java/com/novacut/editor"
 UI = JAVA / "ui/editor"
 
-# Keep the upstream MIT-licensed editor intact and patch only the product shell.
-# ClearCut is pinned by the workflow to a known commit.
-
 gradle = APP / "build.gradle.kts"
 s = gradle.read_text()
 s = s.replace('applicationId = "com.novacut.editor"', 'applicationId = "com.aicreativestudio.mobile"')
 s = s.replace('versionName = "3.81.0"', 'versionName = "1.0.0"')
 s = s.replace('versionCode = 299', 'versionCode = 1')
+s = s.replace('compileSdk = 37', 'compileSdk = 36')
+s = s.replace('targetSdk = 37', 'targetSdk = 36')
 gradle.write_text(s)
 
 strings = APP / "src/main/res/values/strings.xml"
@@ -22,8 +21,6 @@ ss = strings.read_text()
 ss = re.sub(r'(<string name="app_name">).*?(</string>)', r'\1AI Creative Studio\2', ss, count=1)
 strings.write_text(ss)
 
-# Lightweight native device policy: local for capable devices, cloud-advisory for
-# heavier operations. The actual editor engines remain the source of truth.
 (UI / "AssistantWorkloadPolicy.kt").write_text(r'''package com.novacut.editor.ui.editor
 
 import android.app.ActivityManager
@@ -48,8 +45,6 @@ object AssistantWorkloadPolicy {
 
 import android.content.Context
 import com.novacut.editor.model.*
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 
 suspend fun EditorViewModel.executeAssistantCommand(context: Context, request: AssistantRequest) {
     val state = state.value
@@ -63,13 +58,7 @@ suspend fun EditorViewModel.executeAssistantCommand(context: Context, request: A
             Regex("(قسّم|قسم|split)").containsMatchIn(part) -> splitAtPlayhead()
             Regex("(احذف|حذف|delete)").containsMatchIn(part) -> deleteSelectedClip()
             Regex("(كرر|تكرار|duplicate)").containsMatchIn(part) -> duplicateSelectedClip()
-            Regex("(اقلب افقيا|قلب افقي)").containsMatchIn(part) -> {
-                val id = state.selectedClipId
-                if (id != null) {
-                    val clip = state.tracks.flatMap { it.clips }.firstOrNull { it.id == id }
-                    if (clip != null) updateClipKeyframes(clip.keyframes + Keyframe(0, KeyframeProperty.SCALE_X, -1f))
-                }
-            }
+            Regex("(اقلب افقيا|قلب افقي)").containsMatchIn(part) -> showTransformPanel()
             Regex("(سرعه|سرعة|speed)\\s*(?:الى|إلى)?\\s*(\\d+(?:\\.\\d+)?)").containsMatchIn(part) -> {
                 val m = Regex("(\\d+(?:\\.\\d+)?)").find(part)?.groupValues?.get(1)?.toFloatOrNull()
                 val id = state.selectedClipId
@@ -91,33 +80,25 @@ suspend fun EditorViewModel.executeAssistantCommand(context: Context, request: A
                 }
             }
             Regex("(منحنى لوني|منحنيات الوان|color curve|s curve)").containsMatchIn(part) -> {
-                val id = state.selectedClipId
-                if (id != null) {
-                    val grade = ColorGrade(
-                        enabled = true,
-                        curves = ColorCurves(
-                            master = listOf(CurvePoint(0f, 0f), CurvePoint(.25f, .18f), CurvePoint(.5f, .52f), CurvePoint(.75f, .84f), CurvePoint(1f, 1f))
-                        )
-                    )
-                    updateClipColorGrade(grade)
-                }
+                if (state.selectedClipId != null) updateClipColorGrade(
+                    ColorGrade(enabled = true, curves = ColorCurves(
+                        master = listOf(CurvePoint(0f, 0f), CurvePoint(.25f, .18f), CurvePoint(.5f, .52f), CurvePoint(.75f, .84f), CurvePoint(1f, 1f))
+                    ))
+                )
             }
             Regex("(ليليه|ليليه سينمائيه|ليلي سينمائي|night|cinematic blue)").containsMatchIn(part) -> {
-                val id = state.selectedClipId
-                if (id != null) {
-                    updateClipColorGrade(
-                        ColorGrade(
-                            enabled = true,
-                            liftR = -.03f, liftG = -.02f, liftB = .01f,
-                            gammaR = .96f, gammaG = .99f, gammaB = 1.06f,
-                            gainR = .84f, gainG = .92f, gainB = 1.16f,
-                            curves = ColorCurves(
-                                master = listOf(CurvePoint(0f, .02f), CurvePoint(.5f, .42f), CurvePoint(1f, .94f)),
-                                blue = listOf(CurvePoint(0f, .06f), CurvePoint(.5f, .58f), CurvePoint(1f, 1f))
-                            )
+                if (state.selectedClipId != null) updateClipColorGrade(
+                    ColorGrade(
+                        enabled = true,
+                        liftR = -.03f, liftG = -.02f, liftB = .01f,
+                        gammaR = .96f, gammaG = .99f, gammaB = 1.06f,
+                        gainR = .84f, gainG = .92f, gainB = 1.16f,
+                        curves = ColorCurves(
+                            master = listOf(CurvePoint(0f, .02f), CurvePoint(.5f, .42f), CurvePoint(1f, .94f)),
+                            blue = listOf(CurvePoint(0f, .06f), CurvePoint(.5f, .58f), CurvePoint(1f, 1f))
                         )
                     )
-                }
+                )
             }
             Regex("(قناع|mask)").containsMatchIn(part) -> { addMask(MaskType.ELLIPSE); showMaskEditor() }
             Regex("(انتقال|transition|dissolve|fade)").containsMatchIn(part) -> {
@@ -125,11 +106,11 @@ suspend fun EditorViewModel.executeAssistantCommand(context: Context, request: A
                 if (id != null) setTransition(id, Transition(TransitionType.DISSOLVE, 500L, TransitionEasing.EASE_IN_OUT))
             }
             Regex("(كيفريم|keyframe)").containsMatchIn(part) -> {
-                addKeyframe(KeyframeProperty.POSITION_X, 0L, 0f)
-                addKeyframe(KeyframeProperty.POSITION_Y, 0L, 0f)
+                addKeyframe(KeyframeProperty.POSITION_X, playheadMs.value, 0f)
+                addKeyframe(KeyframeProperty.POSITION_Y, playheadMs.value, 0f)
             }
             Regex("(نص|title|caption)").containsMatchIn(part) -> {
-                val text = part.substringAfter(Regex("نص|title|caption"), "نص جديد").trim().ifBlank { "نص جديد" }
+                val text = part.replaceFirst(Regex("^.*?(?:نص|title|caption)\\s*"), "").trim().ifBlank { "نص جديد" }
                 addTextOverlay(TextOverlay(text = text, startTimeMs = playheadMs.value, endTimeMs = playheadMs.value + 3000L, animationIn = TextAnimation.FADE))
             }
             Regex("(اصنع ترجمه|ترجمه تلقائيه|auto caption|captions)").containsMatchIn(part) -> showPanel(PanelId.CAPTION_EDITOR)
@@ -141,16 +122,12 @@ suspend fun EditorViewModel.executeAssistantCommand(context: Context, request: A
             Regex("(ازاله خلفيه|خلفيه|background removal)").containsMatchIn(part) -> showAiToolsPanel()
             Regex("(صوت|audio|volume)").containsMatchIn(part) -> showAudioMixer()
             Regex("(الوان|color|grading)").containsMatchIn(part) -> showColorGrading()
-            else -> {
-                // Complex commands stay routed to the closest native panel. This keeps
-                // the user in the editor and never claims a command was executed when it was not.
-                when {
-                    part.contains("سرعه") || part.contains("optical") -> showSpeedCurveEditor()
-                    part.contains("قناع") -> showMaskEditor()
-                    part.contains("صوت") -> showAudioPanel()
-                    part.contains("لون") -> showColorGrading()
-                    else -> showAiToolsPanel()
-                }
+            else -> when {
+                part.contains("سرعه") || part.contains("optical") -> showSpeedCurveEditor()
+                part.contains("قناع") -> showMaskEditor()
+                part.contains("صوت") -> showAudioPanel()
+                part.contains("لون") -> showColorGrading()
+                else -> showAiToolsPanel()
             }
         }
     }
@@ -170,7 +147,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
 
 @Stable
@@ -190,7 +166,6 @@ fun AssistantEditorScreen(onBack: () -> Unit, viewModel: EditorViewModel = hiltV
             modifier = Modifier.align(Alignment.BottomEnd).padding(18.dp),
             containerColor = MaterialTheme.colorScheme.primary
         ) { Icon(Icons.Filled.SmartToy, contentDescription = "مساعد المونتاج") }
-
         if (open) {
             ModalBottomSheet(onDismissRequest = { open = false }) {
                 Column(Modifier.fillMaxWidth().padding(16.dp)) {
@@ -198,26 +173,16 @@ fun AssistantEditorScreen(onBack: () -> Unit, viewModel: EditorViewModel = hiltV
                     Spacer(Modifier.height(8.dp))
                     Text("نفّذ أوامر بسيطة أو مركبة: قص، حركة كاميرا، منحنى لوني، ليل سينمائي أزرق، نص، قناع، صوت، انتقالات، كيفريمات…", style = MaterialTheme.typography.bodyMedium)
                     Spacer(Modifier.height(12.dp))
-                    OutlinedTextField(
-                        value = text,
-                        onValueChange = { text = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        minLines = 2,
+                    OutlinedTextField(value = text, onValueChange = { text = it }, modifier = Modifier.fillMaxWidth(), minLines = 2,
                         trailingIcon = { Icon(Icons.Filled.Mic, contentDescription = "صوت") },
-                        placeholder = { Text("مثال: قص عند المؤشر ثم أضف حركة كاميرا واجعل الإضاءة ليلية سينمائية زرقاء") }
-                    )
+                        placeholder = { Text("مثال: قص عند المؤشر ثم أضف حركة كاميرا واجعل الإضاءة ليلية سينمائية زرقاء") })
                     Spacer(Modifier.height(12.dp))
-                    Button(
-                        onClick = {
-                            val value = text.trim()
-                            if (value.isNotEmpty()) {
-                                request = AssistantRequest(System.currentTimeMillis(), value)
-                                text = ""
-                                scope.launch { kotlinx.coroutines.delay(180); open = false }
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) { Icon(Icons.Filled.Send, contentDescription = null); Spacer(Modifier.width(8.dp)); Text("تنفيذ") }
+                    Button(onClick = {
+                        val value = text.trim()
+                        if (value.isNotEmpty()) { request = AssistantRequest(System.currentTimeMillis(), value); text = ""; scope.launch { kotlinx.coroutines.delay(180); open = false } }
+                    }, modifier = Modifier.fillMaxWidth()) {
+                        Icon(Icons.Filled.Send, contentDescription = null); Spacer(Modifier.width(8.dp)); Text("تنفيذ")
+                    }
                     Spacer(Modifier.height(20.dp))
                 }
             }
@@ -226,7 +191,6 @@ fun AssistantEditorScreen(onBack: () -> Unit, viewModel: EditorViewModel = hiltV
 }
 ''')
 
-# Patch EditorScreen to execute assistant requests without changing the rest of ClearCut.
 editor = UI / "EditorScreen.kt"
 e = editor.read_text()
 old = "fun EditorScreen(\n    modifier: Modifier = Modifier,\n    onBack: () -> Unit = {},\n    viewModel: EditorViewModel = hiltViewModel()\n) {"
@@ -235,19 +199,16 @@ if old not in e:
     raise SystemExit("EditorScreen signature changed upstream; patch not applied")
 e = e.replace(old, new, 1)
 marker = "    val state by viewModel.state.collectAsStateWithLifecycle()\n"
-insert = marker + "    LaunchedEffect(assistantCommand?.id) { assistantCommand?.let { request -> viewModel.executeAssistantCommand(context = LocalContext.current, request = request) } }\n"
-# LocalContext is already imported and context is declared later, so use application context lazily via LocalContext here.
+insert = marker + "    val assistantContext = LocalContext.current\n    LaunchedEffect(assistantCommand?.id) { assistantCommand?.let { request -> viewModel.executeAssistantCommand(assistantContext, request) } }\n"
 e = e.replace(marker, insert, 1)
 editor.write_text(e)
 
-# Patch MainActivity routing to use our wrapper in every editor route.
 main = JAVA / "MainActivity.kt"
 m = main.read_text()
 m = m.replace('import com.novacut.editor.ui.editor.EditorScreen', 'import com.novacut.editor.ui.editor.AssistantEditorScreen')
 m = m.replace('EditorScreen(\n', 'AssistantEditorScreen(\n')
 main.write_text(m)
 
-# Add a small product README inside the generated build.
 (APP / "src/main/assets").mkdir(parents=True, exist_ok=True)
 (APP / "src/main/assets/ai_creative_studio_engine.txt").write_text(
     "AI Creative Studio Android build\n"
@@ -257,4 +218,3 @@ main.write_text(m)
     "Heavy engine routing policy: device-aware local/cloud decision\n"
 )
 print("ClearCut patch applied successfully")
-''
