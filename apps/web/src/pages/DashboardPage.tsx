@@ -3,15 +3,18 @@ import { Link, useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { Plus, Video, Search, Grid3X3, List, RefreshCw } from 'lucide-react';
 
+const API = (import.meta.env.VITE_API_URL || 'https://ai-creative-studio-api-0gl6.onrender.com').replace(/\/$/, '');
+const api = (path: string) => `${API}${path}`;
+
 interface Project { id:string; name:string; createdAt:string; updatedAt:string; }
 
 export function DashboardPage(){
   const [projects,setProjects]=useState<Project[]>([]); const [search,setSearch]=useState(''); const [view,setView]=useState<'grid'|'list'>('grid'); const [loading,setLoading]=useState(true); const [error,setError]=useState(''); const [userName,setUserName]=useState('Creator'); const navigate=useNavigate();
-  async function load(){setLoading(true);setError('');try{const r=await fetch('/api/projects');if(!r.ok)throw new Error('تعذر تحميل المشاريع');setProjects(await r.json());}catch(e){setError(e instanceof Error?e.message:'تعذر تحميل المشاريع');}finally{setLoading(false);}}
+  async function load(){setLoading(true);setError('');try{const r=await fetch(api('/api/projects'));if(!r.ok)throw new Error('تعذر تحميل المشاريع');setProjects(await r.json());}catch(e){setError(e instanceof Error?e.message:'تعذر تحميل المشاريع');}finally{setLoading(false);}}
   useEffect(()=>{void load();supabase.auth.getUser().then(({data})=>{if(data.user?.user_metadata?.name)setUserName(data.user.user_metadata.name);});},[]);
   const filtered=useMemo(()=>projects.filter(p=>p.name.toLowerCase().includes(search.toLowerCase())),[projects,search]);
   async function signOut(){await supabase.auth.signOut();navigate('/auth');}
-  async function create(){const r=await fetch('/api/projects',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:'مشروع فيديو جديد'})});if(r.ok){const p=await r.json();navigate(`/project/${p.id}`);}else setError('تعذر إنشاء المشروع');}
+  async function create(){const r=await fetch(api('/api/projects'),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:'مشروع فيديو جديد'})});if(r.ok){const p=await r.json();navigate(`/project/${p.id}`);}else setError('تعذر إنشاء المشروع');}
   return <div className="h-screen w-screen bg-[#0a0a0f] overflow-y-auto text-white">
     <header className="sticky top-0 z-50 bg-surface/90 backdrop-blur-lg border-b border-border"><div className="max-w-6xl mx-auto px-5 py-4 flex items-center justify-between gap-4"><div className="flex items-center gap-3"><div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary-500 to-accent-cyan flex items-center justify-center font-bold">AI</div><div><div className="font-semibold">AI Creative Studio</div><div className="text-xs text-white/40">Integrated Video MVP</div></div></div><div className="flex items-center gap-2"><button className="btn" onClick={()=>void load()} title="تحديث"><RefreshCw className="w-4 h-4"/></button><button className="text-sm text-white/60 hover:text-white" onClick={()=>void signOut()}>خروج</button></div></div></header>
     <main className="max-w-6xl mx-auto px-5 py-8"><div className="flex items-end justify-between gap-4 mb-8 flex-wrap"><div><h1 className="text-2xl font-bold">مرحبًا {userName}</h1><p className="text-white/50 mt-1">أنشئ مشروع فيديو وابدأ التحرير مباشرة.</p></div><button className="btn btn-primary btn-lg" onClick={()=>void create()}><Plus className="w-5 h-5"/>مشروع جديد</button></div>
