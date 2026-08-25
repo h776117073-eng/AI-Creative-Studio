@@ -6,7 +6,7 @@ interface Track { id:string; type:string; name:string; clips:Clip[]; }
 interface Timeline { tracks:Track[]; duration:number; currentTime:number; }
 interface Project { id:string; name:string; timeline:Timeline; assets:Asset[]; historyIndex:number; historyLength:number; }
 
-const API = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
+const API = (import.meta.env.VITE_API_URL || 'https://ai-creative-studio-api-0gl6.onrender.com').replace(/\/$/, '');
 const api = (path:string) => `${API}${path}`;
 
 export function MvpEditor({ projectId }: { projectId: string }) {
@@ -36,7 +36,7 @@ export function MvpEditor({ projectId }: { projectId: string }) {
         if (!r.ok) throw new Error('project');
         setProject(await r.json());
         setStatus('جاهز للعمل');
-      } catch { setStatus('تعذر الاتصال بالخادم المحلي'); }
+      } catch { setStatus('تعذر الاتصال بالخادم'); }
     })();
   }, [projectId]);
 
