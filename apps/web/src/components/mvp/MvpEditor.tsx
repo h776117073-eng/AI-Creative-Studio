@@ -1,206 +1,75 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 
 interface Asset { id:string; name:string; url:string; duration:number; }
-interface Clip { id:string; assetId:string; name:string; startTime:number; endTime:number; trimStart:number; trimEnd:number; duration:number; }
-interface Track { id:string; type:string; name:string; clips:Clip[]; }
-interface Timeline { tracks:Track[]; duration:number; currentTime:number; }
+interface Clip { id:string; assetId:string; name:string; startTime:number; endTime:number; trimStart:number; trimEnd:number; duration:number; speed?:number; opacity?:number; effects?:string[]; animations?:string[]; keyframes?:any[]; }
+interface Track { id:string; type:string; name:string; clips:Clip[]; muted?:boolean; locked?:boolean; visible?:boolean; height?:number; order?:number; }
+interface Timeline { tracks:Track[]; duration:number; currentTime:number; markers?:{id:string,time:number,label:string,color?:string}[]; }
 interface Project { id:string; name:string; timeline:Timeline; assets:Asset[]; historyIndex:number; historyLength:number; }
 
-const API = (import.meta.env.VITE_API_URL || 'https://ai-creative-studio-api-0gl6.onrender.com').replace(/\/$/, '');
-const api = (path:string) => `${API}${path}`;
+type Category = 'media'|'cut'|'audio'|'text'|'effects'|'transitions'|'speed'|'adjust'|'canvas'|'animation'|'ai';
+type ToolAction = { id:string; label:string; description?:string; command?:string; value?:string };
 
-type Tool = 'split'|'delete'|'trim-start'|'trim-end'|'move';
+const API=(import.meta.env.VITE_API_URL||'https://ai-creative-studio-api-0gl6.onrender.com').replace(/\/$/,'');
+const api=(path:string)=>`${API}${path}`;
 
-export function MvpEditor({ projectId }: { projectId:string }) {
-  const [project,setProject]=useState<Project|null>(null);
-  const [status,setStatus]=useState('جاري تجهيز المحرر…');
-  const [command,setCommand]=useState('');
-  const [selectedClip,setSelectedClip]=useState<string|null>(null);
-  const [playing,setPlaying]=useState(false);
-  const [settingsOpen,setSettingsOpen]=useState(false);
-  const [helpOpen,setHelpOpen]=useState(false);
-  const [tool,setTool]=useState<Tool>('split');
-  const [toolValue,setToolValue]=useState('2');
-  const videoRef=useRef<HTMLVideoElement|null>(null);
-  const inputRef=useRef<HTMLInputElement|null>(null);
+const CATEGORIES:{id:Category;label:string;icon:string}[]=[
+  {id:'media',label:'الوسائط',icon:'▣'}, {id:'cut',label:'تحرير',icon:'✂'}, {id:'audio',label:'الصوت',icon:'♫'},
+  {id:'text',label:'النص',icon:'T'}, {id:'effects',label:'التأثيرات',icon:'✦'}, {id:'transitions',label:'الانتقالات',icon:'↔'},
+  {id:'speed',label:'السرعة',icon:'⌁'}, {id:'adjust',label:'الضبط',icon:'◐'}, {id:'canvas',label:'التحويل',icon:'□'},
+  {id:'animation',label:'الحركة',icon:'◆'}, {id:'ai',label:'AI',icon:'AI'},
+];
 
-  const videoTrack=useMemo(()=>project?.timeline.tracks.find(t=>t.type==='video'),[project]);
-  const clips=videoTrack?.clips||[];
-  const selected=clips.find(c=>c.id===selectedClip)||clips[0];
-  const selectedAsset=project?.assets.find(a=>a.id===selected?.assetId);
+const TOOLS:Record<Category,ToolAction[]>={
+  media:[{id:'import',label:'استيراد',description:'إضافة فيديو أو صوت',value:'import'},{id:'replace',label:'استبدال',description:'استبدال المقطع المحدد',value:'replace'},{id:'duplicate',label:'تكرار',command:'كرر المقطع'},{id:'freeze',label:'تجميد',command:'جمّد الإطار'},{id:'snapshot',label:'لقطة',value:'snapshot'}],
+  cut:[{id:'split',label:'تقسيم',command:'split'},{id:'trim-start',label:'قص البداية',command:'trim-start'},{id:'trim-end',label:'قص النهاية',command:'trim-end'},{id:'delete',label:'حذف',command:'delete'},{id:'ripple',label:'حذف متتابع',command:'ripple-delete'},{id:'move',label:'تحريك',command:'move'},{id:'lift',label:'رفع من المسار',command:'lift'},{id:'mark-in',label:'نقطة دخول',command:'mark-in'},{id:'mark-out',label:'نقطة خروج',command:'mark-out'}],
+  audio:[{id:'volume',label:'مستوى الصوت',value:'volume'},{id:'mute',label:'كتم',command:'اكتم الصوت'},{id:'fade-in',label:'تلاشي دخول',command:'تلاشي الصوت في البداية'},{id:'fade-out',label:'تلاشي خروج',command:'تلاشي الصوت في النهاية'},{id:'voice',label:'تحسين الصوت',command:'حسّن الصوت'},{id:'noise',label:'إزالة الضوضاء',command:'أزل ضوضاء الصوت'},{id:'ducking',label:'خفض تلقائي',command:'اخفض الموسيقى تحت الكلام'},{id:'detach',label:'فصل الصوت',command:'افصل الصوت عن الفيديو'}],
+  text:[{id:'title',label:'عنوان',command:'أضف عنوانًا'},{id:'subtitle',label:'ترجمة',command:'أضف ترجمة'},{id:'caption',label:'شرح',command:'أضف شرحًا'},{id:'font',label:'خط',value:'font'},{id:'style',label:'نمط',value:'text-style'},{id:'position',label:'موضع',value:'text-position'},{id:'outline',label:'حدود',value:'text-outline'},{id:'shadow',label:'ظل',value:'text-shadow'}],
+  effects:[{id:'blur',label:'تمويه',command:'طبّق تمويه'},{id:'sharpen',label:'حدة',command:'زد حدة الفيديو'},{id:'vignette',label:'تغميق الأطراف',command:'طبّق Vignette'},{id:'cinematic',label:'سينمائي',command:'طبّق تأثير سينمائي'},{id:'bw',label:'أبيض وأسود',command:'حوّل لأبيض وأسود'},{id:'chroma',label:'Chroma',command:'افتح Chroma Key'},{id:'glitch',label:'تشويش',command:'طبّق Glitch'},{id:'grain',label:'تحبب',command:'أضف Film Grain'}],
+  transitions:[{id:'fade',label:'تلاشي',command:'أضف انتقال Fade'},{id:'dissolve',label:'Dissolve',command:'أضف انتقال Dissolve'},{id:'slide',label:'انزلاق',command:'أضف انتقال Slide'},{id:'zoom',label:'Zoom',command:'أضف انتقال Zoom'},{id:'wipe',label:'مسح',command:'أضف انتقال Wipe'},{id:'duration',label:'المدة',value:'transition-duration'}],
+  speed:[{id:'slow',label:'تبطيء',command:'بطّئ المقطع إلى 50%'},{id:'fast',label:'تسريع',command:'سرّع المقطع إلى 200%'},{id:'normal',label:'100%',command:'اجعل السرعة 100%'},{id:'curve',label:'منحنى',command:'افتح منحنى السرعة'},{id:'reverse',label:'عكس',command:'اعكس المقطع'},{id:'ramp',label:'تدرج',command:'أضف Speed Ramp'}],
+  adjust:[{id:'brightness',label:'السطوع',value:'brightness'},{id:'contrast',label:'التباين',value:'contrast'},{id:'saturation',label:'التشبع',value:'saturation'},{id:'temperature',label:'الحرارة',value:'temperature'},{id:'tint',label:'الصبغة',value:'tint'},{id:'highlights',label:'الإضاءات',value:'highlights'},{id:'shadows',label:'الظلال',value:'shadows'},{id:'reset',label:'إعادة ضبط',command:'أعد ضبط الألوان'}],
+  canvas:[{id:'crop',label:'قص الإطار',command:'افتح Crop'},{id:'rotate',label:'تدوير',value:'rotate'},{id:'flip-h',label:'قلب أفقي',command:'اقلب أفقيًا'},{id:'flip-v',label:'قلب رأسي',command:'اقلب رأسيًا'},{id:'fit',label:'ملاءمة',command:'ملاءمة داخل الإطار'},{id:'fill',label:'ملء',command:'ملء الإطار'},{id:'ratio',label:'نسبة الأبعاد',value:'aspect-ratio'},{id:'background',label:'الخلفية',value:'background'}],
+  animation:[{id:'in',label:'دخول',command:'أضف حركة دخول'},{id:'out',label:'خروج',command:'أضف حركة خروج'},{id:'combo',label:'مركبة',command:'أضف حركة مركبة'},{id:'keyframe',label:'Keyframe',command:'أضف Keyframe'},{id:'pan',label:'تحريك',command:'أضف حركة Pan'},{id:'kenburns',label:'Ken Burns',command:'أضف Ken Burns'}],
+  ai:[{id:'captions',label:'ترجمة تلقائية',command:'أنشئ ترجمة تلقائية'},{id:'silence',label:'حذف الصمت',command:'احذف فترات الصمت'},{id:'highlight',label:'أهم اللقطات',command:'استخرج أهم اللقطات'},{id:'beats',label:'مزامنة الإيقاع',command:'زامن القطع مع الإيقاع'},{id:'smart-cut',label:'قص ذكي',command:'طبّق قصًا ذكيًا'},{id:'remove-bg',label:'إزالة الخلفية',command:'أزل خلفية الشخص'},{id:'enhance',label:'تحسين',command:'حسّن جودة الفيديو'}],
+};
 
-  useEffect(()=>{
-    (async()=>{
-      try{
-        let id=projectId;
-        if(id==='new'){
-          const created=await fetch(api('/api/projects'),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:'مشروع فيديو جديد'})});
-          if(!created.ok) throw new Error('create');
-          id=(await created.json()).id;
-          window.history.replaceState({},'',`/project/${id}`);
-        }
-        const r=await fetch(api(`/api/projects/${id}`));
-        if(!r.ok) throw new Error('project');
-        setProject(await r.json());
-        setStatus('جاهز');
-      }catch{setStatus('تعذر الاتصال بالخادم');}
-    })();
-  },[projectId]);
+function displayTracks(timeline?:Timeline):Track[]{
+  const actual=timeline?.tracks||[];
+  const virtual:Track[]=[{id:'virtual-overlay',type:'overlay',name:'Overlay',clips:[],height:58,muted:false,locked:false,visible:true,order:10},{id:'virtual-text',type:'text',name:'Text / Captions',clips:[],height:58,muted:false,locked:false,visible:true,order:11}];
+  const types=new Set(actual.map(t=>t.type));
+  return [...actual,...virtual.filter(t=>!types.has(t.type))].sort((a,b)=>(a.order||0)-(b.order||0));
+}
 
-  useEffect(()=>{
-    if(selectedAsset&&videoRef.current){
-      const desired=api(selectedAsset.url);
-      if(videoRef.current.src!==desired) videoRef.current.src=desired;
-    }
-  },[selectedAsset]);
+export function MvpEditor({projectId}:{projectId:string}){
+  const [project,setProject]=useState<Project|null>(null); const [status,setStatus]=useState('جاري تجهيز المحرر…'); const [command,setCommand]=useState('');
+  const [selectedClip,setSelectedClip]=useState<string|null>(null); const [activeCategory,setActiveCategory]=useState<Category>('media'); const [assistantOpen,setAssistantOpen]=useState(false);
+  const [settingsOpen,setSettingsOpen]=useState(false); const [helpOpen,setHelpOpen]=useState(false); const [toolPopover,setToolPopover]=useState<string|null>(null);
+  const [toolValue,setToolValue]=useState('2'); const [zoom,setZoom]=useState(1); const [playhead,setPlayhead]=useState(0); const [chat,setChat]=useState<{role:'user'|'assistant';text:string}[]>([]);
+  const [drag,setDrag]=useState<{id:string,startX:number,original:number}|null>(null); const videoRef=useRef<HTMLVideoElement|null>(null); const inputRef=useRef<HTMLInputElement|null>(null); const timelineRef=useRef<HTMLDivElement|null>(null);
+  const tracks=useMemo(()=>displayTracks(project?.timeline),[project]); const videoTrack=useMemo(()=>project?.timeline.tracks.find(t=>t.type==='video'),[project]); const clips=videoTrack?.clips||[];
+  const selected=clips.find(c=>c.id===selectedClip)||clips[0]; const selectedAsset=project?.assets.find(a=>a.id===selected?.assetId); const duration=Math.max(project?.timeline.duration||0,1); const pxPerSecond=80*zoom; const timelineWidth=Math.max(900,duration*pxPerSecond);
 
-  async function refresh(){
-    if(!project) return;
-    const r=await fetch(api(`/api/projects/${project.id}`));
-    if(r.ok) setProject(await r.json());
-  }
+  useEffect(()=>{(async()=>{try{let id=projectId;if(id==='new'){const created=await fetch(api('/api/projects'),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:'مشروع فيديو جديد'})});if(!created.ok)throw new Error();id=(await created.json()).id;window.history.replaceState({},'',`/project/${id}`);}const r=await fetch(api(`/api/projects/${id}`));if(!r.ok)throw new Error();const data=await r.json();setProject(data);const first=data?.timeline?.tracks?.find((t:Track)=>t.type==='video')?.clips?.[0];if(first)setSelectedClip(first.id);setStatus('جاهز للعمل');}catch{setStatus('تعذر الاتصال بالخادم');}})();},[projectId]);
+  useEffect(()=>{if(selectedAsset&&videoRef.current){const src=api(selectedAsset.url);if(videoRef.current.src!==src)videoRef.current.src=src;}},[selectedAsset]);
 
-  async function upload(files:FileList|null){
-    if(!files?.length||!project) return;
-    setStatus('جاري استيراد الفيديو…');
-    for(const file of Array.from(files)){
-      const form=new FormData(); form.append('file',file);
-      const r=await fetch(api(`/api/projects/${project.id}/upload`),{method:'POST',body:form});
-      if(!r.ok){setStatus('فشل استيراد الفيديو');return;}
-      setProject(await r.json());
-    }
-    setStatus('تم الاستيراد');
-  }
+  useEffect(()=>{const onMove=(e:PointerEvent)=>{if(!drag)return;const delta=(e.clientX-drag.startX)/pxPerSecond;const next=Math.max(0,drag.original+delta);setProject(p=>p?{...p,timeline:{...p.timeline,tracks:p.timeline.tracks.map(t=>t.type==='video'?{...t,clips:t.clips.map(c=>c.id===drag.id?{...c,startTime:next,endTime:next+c.duration}:c)}:t)}}:p);};const onUp=()=>{if(!drag)return;const moved=clips.find(c=>c.id===drag.id);if(moved)commandRequest(`انقل المقطع إلى ${moved.startTime.toFixed(2)}`);setDrag(null);};window.addEventListener('pointermove',onMove);window.addEventListener('pointerup',onUp);return()=>{window.removeEventListener('pointermove',onMove);window.removeEventListener('pointerup',onUp);};});
 
-  async function commandRequest(text:string){
-    if(!project||!text.trim()) return;
-    setStatus('جاري التنفيذ…');
-    try{
-      const r=await fetch(api(`/api/projects/${project.id}/ai-command`),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text,clipId:selected?.id})});
-      const d=await r.json();
-      if(!r.ok){setStatus(d?.error||'فشل تنفيذ الأمر');return;}
-      setProject(p=>p?{...p,timeline:d.timeline}:p);
-      setStatus(d.command?.message||'تم تنفيذ الأمر');
-      setCommand('');
-    }catch{setStatus('تعذر تنفيذ الأمر');}
-  }
+  async function upload(files:FileList|null){if(!files?.length||!project)return;setStatus('جاري استيراد الوسائط…');for(const file of Array.from(files)){const form=new FormData();form.append('file',file);const r=await fetch(api(`/api/projects/${project.id}/upload`),{method:'POST',body:form});if(!r.ok){setStatus('فشل استيراد الوسائط');return;}const data=await r.json();setProject(data);const last=data?.timeline?.tracks?.find((t:Track)=>t.type==='video')?.clips?.at(-1);if(last)setSelectedClip(last.id);}setStatus('تم الاستيراد');}
+  async function commandRequest(text:string){const clean=text.trim();if(!project||!clean)return;setChat(prev=>[...prev,{role:'user',text:clean}]);setStatus('جاري تنفيذ الأمر…');try{const r=await fetch(api(`/api/projects/${project.id}/ai-command`),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text:clean,clipId:selected?.id})});const d=await r.json();if(!r.ok){setStatus(d?.error||'فشل تنفيذ الأمر');setChat(prev=>[...prev,{role:'assistant',text:d?.error||'تعذر تنفيذ الأمر.'}]);return;}setProject(p=>p?{...p,timeline:d.timeline}:p);const reply=d?.command?.message||'تم تنفيذ الأمر.';setChat(prev=>[...prev,{role:'assistant',text:reply}]);setStatus(reply);setCommand('');}catch{setStatus('تعذر تنفيذ الأمر');setChat(prev=>[...prev,{role:'assistant',text:'تعذر الوصول إلى محرك التنفيذ.'}]);}}
+  async function history(action:'undo'|'redo'){if(!project)return;const r=await fetch(api(`/api/projects/${project.id}/${action}`),{method:'POST'});if(r.ok){setProject(await r.json());setStatus(action==='undo'?'تم التراجع':'تمت الإعادة');}}
+  async function render(){if(!project||!clips.length){setStatus('أضف فيديو أولًا');return;}setStatus('جاري تصدير MP4/H.264…');const r=await fetch(api(`/api/projects/${project.id}/render`),{method:'POST'});if(!r.ok){const d=await r.json().catch(()=>({}));setStatus(d?.error||'فشل التصدير');return;}const blob=await r.blob();const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='ai-creative-studio.mp4';a.click();setTimeout(()=>URL.revokeObjectURL(url),1200);setStatus('تم تصدير MP4 بنجاح');}
+  function selectClip(c:Clip){setSelectedClip(c.id);setStatus(`تم تحديد: ${c.name}`);} function seekFromTimeline(e:React.MouseEvent){const el=timelineRef.current;if(!el||!videoRef.current)return;const rect=el.getBoundingClientRect();const x=e.clientX-rect.left+el.scrollLeft-190;const t=Math.max(0,Math.min(duration,x/pxPerSecond));setPlayhead(t);videoRef.current.currentTime=t;} function startDrag(e:React.PointerEvent,c:Clip){e.stopPropagation();if(e.button!==0)return;setSelectedClip(c.id);setDrag({id:c.id,startX:e.clientX,original:c.startTime});}
+  function runTool(tool:ToolAction){if(tool.id==='import'){inputRef.current?.click();return;}if(tool.command){const commandText=tool.id==='split'?`قسّم عند ${playhead.toFixed(2)}`:tool.command;if(['split','trim-start','trim-end','move'].includes(tool.id)){setToolPopover(null);}commandRequest(commandText);return;}setToolPopover(tool.id);}
+  const activeTools=TOOLS[activeCategory];
 
-  async function applyTool(){
-    if(!selected) { setStatus('اختر مقطعًا أولًا'); return; }
-    const n=Number(toolValue.replace(',','.'));
-    if(tool!=='delete' && (!Number.isFinite(n)||n<0)) { setStatus('أدخل قيمة صحيحة'); return; }
-    const text=tool==='split'?`قسّم عند ${n}`:tool==='delete'?'احذف المقطع':tool==='trim-start'?`قص أول ${n} ثانية`:tool==='trim-end'?`قص آخر ${n} ثانية`:`حرّك إلى ${n}`;
-    setCommand(text);
-    await commandRequest(text);
-  }
+  return <div className="h-full w-full bg-[#080a0f] text-white grid grid-rows-[10%_40%_40%_10%] overflow-hidden" dir="rtl">
+    <header className="px-3 border-b border-white/10 bg-[#11151d] flex items-center gap-3"><div className="flex items-center gap-2 min-w-0"><div className="h-9 w-9 rounded-xl bg-primary-600 flex items-center justify-center font-bold">AC</div><div className="hidden sm:block font-semibold text-sm truncate">AI Creative Studio</div></div><button className="btn btn-primary" onClick={()=>inputRef.current?.click()}>استيراد</button><input ref={inputRef} type="file" accept="video/*,audio/*" multiple className="hidden" onChange={e=>upload(e.target.files)}/><button className="btn" onClick={()=>history('undo')} disabled={!project||project.historyIndex<=0}>↶</button><button className="btn" onClick={()=>history('redo')} disabled={!project||project.historyIndex>=project.historyLength-1}>↷</button><div className="flex-1"/><span className="text-xs text-white/45 hidden lg:block truncate max-w-[30%]">{status}</span><button className="btn" onClick={()=>setHelpOpen(true)}>مساعدة</button><button className="btn" onClick={()=>setSettingsOpen(true)}>⚙</button><button className="btn btn-primary" onClick={render}>تصدير</button></header>
+    <section className="min-h-0 p-2 flex items-center justify-center bg-[#0b0e14] border-b border-white/10"><div className="h-full w-full max-w-[1400px] rounded-xl border border-white/10 bg-black overflow-hidden relative flex items-center justify-center">{selectedAsset?<video ref={videoRef} controls className="w-full h-full object-contain" onTimeUpdate={e=>setPlayhead(e.currentTarget.currentTime)}/>:<div className="text-center text-white/30"><div className="text-5xl mb-2">▶</div><div>استورد فيديو للبدء</div></div>}<div className="absolute bottom-3 left-3 rounded-lg bg-black/60 px-2 py-1 text-[11px]">{playhead.toFixed(2)}s / {duration.toFixed(2)}s</div></div></section>
+    <section ref={timelineRef} onClick={seekFromTimeline} className="min-h-0 overflow-auto bg-[#0b0e14] border-b border-white/10 relative" dir="ltr"><div style={{width:`${timelineWidth+190}px`}} className="min-h-full"><div className="sticky top-0 z-20 h-8 bg-[#11151d] border-b border-white/10 flex" onClick={e=>e.stopPropagation()}><div className="w-[190px] shrink-0 border-r border-white/10 px-3 flex items-center justify-between text-[11px] text-white/45"><span>المسارات</span><span>{Math.round(zoom*100)}%</span></div><div className="relative flex-1" style={{width:`${timelineWidth}px`}}>{Array.from({length:Math.ceil(duration)+1}).map((_,i)=><div key={i} className="absolute top-0 h-full border-l border-white/10" style={{left:`${i*pxPerSecond}px`}}><span className="absolute top-1 left-1 text-[10px] text-white/35">{i}s</span></div>)}</div></div>{tracks.map(track=><div key={track.id} className="flex border-b border-white/10" style={{minHeight:`${Math.max(track.height||60,52)}px`}} onClick={e=>e.stopPropagation()}><div className="w-[190px] shrink-0 bg-[#10141c] border-r border-white/10 p-2 flex items-center gap-2"><span className="text-[10px] px-1.5 py-1 rounded bg-white/5 text-white/50">{track.type.toUpperCase()}</span><div className="min-w-0 flex-1"><div className="text-xs font-medium truncate">{track.name}</div><div className="flex items-center gap-1 mt-1"><button className="text-[10px] text-white/40">◉</button><button className="text-[10px] text-white/40">◌</button><button className="text-[10px] text-white/40">⌕</button></div></div></div><div className="relative flex-1" style={{width:`${timelineWidth}px`,backgroundImage:'linear-gradient(to right, rgba(255,255,255,.05) 1px, transparent 1px)',backgroundSize:`${pxPerSecond}px 100%`}}>{track.clips.map(c=>{const left=c.startTime*pxPerSecond;const width=Math.max(58,c.duration*pxPerSecond);return <button key={c.id} onPointerDown={e=>startDrag(e,c)} onClick={e=>{e.stopPropagation();selectClip(c);}} className={`absolute top-1.5 h-[calc(100%-12px)] rounded-lg border px-2 text-left overflow-hidden bg-primary-700/70 ${selected?.id===c.id?'ring-2 ring-white border-white':'border-white/15'}`} style={{left,width}} title={`${c.name} ${c.duration.toFixed(2)}s`}><div className="text-[11px] font-semibold truncate">{c.name}</div><div className="text-[9px] text-white/60 mt-1">{c.duration.toFixed(2)}s</div><div className="absolute left-0 top-0 bottom-0 w-1 bg-white/20 cursor-ew-resize"/><div className="absolute right-0 top-0 bottom-0 w-1 bg-white/20 cursor-ew-resize"/></button>})}</div></div>)}<div className="pointer-events-none absolute top-8 bottom-0 z-30" style={{left:`${190+playhead*pxPerSecond}px`}}><div className="h-full w-px bg-primary-400"/><div className="-ml-2 h-3 w-3 rounded-full bg-primary-400"/></div></div><button aria-label="المساعد" onClick={e=>{e.stopPropagation();setAssistantOpen(v=>!v)}} className="fixed bottom-[11%] right-5 z-40 h-14 w-14 rounded-full bg-primary-600 shadow-2xl flex items-center justify-center font-bold border-4 border-[#0b0e14]">AI</button></section>
+    <section className="min-h-0 bg-[#11151d] border-t border-white/10 flex flex-col" dir="rtl"><div className="h-1/2 flex overflow-x-auto border-b border-white/10">{CATEGORIES.map(c=><button key={c.id} onClick={()=>{setActiveCategory(c.id);setToolPopover(null)}} className={`min-w-[78px] px-2 flex flex-col items-center justify-center gap-1 text-[10px] ${activeCategory===c.id?'text-white bg-primary-600/20':'text-white/45 hover:bg-white/5'}`}><span className="text-lg">{c.icon}</span><span>{c.label}</span></button>)}<div className="flex-1"/><div className="px-3 flex items-center gap-2"><button className="btn text-xs" onClick={()=>setZoom(z=>Math.max(.5,z-.25))}>−</button><button className="btn text-xs" onClick={()=>setZoom(1)}>100%</button><button className="btn text-xs" onClick={()=>setZoom(z=>Math.min(4,z+.25))}>+</button></div></div><div className="h-1/2 flex items-center gap-2 px-2 overflow-x-auto relative">{activeTools.map(t=><button key={t.id} onClick={()=>runTool(t)} className="shrink-0 min-w-[72px] px-3 py-2 rounded-xl border border-white/10 bg-[#0b0e14] hover:bg-white/5 text-[10px]"><div className="font-semibold">{t.label}</div><div className="text-[9px] text-white/35 mt-1">{t.description||''}</div></button>)}{toolPopover&&<div className="absolute bottom-full mb-2 right-2 z-50 w-[min(90vw,520px)] rounded-2xl border border-white/10 bg-[#11151d] shadow-2xl p-3" onClick={e=>e.stopPropagation()}><div className="text-xs text-white/55 mb-2">إعداد الأداة</div><div className="flex items-center gap-2"><input value={toolValue} onChange={e=>setToolValue(e.target.value)} className="w-24 bg-[#0b0e14] border border-white/10 rounded-lg px-3 py-2 text-sm"/><span className="text-xs text-white/40">قيمة التشغيل</span><button className="btn btn-primary" onClick={()=>{setToolPopover(null);setStatus(`تم ضبط ${toolPopover}`)}}>تطبيق</button><button className="btn" onClick={()=>setToolPopover(null)}>إغلاق</button></div></div>}</div></section>
 
-  async function history(action:'undo'|'redo'){
-    if(!project) return;
-    setStatus(action==='undo'?'جاري التراجع…':'جاري الإعادة…');
-    const r=await fetch(api(`/api/projects/${project.id}/${action}`),{method:'POST'});
-    if(r.ok){setProject(await r.json());setStatus(action==='undo'?'تم التراجع':'تمت الإعادة');}
-    else setStatus('تعذر تنفيذ العملية');
-  }
-
-  async function render(){
-    if(!project||!selected){setStatus('أضف فيديو أولًا');return;}
-    setStatus('جاري تصدير MP4…');
-    const r=await fetch(api(`/api/projects/${project.id}/render`),{method:'POST'});
-    if(!r.ok){setStatus('فشل التصدير');return;}
-    const blob=await r.blob();
-    const url=URL.createObjectURL(blob);
-    const a=document.createElement('a'); a.href=url; a.download='ai-creative-studio.mp4'; a.click();
-    setTimeout(()=>URL.revokeObjectURL(url),1000);
-    setStatus('تم التصدير بنجاح');
-  }
-
-  function selectClip(c:Clip){
-    setSelectedClip(c.id);
-    const asset=project?.assets.find(a=>a.id===c.assetId);
-    if(asset&&videoRef.current) videoRef.current.src=api(asset.url);
-  }
-
-  const toolLabel:{[K in Tool]:string}={split:'تقسيم',delete:'حذف','trim-start':'قص البداية','trim-end':'قص النهاية',move:'تحريك'};
-
-  return <div className="h-full w-full flex flex-col bg-[#0b0d12] text-white">
-    <header className="h-14 shrink-0 px-3 border-b border-white/10 bg-[#11151d] flex items-center gap-2">
-      <div className="font-semibold text-sm mr-2">AI Creative Studio</div>
-      <button className="btn btn-primary" onClick={()=>inputRef.current?.click()}>استيراد</button>
-      <input ref={inputRef} type="file" accept="video/*,audio/*" multiple className="hidden" onChange={e=>upload(e.target.files)}/>
-      <button className="btn" onClick={()=>history('undo')} disabled={!project||project.historyIndex<=0}>تراجع</button>
-      <button className="btn" onClick={()=>history('redo')} disabled={!project||project.historyIndex>=project.historyLength-1}>إعادة</button>
-      <div className="flex-1"/>
-      <span className="text-xs text-white/50 hidden sm:block">{status}</span>
-      <button className="btn" onClick={()=>setHelpOpen(true)}>مساعدة</button>
-      <button className="btn" onClick={()=>setSettingsOpen(true)}>الإعدادات</button>
-      <button className="btn btn-primary" onClick={render}>تصدير</button>
-    </header>
-
-    <main className="flex-1 min-h-0 p-3 flex flex-col gap-3 overflow-hidden">
-      <section className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[1.7fr_.8fr] gap-3">
-        <div className="min-h-0 flex flex-col gap-3">
-          <div className="flex-1 min-h-[260px] rounded-xl border border-white/10 bg-black overflow-hidden flex items-center justify-center">
-            {selectedAsset ? <video ref={videoRef} controls className="w-full h-full object-contain" onPlay={()=>setPlaying(true)} onPause={()=>setPlaying(false)}/> : <div className="text-center text-white/40"><div className="text-4xl mb-2">▶</div><div>استورد فيديو للبدء</div></div>}
-          </div>
-
-          <div className="rounded-xl border border-white/10 bg-[#11151d] p-3 shrink-0">
-            <div className="flex items-center gap-2 mb-3 flex-wrap">
-              {(Object.keys(toolLabel) as Tool[]).map(t=><button key={t} className={`btn text-sm ${tool===t?'btn-primary':''}`} onClick={()=>setTool(t)}>{toolLabel[t]}</button>)}
-              {tool!=='delete' && <input value={toolValue} onChange={e=>setToolValue(e.target.value)} inputMode="decimal" className="w-24 bg-[#0b0d12] border border-white/10 rounded-lg px-3 py-2 text-sm" aria-label="قيمة العملية بالثواني"/>}
-              <button className="btn btn-primary" onClick={applyTool}>تطبيق</button>
-            </div>
-            <div className="text-xs text-white/40">الأدوات تعمل على المقطع المحدد. قيمة القص/التحريك بالثواني.</div>
-          </div>
-
-          <div className="rounded-xl border border-white/10 bg-[#11151d] overflow-hidden">
-            <div className="px-3 py-2 border-b border-white/10 flex items-center justify-between"><span className="font-semibold text-sm">Timeline</span><span className="text-xs text-white/40">{(project?.timeline.duration||0).toFixed(2)}s</span></div>
-            <div className="p-3 space-y-2 max-h-[26vh] overflow-auto">
-              {(project?.timeline.tracks||[]).map(track=><div key={track.id}><div className="text-xs text-white/40 mb-1">{track.name}</div><div className="relative h-12 rounded-lg bg-[#090c11] border border-white/10">
-                {track.clips.map(c=>{const total=Math.max(project?.timeline.duration||1,0.01); const left=100*c.startTime/total; const width=100*c.duration/total; return <button key={c.id} onClick={()=>selectClip(c)} title={c.name} className={`absolute top-1 h-10 rounded-lg px-2 text-left text-xs overflow-hidden bg-primary-600/70 ${selected?.id===c.id?'ring-2 ring-white':'border border-white/10'}`} style={{left:`${left}%`,width:`${Math.max(5,width)}%`}}>{c.name}</button>;})}
-              </div></div>)}
-              {clips.length===0&&<div className="text-center text-sm text-white/30 py-3">لا توجد مقاطع بعد</div>}
-            </div>
-          </div>
-        </div>
-
-        <aside className="rounded-xl border border-white/10 bg-[#11151d] p-3 flex flex-col min-h-0">
-          <div className="font-semibold mb-1">المساعد</div>
-          <div className="text-xs text-white/40 mb-3">اكتب الأمر بالعربية أو الإنجليزية وسأطبقه على المقطع المحدد.</div>
-          <div className="space-y-2 overflow-auto">
-            <button className="w-full text-right rounded-lg border border-white/10 bg-[#0b0d12] px-3 py-2 text-sm hover:bg-white/5" onClick={()=>setCommand('قص أول 2 ثانية')}>قص أول 2 ثانية</button>
-            <button className="w-full text-right rounded-lg border border-white/10 bg-[#0b0d12] px-3 py-2 text-sm hover:bg-white/5" onClick={()=>setCommand('قص آخر 2 ثانية')}>قص آخر 2 ثانية</button>
-            <button className="w-full text-right rounded-lg border border-white/10 bg-[#0b0d12] px-3 py-2 text-sm hover:bg-white/5" onClick={()=>setCommand('قسّم المقطع نصفين')}>قسّم المقطع نصفين</button>
-            <button className="w-full text-right rounded-lg border border-white/10 bg-[#0b0d12] px-3 py-2 text-sm hover:bg-white/5" onClick={()=>setCommand('انقل المقطع إلى 3')}>انقل المقطع إلى 3 ثوانٍ</button>
-          </div>
-          <div className="mt-auto pt-3">
-            <div className="flex gap-2">
-              <input value={command} onChange={e=>setCommand(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')commandRequest(command)}} placeholder="مثال: احذف المقطع" className="flex-1 min-w-0 bg-[#0b0d12] border border-white/10 rounded-lg px-3 py-2 text-sm"/>
-              <button className="btn btn-primary" onClick={()=>commandRequest(command)}>نفّذ</button>
-            </div>
-            <div className="mt-2 text-[11px] text-white/30">المقاطع: {clips.length} • {playing?'تشغيل':'متوقف'}</div>
-          </div>
-        </aside>
-      </section>
-    </main>
-
-    {helpOpen&&<div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"><div className="w-full max-w-lg rounded-2xl bg-[#11151d] border border-white/10 p-5">
-      <div className="flex items-center justify-between mb-4"><h2 className="font-semibold">مساعدة سريعة</h2><button className="btn" onClick={()=>setHelpOpen(false)}>إغلاق</button></div>
-      <div className="space-y-3 text-sm text-white/70">
-        <div><b className="text-white">قص البداية:</b> «قص أول 3 ثواني»</div>
-        <div><b className="text-white">قص النهاية:</b> «قص آخر 2 ثانية»</div>
-        <div><b className="text-white">تقسيم:</b> «قسّم عند 5» أو «قسّم المقطع نصفين»</div>
-        <div><b className="text-white">تحريك:</b> «انقل المقطع إلى 3»</div>
-        <div><b className="text-white">حذف:</b> «احذف المقطع»</div>
-      </div>
-    </div></div>}
-
-    {settingsOpen&&<div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"><div className="w-full max-w-lg rounded-2xl bg-[#11151d] border border-white/10 p-5">
-      <div className="flex items-center justify-between mb-4"><h2 className="font-semibold">الإعدادات</h2><button className="btn" onClick={()=>setSettingsOpen(false)}>إغلاق</button></div>
-      <div className="space-y-3 text-sm">
-        <div className="rounded-lg bg-[#0b0d12] border border-white/10 p-3"><div className="text-white/50 text-xs mb-1">الخادم</div><div>Render API</div></div>
-        <div className="rounded-lg bg-[#0b0d12] border border-white/10 p-3"><div className="text-white/50 text-xs mb-1">المساعد</div><div>يعمل محليًا دون مفتاح API، ويستخدم OpenAI عند توفر المفتاح.</div></div>
-        <div className="rounded-lg bg-[#0b0d12] border border-white/10 p-3"><div className="text-white/50 text-xs mb-1">التصدير</div><div>MP4 / H.264 عبر FFmpeg</div></div>
-      </div>
-    </div></div>}
+    {assistantOpen&&<div className="fixed z-[60] bottom-[11%] right-5 w-[min(94vw,420px)] h-[min(70vh,560px)] rounded-2xl border border-white/10 bg-[#11151d] shadow-2xl overflow-hidden flex flex-col" dir="rtl"><div className="p-3 border-b border-white/10 flex items-center justify-between"><div><div className="font-semibold text-sm">مساعد التحرير</div><div className="text-[10px] text-white/35">أعطني أمرًا واضحًا أو وصفًا كاملًا للتعديل</div></div><button className="btn text-xs" onClick={()=>setAssistantOpen(false)}>إغلاق</button></div><div className="flex-1 overflow-auto p-3 space-y-2">{chat.length===0?<div className="text-sm text-white/40 leading-6">أمثلة:<br/>«احذف المقطع المحدد»<br/>«اقص أول 3 ثوانٍ»<br/>«قسّم عند 6 ثوانٍ»<br/>«انقل المقطع إلى 10 ثوانٍ»</div>:chat.map((m,i)=><div key={i} className={`max-w-[88%] rounded-xl px-3 py-2 text-sm ${m.role==='user'?'mr-auto bg-primary-600/25':'ml-auto bg-white/5'}`}>{m.text}</div>)}</div><div className="p-3 border-t border-white/10 flex gap-2"><input autoFocus value={command} onChange={e=>setCommand(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')commandRequest(command)}} placeholder="اكتب أمر التحرير…" className="flex-1 min-w-0 bg-[#0b0e14] border border-white/10 rounded-xl px-3 py-2 text-sm"/><button className="btn btn-primary" onClick={()=>commandRequest(command)}>تنفيذ</button></div></div>}
+    {settingsOpen&&<div className="fixed inset-0 z-[70] bg-black/70 flex items-center justify-center p-4"><div className="w-full max-w-lg rounded-2xl bg-[#11151d] border border-white/10 shadow-2xl p-5" dir="rtl"><div className="flex items-center justify-between mb-4"><div className="font-semibold">الإعدادات</div><button className="btn" onClick={()=>setSettingsOpen(false)}>إغلاق</button></div><div className="grid grid-cols-2 gap-3 text-sm"><div className="rounded-xl bg-[#0b0e14] border border-white/10 p-3"><div className="text-white/40 text-xs">واجهة</div><div className="mt-1">Timeline متعدد المسارات</div></div><div className="rounded-xl bg-[#0b0e14] border border-white/10 p-3"><div className="text-white/40 text-xs">المحرك</div><div className="mt-1">FFmpeg + Render</div></div><div className="rounded-xl bg-[#0b0e14] border border-white/10 p-3"><div className="text-white/40 text-xs">المساعد</div><div className="mt-1">Local + OpenAI اختياري</div></div><div className="rounded-xl bg-[#0b0e14] border border-white/10 p-3"><div className="text-white/40 text-xs">التصدير</div><div className="mt-1">MP4 / H.264 / AAC</div></div></div></div></div>}
+    {helpOpen&&<div className="fixed inset-0 z-[70] bg-black/70 flex items-center justify-center p-4"><div className="w-full max-w-lg rounded-2xl bg-[#11151d] border border-white/10 shadow-2xl p-5" dir="rtl"><div className="flex items-center justify-between mb-4"><div className="font-semibold">مساعدة</div><button className="btn" onClick={()=>setHelpOpen(false)}>إغلاق</button></div><div className="space-y-2 text-sm text-white/65 leading-6"><div>اسحب أي مقطع داخل مسار الفيديو لتغيير موضعه.</div><div>اضغط على المقطع ثم استخدم فئات الأدوات أسفل الشاشة.</div><div>اضغط زر AI بجانب الـTimeline لفتح الدردشة.</div><div>يمكنك استخدام أوامر عربية مباشرة مثل «قص أول 2 ثانية».</div></div></div></div>}
   </div>;
 }
