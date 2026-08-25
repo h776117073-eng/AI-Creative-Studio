@@ -84,13 +84,12 @@ jobs:
         working-directory: android-build/clearcut
         run: ./gradlew :app:assembleDebug --no-daemon --stacktrace -Dorg.gradle.dependency.verification=off
 
-      - name: Verify APK exists and is non-trivial
+      - name: Locate and validate generated APK
         run: |
-          APK="android-build/clearcut/app/build/outputs/apk/debug/app-debug.apk"
-          test -s "$APK"
-          BYTES=$(stat -c%s "$APK")
-          echo "APK size: $BYTES bytes"
-          test "$BYTES" -gt 5000000
+          python3 tools/android/verify_and_prepare_apk.py \
+            android-build/clearcut \
+            android-build/AI-Creative-Studio-debug.apk
+          echo "APK_PATH=android-build/AI-Creative-Studio-debug.apk" >> "$GITHUB_ENV"
 
       - name: Product smoke validation
         run: python3 tools/android/validate_product_smoke.py android-build/clearcut
@@ -99,7 +98,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ai-creative-studio-kotlin-apk
-          path: android-build/clearcut/app/build/outputs/apk/debug/app-debug.apk
+          path: ${{ env.APK_PATH }}
           if-no-files-found: error
           retention-days: 14
 
