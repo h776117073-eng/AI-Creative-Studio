@@ -11,8 +11,14 @@ s = s.replace(
 )
 editor.write_text(s)
 
-# Keep the build deterministic and avoid treating the Android wrapper as a second editor.
-# The helper is intentionally tiny so CI fails fast when the upstream editor signature moves.
+executor = ui / 'AssistantCommandExecutor.kt'
+x = executor.read_text()
+x = x.replace(
+    'val text = part.substringAfter(Regex("نص|title|caption"), "نص جديد").trim().ifBlank { "نص جديد" }',
+    'val text = part.replaceFirst(Regex("^.*?(?:نص|title|caption)\\\\s*"), "").trim().ifBlank { "نص جديد" }'
+)
+executor.write_text(x)
+
 required = [
     'assistantCommand: AssistantRequest? = null',
     'AssistantEditorScreen',
