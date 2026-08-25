@@ -1,12 +1,38 @@
 <!doctype html>
-<html lang="en">
+<html lang="ar" dir="rtl">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="theme-color" content="#080A0F" />
     <title>AI Creative Studio</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script>
+      window.NativeEditorBridge = { enabled: !!window.AndroidCreativeStudio };
+      (function () {
+        const originalFetch = window.fetch.bind(window);
+        window.fetch = async function (input, init) {
+          try {
+            const url = typeof input === 'string' ? input : input.url;
+            if (window.AndroidCreativeStudio && String(url).includes('/ai-command') && init && typeof init.body === 'string') {
+              const body = JSON.parse(init.body);
+              const local = JSON.parse(window.AndroidCreativeStudio.understandCommand(body.text || ''));
+              body.localIntent = local.intent;
+              body.localConfidence = local.confidence;
+              body.localNormalized = local.normalized;
+              init = Object.assign({}, init, { body: JSON.stringify(body), headers: Object.assign({}, init.headers || {}, { 'X-Local-Intent': local.intent, 'X-Local-Confidence': String(local.confidence) }) });
+            }
+            const response = await originalFetch(input, init);
+            if (window.AndroidCreativeStudio && String(url).includes('/ai-command')) window.AndroidCreativeStudio.haptic(response.ok ? 'success' : 'error');
+            return response;
+          } catch (e) {
+            if (window.AndroidCreativeStudio) window.AndroidCreativeStudio.haptic('error');
+            throw e;
+          }
+        };
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
