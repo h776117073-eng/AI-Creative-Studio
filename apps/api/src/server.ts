@@ -26,7 +26,7 @@ app.use(cors());
 app.use(express.json({limit:'2mb'}));
 app.use('/media',express.static(MEDIA));
 
-const upload=multer({storage:multer.diskStorage({destination:MEDIA,filename:(_req,file,cb)=>cb(null,`${randomUUID()}${extname(file.originalname).toLowerCase()||'.bin`)}),limits:{fileSize:1024*1024*1024}}});
+const upload=multer({storage:multer.diskStorage({destination:MEDIA,filename:(_req,file,cb)=>cb(null,`${randomUUID()}${extname(file.originalname).toLowerCase()||'.bin'}`)}),limits:{fileSize:1024*1024*1024}});
 const now=()=>new Date().toISOString();
 const newTrack=(type:string,name:string,order:number)=>({id:randomUUID(),name,type,clips:[],muted:false,locked:false,visible:true,height:type==='audio'?80:60,order});
 const timelineTemplate=()=>({version:3,duration:0,currentTime:0,tracks:[newTrack('video','Video 1',0),newTrack('audio','Audio 1',1),newTrack('text','Text 1',2),newTrack('overlay','Overlay 1',3)],markers:[]});
@@ -50,17 +50,13 @@ app.post('/api/projects/:id/upload',upload.single('file'),(req,res)=>{
   const projectId=String(req.params.id); const p=getProject(projectId);
   if(!p||!req.file)return res.status(400).json({error:'Project or file missing'});
   const mime=req.file.mimetype||'application/octet-stream';
-  const measured=readDuration(req.file.path);
-  const duration=measured>0?measured:5;
+  const measured=readDuration(req.file.path); const duration=measured>0?measured:5;
   const assetId=randomUUID();
   db.prepare('INSERT INTO assets VALUES(?,?,?,?,?,?,?)').run(assetId,projectId,req.file.originalname,req.file.path,mime,duration,now());
-  const timeline=JSON.parse(p.timeline_json);
-  const isAudio=mime.startsWith('audio/');
-  const track=isAudio?audioTrack(timeline):videoTrack(timeline);
+  const timeline=JSON.parse(p.timeline_json); const isAudio=mime.startsWith('audio/'); const track=isAudio?audioTrack(timeline):videoTrack(timeline);
   const start=isAudio?Math.max(0,...timeline.tracks.flatMap((t:any)=>t.clips.map((c:any)=>c.endTime)),0):timeline.duration;
   track.clips.push({id:randomUUID(),assetId,name:req.file.originalname,startTime:start,endTime:start+duration,trimStart:0,trimEnd:duration,duration,speed:1,volume:1,opacity:1,rotate:0,flipH:false,flipV:false,brightness:0,contrast:1,saturation:1,grayscale:false,fadeIn:0,fadeOut:0,effects:[],animations:[],keyframes:[]});
-  saveTimeline(projectId,normalizeTimeline(timeline));
-  res.json(payload(projectId));
+  saveTimeline(projectId,normalizeTimeline(timeline)); res.json(payload(projectId));
 });
 
 app.post('/api/projects/:id/undo',(req,res)=>{const id=String(req.params.id);const p=getProject(id);if(!p)return res.status(404).json({error:'Project not found'});const history=JSON.parse(p.history_json) as any[];if(Number(p.history_index)<=0)return res.status(409).json({error:'Nothing to undo'});const index=Number(p.history_index)-1;db.prepare('UPDATE projects SET timeline_json=?,history_index=?,updated_at=? WHERE id=?').run(JSON.stringify(history[index]),index,now(),id);res.json(payload(id));});
@@ -72,20 +68,16 @@ app.post('/api/projects/:id/render',(req,res)=>{
   const id=String(req.params.id);const p=getProject(id);if(!p)return res.status(404).json({error:'Project not found'});
   const timeline=normalizeTimeline(JSON.parse(p.timeline_json));const vtrack=videoTrack(timeline);const videoClips=vtrack.clips.filter((c:any)=>c.duration>0);if(!videoClips.length)return res.status(422).json({error:'No video clips'});
   const audioTracks=timeline.tracks.filter((t:any)=>t.type==='audio'&&!t.muted);const externalAudio=audioTracks.flatMap((t:any)=>t.clips.filter((c:any)=>c.duration>0).map((c:any)=>({...c,track:t})));
-  const inputs:string[]=[];let videoInputCount=0;
-  for(const clip of videoClips){const asset=db.prepare('SELECT * FROM assets WHERE id=?').get(clip.assetId) as any;if(!asset||!existsSync(asset.path))return res.status(404).json({error:`Media missing for ${clip.name}`});inputs.push('-ss',String(clip.trimStart),'-t',String(Math.max(.01,clip.trimEnd-clip.trimStart)),'-i',asset.path);videoInputCount+=1;if(!hasAudio(asset.path))inputs.push('-f','lavfi','-t',String(Math.max(.01,clip.trimEnd-clip.trimStart)),'-i','anullsrc=channel_layout=stereo:sample_rate=48000');else{}}
-  let filter='';let concatInputs='';let idx=0;
-  for(const clip of videoClips){const asset=db.prepare('SELECT * FROM assets WHERE id=?').get(clip.assetId) as any;const audio=hasAudio(asset.path);const speed=Math.max(.25,Math.min(4,Number(clip.speed||1)));const volume=Math.max(0,Math.min(4,Number(clip.volume??1)));const vf:string[]=['setpts=PTS-STARTPTS',`setpts=PTS/${speed}`];if(clip.flipH)vf.push('hflip');if(clip.flipV)vf.push('vflip');const rot=((Number(clip.rotate||0)%360)+360)%360;if(rot===90)vf.push('transpose=1');else if(rot===180)vf.push('hflip','vflip');else if(rot===270)vf.push('transpose=2');const br=Number(clip.brightness||0),ct=Number(clip.contrast||1),sat=Number(clip.saturation||1);if(br!==0||ct!==1||sat!==1||clip.grayscale)vf.push(`eq=brightness=${br}:contrast=${ct}:saturation=${clip.grayscale?0:sat}`);if(Number(clip.fadeIn||0)>0)vf.push(`fade=t=in:st=0:d=${Number(clip.fadeIn)}`);const clipDur=Math.max(.01,(clip.trimEnd-clip.trimStart)/speed);if(Number(clip.fadeOut||0)>0){const fo=Math.min(Number(clip.fadeOut),clipDur);vf.push(`fade=t=out:st=${Math.max(0,clipDur-fo)}:d=${fo}`);}filter+=`[${idx}:v:0]${vf.join(',')}[v${idx}];`;const af:string[]=['aresample=48000','asetpts=PTS-STARTPTS'];if(speed!==1)af.push(atempo(speed));if(volume!==1)af.push(`volume=${volume}`);if(Number(clip.fadeIn||0)>0)af.push(`afade=t=in:st=0:d=${Number(clip.fadeIn)}`);if(Number(clip.fadeOut||0)>0){const fo=Math.min(Number(clip.fadeOut),clipDur);af.push(`afade=t=out:st=${Math.max(0,clipDur-fo)}:d=${fo}`);}filter+=audio?`[${idx}:a:0]${af.join(',')}[a${idx}];`:`[${idx+1}:a:0]${af.join(',')}[a${idx}];`;concatInputs+=`[v${idx}][a${idx}]`;idx+=audio?1:2;}
+  const inputs:string[]=[];let idx=0;
+  for(const clip of videoClips){const asset=db.prepare('SELECT * FROM assets WHERE id=?').get(clip.assetId) as any;if(!asset||!existsSync(asset.path))return res.status(404).json({error:`Media missing for ${clip.name}`});inputs.push('-ss',String(clip.trimStart),'-t',String(Math.max(.01,clip.trimEnd-clip.trimStart)),'-i',asset.path);if(!hasAudio(asset.path))inputs.push('-f','lavfi','-t',String(Math.max(.01,clip.trimEnd-clip.trimStart)),'-i','anullsrc=channel_layout=stereo:sample_rate=48000');idx+=hasAudio(asset.path)?1:2;}
+  let filter='';let concatInputs='';let videoIdx=0;
+  for(const clip of videoClips){const asset=db.prepare('SELECT * FROM assets WHERE id=?').get(clip.assetId) as any;const audio=hasAudio(asset.path);const speed=Math.max(.25,Math.min(4,Number(clip.speed||1)));const volume=Math.max(0,Math.min(4,Number(clip.volume??1)));const vf:string[]=['setpts=PTS-STARTPTS',`setpts=PTS/${speed}`];if(clip.flipH)vf.push('hflip');if(clip.flipV)vf.push('vflip');const rot=((Number(clip.rotate||0)%360)+360)%360;if(rot===90)vf.push('transpose=1');else if(rot===180)vf.push('hflip','vflip');else if(rot===270)vf.push('transpose=2');const br=Number(clip.brightness||0),ct=Number(clip.contrast||1),sat=Number(clip.saturation||1);if(br!==0||ct!==1||sat!==1||clip.grayscale)vf.push(`eq=brightness=${br}:contrast=${ct}:saturation=${clip.grayscale?0:sat}`);const clipDur=Math.max(.01,(clip.trimEnd-clip.trimStart)/speed);if(Number(clip.fadeIn||0)>0)vf.push(`fade=t=in:st=0:d=${Number(clip.fadeIn)}`);if(Number(clip.fadeOut||0)>0){const fo=Math.min(Number(clip.fadeOut),clipDur);vf.push(`fade=t=out:st=${Math.max(0,clipDur-fo)}:d=${fo}`);}filter+=`[${videoIdx}:v:0]${vf.join(',')}[v${videoIdx}];`;const af:string[]=['aresample=48000','asetpts=PTS-STARTPTS'];if(speed!==1)af.push(atempo(speed));if(volume!==1)af.push(`volume=${volume}`);if(Number(clip.fadeIn||0)>0)af.push(`afade=t=in:st=0:d=${Number(clip.fadeIn)}`);if(Number(clip.fadeOut||0)>0){const fo=Math.min(Number(clip.fadeOut),clipDur);af.push(`afade=t=out:st=${Math.max(0,clipDur-fo)}:d=${fo}`);}filter+=audio?`[${videoIdx}:a:0]${af.join(',')}[a${videoIdx}];`:`[${videoIdx+1}:a:0]${af.join(',')}[a${videoIdx}];`;concatInputs+=`[v${videoIdx}][a${videoIdx}]`;videoIdx+=audio?1:2;}
   filter+=`${concatInputs}concat=n=${videoClips.length}:v=1:a=1[cv][ca];`;
-  const mainVideoDuration=Math.max(.01,Number(timeline.duration||0));
-  const audioLabels:string[]=['[ca]'];
-  for(const clip of externalAudio){const asset=db.prepare('SELECT * FROM assets WHERE id=?').get(clip.assetId) as any;if(!asset||!existsSync(asset.path))continue;const inputIndex=idx;inputs.push('-ss',String(clip.trimStart),'-t',String(Math.max(.01,clip.trimEnd-clip.trimStart)),'-i',asset.path);const delay=Math.max(0,Math.round(Number(clip.startTime||0)*1000));const vol=Math.max(0,Math.min(4,Number(clip.volume??1)));filter+=`[${inputIndex}:a:0]aresample=48000,volume=${vol},adelay=${delay}:all=1[ma${inputIndex}];`;audioLabels.push(`[ma${inputIndex}]`);idx+=1;}
-  if(audioLabels.length===1)filter+='[ca]apad=pad_dur=0[aout];';else filter+=`${audioLabels.join('')}amix=inputs=${audioLabels.length}:duration=longest:dropout_transition=0:normalize=0[aout];`;
-  const output=join(EXPORTS,`${randomUUID()}.mp4`);
-  const args=['-y',...inputs,'-filter_complex',filter,'-map','[cv]','-map','[aout]','-c:v','libx264','-preset','veryfast','-pix_fmt','yuv420p','-c:a','aac','-movflags','+faststart',output];
-  const result=spawnSync('ffmpeg',args,{encoding:'utf8',timeout:180000});
-  if(result.status!==0||!existsSync(output))return res.status(500).json({error:'FFmpeg render failed',detail:result.stderr?.slice(-3500)});
-  res.download(output,'ai-creative-studio.mp4',()=>{try{unlinkSync(output);}catch{}});
+  const mixLabels:string[]=['[ca]'];
+  for(const clip of externalAudio){const asset=db.prepare('SELECT * FROM assets WHERE id=?').get(clip.assetId) as any;if(!asset||!existsSync(asset.path)||!hasAudio(asset.path))continue;const inputIndex=idx;inputs.push('-ss',String(clip.trimStart),'-t',String(Math.max(.01,clip.trimEnd-clip.trimStart)),'-i',asset.path);const delay=Math.max(0,Math.round(Number(clip.startTime||0)*1000));const vol=Math.max(0,Math.min(4,Number(clip.volume??1)));filter+=`[${inputIndex}:a:0]aresample=48000,volume=${vol},adelay=${delay}:all=1[ma${inputIndex}];`;mixLabels.push(`[ma${inputIndex}]`);idx++;}
+  if(mixLabels.length===1)filter+='[ca]anull[aout];';else filter+=`${mixLabels.join('')}amix=inputs=${mixLabels.length}:duration=longest:dropout_transition=0:normalize=0[aout];`;
+  const output=join(EXPORTS,`${randomUUID()}.mp4`);const args=['-y',...inputs,'-filter_complex',filter,'-map','[cv]','-map','[aout]','-c:v','libx264','-preset','veryfast','-pix_fmt','yuv420p','-c:a','aac','-movflags','+faststart',output];
+  const result=spawnSync('ffmpeg',args,{encoding:'utf8',timeout:180000});if(result.status!==0||!existsSync(output))return res.status(500).json({error:'FFmpeg render failed',detail:result.stderr?.slice(-3500)});res.download(output,'ai-creative-studio.mp4',()=>{try{unlinkSync(output);}catch{}});
 });
 
 registerAIRoute(app,db);
