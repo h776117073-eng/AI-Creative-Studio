@@ -36,17 +36,17 @@ jobs:
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
 
-      - name: Check out pinned ClearCut native editor base
+      - name: Download pinned ClearCut source archive
         env:
           CLEARCUT_SHA: ba6d118722b23386567c84bce8442a400713748b
         run: |
-          git clone --depth 1 --branch master https://github.com/SysAdminDoc/ClearCut.git android-build/clearcut
-          cd android-build/clearcut
-          git fetch --depth 1 origin "$CLEARCUT_SHA"
-          git checkout "$CLEARCUT_SHA"
-          chmod +x gradlew
-          test "$(git rev-parse HEAD)" = "$CLEARCUT_SHA"
-          test -x gradlew
+          mkdir -p android-build/clearcut
+          curl -L --fail --retry 3 --retry-all-errors \
+            "https://github.com/SysAdminDoc/ClearCut/archive/${CLEARCUT_SHA}.tar.gz" \
+            -o /tmp/clearcut.tar.gz
+          tar -xzf /tmp/clearcut.tar.gz --strip-components=1 -C android-build/clearcut
+          chmod +x android-build/clearcut/gradlew
+          test -x android-build/clearcut/gradlew
 
       - name: Apply AI Creative Studio product integration
         run: |
