@@ -63,35 +63,7 @@ jobs:
         run: rm -f android-build/clearcut/gradle/verification-metadata.xml
 
       - name: Configure CI source-audit exclusions
-        working-directory: android-build/clearcut
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('app/build.gradle.kts')
-          s = p.read_text()
-          old = 'sourceAuditTests.forEach { exclude(it) }'
-          new = 'sourceAuditTests.forEach { exclude("**/" + it.substringAfterLast(".") + ".class") }'
-          if old in s:
-              s = s.replace(old, new)
-          elif new not in s:
-              raise SystemExit('CI source-audit filter hook not found')
-          p.write_text(s)
-          PY
-          cat >> app/build.gradle.kts <<'EOF'
-
-// Additional upstream content/provenance contracts are not runtime tests and
-// expect the original ClearCut repository checkout rather than the pinned archive.
-if (providers.gradleProperty("ciSourceAuditExclusions").isPresent) {
-    tasks.withType<Test>().configureEach {
-        listOf(
-            "DeclarativePackContractTest",
-            "EffectShareEnginePackTest",
-            "StabilizationProfileManagerTest",
-            "StylePackPreviewCommitTest"
-        ).forEach { exclude("**/" + it + ".class") }
-    }
-}
-EOF
+        run: python3 tools/android/configure_ci_test_filter.py android-build/clearcut
 
       - name: Run native Kotlin/Compose unit tests
         working-directory: android-build/clearcut
@@ -121,26 +93,7 @@ EOF
           test "$BYTES" -gt 5000000
 
       - name: Product smoke validation
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          root = Path('android-build/clearcut')
-          assistant = (root/'app/src/main/java/com/novacut/editor/ui/editor/AssistantCommandExecutor.kt').read_text()
-          required = [
-              'splitAtPlayhead', 'deleteSelectedClip', 'duplicateSelectedClip',
-              'addKeyframe', 'updateClipColorGrade', 'addMask', 'setTransition',
-              'addTextOverlay', 'showAudioPanel', 'showSpeedCurveEditor',
-              'showAiToolsPanel', 'analyzeAndReduceNoise'
-          ]
-          missing = [name for name in required if name not in assistant]
-          if missing:
-              raise SystemExit(f'Missing assistant command bindings: {missing}')
-          catalog = (root/'gradle/libs.versions.toml').read_text()
-          for needle in ['media3-transformer', 'onnxruntime-android', 'mediapipe-tasks-vision', 'android-deepfilternet']:
-              if needle not in catalog:
-                  raise SystemExit(f'Missing engine dependency: {needle}')
-          print('Product smoke validation: PASS')
-          PY
+        run: python3 tools/android/validate_product_smoke.py android-build/clearcut
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
