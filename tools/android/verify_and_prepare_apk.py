@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import shutil
 import subprocess
 import sys
@@ -24,11 +25,22 @@ with zipfile.ZipFile(apk) as zf:
     if not required.issubset(names):
         raise SystemExit(f"APK missing required entries: {required - names}")
 
-aapt = Path(shutil.which("aapt") or "")
-if not aapt:
-    raise SystemExit("Android aapt tool not found on runner")
+# Prefer aapt on PATH; otherwise resolve it from the Android SDK installed by CI.
+aapt_cmd = shutil.which("aapt")
+if aapt_cmd is None:
+    sdk_root = Path(os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT") or "")
+    candidates_aapt = [
+        sdk_root / "build-tools" / "36.0.0" / "aapt",
+        sdk_root / "build-tools" / "35.0.0" / "aapt",
+    ]
+    for candidate in candidates_aapt:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            aapt_cmd = str(candidate)
+            break
+if aapt_cmd is None:
+    raise SystemExit("Android aapt executable not found on runner")
 
-proc = subprocess.run([str(aapt), "dump", "badging", str(apk)], text=True, capture_output=True)
+proc = subprocess.run([aapt_cmd, "dump", "badging", str(apk)], text=True, capture_output=True)
 if proc.returncode != 0:
     raise SystemExit(f"aapt could not inspect APK: {proc.stderr.strip()}")
 badging = proc.stdout
@@ -42,3 +54,4 @@ shutil.copy2(apk, out)
 print(f"Validated APK: {out}")
 print(f"Source APK: {apk}")
 print(f"Size: {apk.stat().st_size} bytes")
+print(f"aapt: {aapt_cmd}")
