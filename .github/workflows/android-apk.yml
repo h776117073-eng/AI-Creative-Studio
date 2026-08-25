@@ -44,7 +44,9 @@ jobs:
           cd android-build/clearcut
           git fetch --depth 1 origin "$CLEARCUT_SHA"
           git checkout "$CLEARCUT_SHA"
+          chmod +x gradlew
           test "$(git rev-parse HEAD)" = "$CLEARCUT_SHA"
+          test -x gradlew
 
       - name: Apply AI Creative Studio product integration
         run: |
