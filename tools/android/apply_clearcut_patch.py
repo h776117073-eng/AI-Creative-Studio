@@ -10,14 +10,10 @@ UI = JAVA / "ui/editor"
 gradle = APP / "build.gradle.kts"
 s = gradle.read_text()
 s = s.replace('applicationId = "com.novacut.editor"', 'applicationId = "com.aicreativestudio.mobile"')
-s = s.replace('versionName = "3.81.0"', 'versionName = "1.0.0"')
-s = s.replace('versionCode = 299', 'versionCode = 1')
 s = re.sub(r'compileSdk\s*=\s*\d+', 'compileSdk = 36', s, count=1)
 s = re.sub(r'targetSdk\s*=\s*\d+', 'targetSdk = 36', s, count=1)
 if 'checkAarMetadata' not in s:
-    s += '''\n\n// The GitHub-hosted build image currently exposes Android API 36 while the
-// upstream project requests a newer compile SDK. Disable only the metadata gate;
-// real Kotlin/Java compilation remains authoritative for API compatibility.\ntasks.matching { task -> task.name.contains("check") && task.name.contains("AarMetadata") }.configureEach {\n    enabled = false\n}\n'''
+    s += '''\n\ntasks.matching { task -> task.name.contains("check") && task.name.contains("AarMetadata") }.configureEach {\n    enabled = false\n}\n'''
 gradle.write_text(s)
 
 strings = APP / "src/main/res/values/strings.xml"
@@ -29,18 +25,17 @@ strings.write_text(ss)
 
 import android.app.ActivityManager
 import android.content.Context
-import android.os.Build
 
 object AssistantWorkloadPolicy {
     enum class Route { LOCAL, CLOUD }
-
     fun route(context: Context, complexity: Int): Route {
-        val am = context.getSystemService(ActivityManager::class.java)
-        val ramGb = (am?.memoryInfo?.totalMem ?: 0L) / 1024 / 1024 / 1024
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+        val info = ActivityManager.MemoryInfo()
+        am?.getMemoryInfo(info)
+        val ramGb = info.totalMem / 1024 / 1024 / 1024
         val cores = Runtime.getRuntime().availableProcessors()
-        val arm64 = Build.SUPPORTED_ABIS.any { it == "arm64-v8a" }
-        val capable = ramGb >= 6 && cores >= 6 && arm64
-        return if (capable && complexity <= 2) Route.LOCAL else Route.CLOUD
+        val arm64 = android.os.Build.SUPPORTED_ABIS.any { it == "arm64-v8a" }
+        return if (ramGb >= 6 && cores >= 6 && arm64 && complexity <= 2) Route.LOCAL else Route.CLOUD
     }
 }
 ''')
@@ -147,6 +142,7 @@ import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -156,6 +152,7 @@ import kotlinx.coroutines.launch
 @Stable
 data class AssistantRequest(val id: Long, val text: String)
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AssistantEditorScreen(onBack: () -> Unit, viewModel: EditorViewModel = hiltViewModel()) {
     var request by remember { mutableStateOf<AssistantRequest?>(null) }
@@ -174,12 +171,26 @@ fun AssistantEditorScreen(onBack: () -> Unit, viewModel: EditorViewModel = hiltV
                 Spacer(Modifier.height(8.dp))
                 Text("نفّذ أوامر متعددة: قص، حركة كاميرا، منحنى لوني، ليل سينمائي أزرق، نص، قناع، صوت، انتقالات، كيفريمات، سرعة، تتبع، طيف صوتي…")
                 Spacer(Modifier.height(12.dp))
-                OutlinedTextField(value = text, onValueChange = { text = it }, modifier = Modifier.fillMaxWidth(), minLines = 2,
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { value -> text = value },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2,
                     trailingIcon = { Icon(Icons.Filled.Mic, contentDescription = "صوت") },
-                    placeholder = { Text("مثال: قص عند المؤشر ثم أضف حركة كاميرا واجعل الإضاءة ليلية سينمائية زرقاء") })
+                    placeholder = { Text("مثال: قص عند المؤشر ثم أضف حركة كاميرا واجعل الإضاءة ليلية سينمائية زرقاء") }
+                )
                 Spacer(Modifier.height(12.dp))
-                Button(onClick = { val value = text.trim(); if (value.isNotEmpty()) { request = AssistantRequest(System.currentTimeMillis(), value); text = ""; scope.launch { kotlinx.coroutines.delay(180); open = false } } }, modifier = Modifier.fillMaxWidth()) {
-                    Icon(Icons.Filled.Send, contentDescription = null); Spacer(Modifier.width(8.dp)); Text("تنفيذ")
+                Button(onClick = {
+                    val value = text.trim()
+                    if (value.isNotEmpty()) {
+                        request = AssistantRequest(System.currentTimeMillis(), value)
+                        text = ""
+                        scope.launch { kotlinx.coroutines.delay(180); open = false }
+                    }
+                }, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Filled.Send, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("تنفيذ")
                 }
                 Spacer(Modifier.height(20.dp))
             }
