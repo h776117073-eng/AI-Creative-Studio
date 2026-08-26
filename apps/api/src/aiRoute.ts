@@ -27,6 +27,7 @@ async function advancedRender(req:Request,res:Response,db:Database.Database){
       if((clip.effects||[]).includes('blur'))vf.push('boxblur=4:1');if((clip.effects||[]).includes('vignette'))vf.push('vignette=PI/4');
       const texts=(timeline.tracks.find((t:any)=>t.type==='text')?.clips||[]).filter((t:any)=>t.startTime<clip.endTime&&t.endTime>clip.startTime&&t.text);for(const t of texts){const ls=Math.max(0,t.startTime-clip.startTime),le=Math.min(dur,t.endTime-clip.startTime);if(le>ls)vf.push(`drawtext=text='${escText(t.text)}':fontcolor=${t.color||'white'}:fontsize=${Number(t.fontSize||48)}:x=(w-text_w)/2:y=h*0.82:enable='between(t,${ls},${le})'`);}
       if(Number(clip.fadeIn||0)>0)vf.push(`fade=t=in:st=0:d=${Math.min(Number(clip.fadeIn),dur)}`);if(Number(clip.fadeOut||0)>0){const fo=Math.min(Number(clip.fadeOut),dur);vf.push(`fade=t=out:st=${Math.max(0,dur-fo)}:d=${fo}`);}
+      vf.push('scale=1280:720:force_original_aspect_ratio=decrease','pad=1280:720:(ow-iw)/2:(oh-ih)/2','setsar=1');
       const vi=vfLabels.length;vfLabels.push(`[${input}:v:0]${vf.join(',')}[v${vi}]`);
       const af=['aresample=48000','asetpts=PTS-STARTPTS',atempo(speed),`volume=${Math.max(0,Math.min(4,Number(clip.volume??1)))}`];if(Number(clip.fadeIn||0)>0)af.push(`afade=t=in:st=0:d=${Math.min(Number(clip.fadeIn),dur)}`);if(Number(clip.fadeOut||0)>0){const fo=Math.min(Number(clip.fadeOut),dur);af.push(`afade=t=out:st=${Math.max(0,dur-fo)}:d=${fo}`);}afLabels.push(`[${audio?input:input+1}:a:0]${af.join(',')}[a${vi}]`);
     }
