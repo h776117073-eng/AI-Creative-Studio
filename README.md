@@ -4,7 +4,8 @@ This branch integrates the executable video-editing core into the Creative Studi
 
 ## What works now
 
-- React/TypeScript editor workspace
+- React/TypeScript Vireon editor workspace
+- Reference-inspired dark Arabic-first editing UI
 - Real project persistence with SQLite through `apps/api`
 - Real local video upload and FFprobe metadata discovery
 - Multi-clip video timeline with persistent clip state
@@ -12,7 +13,9 @@ This branch integrates the executable video-editing core into the Creative Studi
 - Undo/redo history (bounded)
 - Arabic/English deterministic editing commands without an API key
 - Optional OpenAI Responses API tool provider (`apps/api/src/aiProvider.ts`)
-- Real FFmpeg MP4/H.264/AAC export, including multiple video clips with silent audio synthesis when a source has no audio
+- Real FFmpeg MP4/H.264/AAC export
+- Contextual tool panels for media, audio, text, effects, transitions, color and AI
+- Floating AI assistant and Arabic/English UI switch
 - Shared Timeline and `edit_timeline` contracts
 - Automated regression suite that creates a real test video, uploads it, edits it, undoes/redoes it and renders a real MP4
 - GitHub Actions integration CI for API and web builds
@@ -31,7 +34,3 @@ The web app runs through Vite and the API on port `8787`.
 ## Optional AI provider
 
 Set `OPENAI_API_KEY` to enable the Responses API tool provider. Without it, local deterministic command parsing remains available for offline development and testing.
-
-## Architecture direction
-
-`AI-Creative-Studio` is the execution base because it already contains the Timeline, Rendering, Animation, Media, Asset, Project, State and AI engine foundations. The contracts from AI Video Studio are preserved under `packages/shared` and the API/runtime is being hardened around a vertical slice: import → timeline → AI command → undo/redo → MP4 render.
