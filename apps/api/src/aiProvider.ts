@@ -6,7 +6,7 @@ function numberFrom(text:string){const m=text.match(/(\d+(?:[.,]\d+)?)/);return 
 function clipFor(timeline:any,activeClipId?:string){const tracks=timeline?.tracks||[];for(const track of tracks){const found=(track.clips||[]).find((c:any)=>c.id===activeClipId);if(found)return found;}for(const type of ['video','audio','text','overlay']){const found=tracks.find((t:any)=>t.type===type)?.clips?.[0];if(found)return found;}return tracks.find((t:any)=>(t.clips||[]).length)?.clips?.[0];}
 export function localCommand(text:string,timeline:any,activeClipId?:string):EditCommand{
   const s=text.toLowerCase().replace(/[ًٌٍَُِّْـ]/g,'').replace(/\s+/g,' ').trim();const clip=clipFor(timeline,activeClipId);const n=numberFrom(s);
-  if(/(أضف نص|اضف نص|اكتب|عنوان|نص:|text:)/.test(s)){const raw=text.replace(/^(أضف نص|اضف نص|اكتب|عنوان|نص:|text:)\s*/i,'').trim();return{type:'add_text',text:raw||'نص جديد',time:n??timeline?.currentTime??0,message:'أضفت النص عند مؤشر التشغيل.'};}
+  if(/(أضف نص|اضف نص|اكتب|عنوان|نص:|text:)/.test(s)){const raw=text.replace(/^(\s*)(أضف نص|اضف نص|اكتب|عنوان|نص\s*:|text\s*:)[\s:]*/i,'').trim();return{type:'add_text',text:raw||'نص جديد',time:n??timeline?.currentTime??0,message:'أضفت النص عند مؤشر التشغيل.'};}
   if(!clip)return{type:'noop',message:'أضف وسائط أولًا.'};
   if(/(قسّم|قسم|split)/.test(s))return{type:'split',time:/نصف|نصفين|half/.test(s)?clip.startTime+clip.duration/2:(n??timeline?.currentTime??clip.startTime+clip.duration/2),clipId:clip.id,message:'قسّمت المقطع عند مؤشر التشغيل.'};
   if(/(احذف|حذف|أزل|ازل|remove|delete)/.test(s))return{type:'delete',clipId:clip.id,message:'حذفت المقطع المحدد.'};
@@ -16,7 +16,7 @@ export function localCommand(text:string,timeline:any,activeClipId?:string):Edit
   if(/(صوت|volume|مستوى)/.test(s)&&n!==undefined)return{type:'set_volume',value:Math.max(0,Math.min(4,n>4?n/100:n)),clipId:clip.id,message:`ضبطت الصوت إلى ${n}%.`};
   if(/(كتم|mute)/.test(s))return{type:'set_volume',value:0,clipId:clip.id,message:'تم كتم الصوت.'};
   if(/(سرعة|speed|تسريع|تبطيء)/.test(s)){const v=n!==undefined?(n>4?n/100:n):1;return{type:'set_speed',value:Math.max(.25,Math.min(4,v)),clipId:clip.id,message:`ضبطت السرعة إلى ${Math.round(Math.max(.25,Math.min(4,v))*100)}%.`};}
-  if(/(تدوير|rotate)/.test(s))return{type:'rotate',value:n===undefined?90:n,clipId:clip.id,message:`دوّرت المقطع ${n??90} درجة.`};
+  if(/(تدوير|دور|rotate)/.test(s))return{type:'rotate',value:n===undefined?90:n,clipId:clip.id,message:`دوّرت المقطع ${n??90} درجة.`};
   if(/(قلب|flip)/.test(s)&&/(أفقي|افقي|horizontal)/.test(s))return{type:'flip_h',clipId:clip.id,message:'قلبت المقطع أفقيًا.'};
   if(/(قلب|flip)/.test(s)&&/(رأسي|راسي|vertical)/.test(s))return{type:'flip_v',clipId:clip.id,message:'قلبت المقطع رأسيًا.'};
   if(/(سطوع|brightness)/.test(s)&&n!==undefined)return{type:'set_brightness',value:Math.max(-1,Math.min(1,n>1?n/100:n)),clipId:clip.id,message:'تم ضبط السطوع.'};
