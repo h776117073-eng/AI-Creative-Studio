@@ -24,12 +24,12 @@ async function advancedRender(req:Request,res:Response,db:Database.Database){
       const speed=Math.max(.25,Math.min(4,Number(clip.speed||1)));const dur=Math.max(.01,(clip.trimEnd-clip.trimStart)/speed);totalVideo+=dur;
       const vf:string[]=['setpts=PTS-STARTPTS',`setpts=PTS/${speed}`];if(clip.flipH)vf.push('hflip');if(clip.flipV)vf.push('vflip');const rot=((Number(clip.rotate||0)%360)+360)%360;if(rot===90)vf.push('transpose=1');else if(rot===180)vf.push('hflip','vflip');else if(rot===270)vf.push('transpose=2');
       const br=Number(clip.brightness||0),ct=Number(clip.contrast||1),sat=Number(clip.saturation||1);if(br!==0||ct!==1||sat!==1||clip.grayscale)vf.push(`eq=brightness=${br}:contrast=${ct}:saturation=${clip.grayscale?0:sat}`);
-      if((clip.effects||[]).includes('blur'))vf.push('boxblur=4:1');if((clip.effects||[]).includes('vignette'))vf.push('vignette=PI/4');
+      const effects=Array.isArray(clip.effects)?clip.effects:[];if(effects.includes('blur'))vf.push('boxblur=4:1');if(effects.includes('vignette'))vf.push('vignette=PI/4');if(effects.includes('grain'))vf.push('noise=alls=7:allf=t+u');if(effects.includes('enhance'))vf.push('unsharp=5:5:0.6:5:5:0.0');if(effects.includes('night'))vf.push('eq=brightness=-0.08:contrast=1.05:saturation=0.9');
       const texts=(timeline.tracks.find((t:any)=>t.type==='text')?.clips||[]).filter((t:any)=>t.startTime<clip.endTime&&t.endTime>clip.startTime&&t.text);for(const t of texts){const ls=Math.max(0,t.startTime-clip.startTime),le=Math.min(dur,t.endTime-clip.startTime);if(le>ls)vf.push(`drawtext=text='${escText(t.text)}':fontcolor=${t.color||'white'}:fontsize=${Number(t.fontSize||48)}:x=(w-text_w)/2:y=h*0.82:enable='between(t,${ls},${le})'`);}
       if(Number(clip.fadeIn||0)>0)vf.push(`fade=t=in:st=0:d=${Math.min(Number(clip.fadeIn),dur)}`);if(Number(clip.fadeOut||0)>0){const fo=Math.min(Number(clip.fadeOut),dur);vf.push(`fade=t=out:st=${Math.max(0,dur-fo)}:d=${fo}`);}
       vf.push('scale=1280:720:force_original_aspect_ratio=decrease','pad=1280:720:(ow-iw)/2:(oh-ih)/2','setsar=1');
       const vi=vfLabels.length;vfLabels.push(`[${input}:v:0]${vf.join(',')}[v${vi}]`);
-      const af=['aresample=48000','asetpts=PTS-STARTPTS',atempo(speed),`volume=${Math.max(0,Math.min(4,Number(clip.volume??1)))}`];if(Number(clip.fadeIn||0)>0)af.push(`afade=t=in:st=0:d=${Math.min(Number(clip.fadeIn),dur)}`);if(Number(clip.fadeOut||0)>0){const fo=Math.min(Number(clip.fadeOut),dur);af.push(`afade=t=out:st=${Math.max(0,dur-fo)}:d=${fo}`);}afLabels.push(`[${audio?input:input+1}:a:0]${af.join(',')}[a${vi}]`);
+      const af=['aresample=48000','asetpts=PTS-STARTPTS',atempo(speed),`volume=${Math.max(0,Math.min(4,Number(clip.volume??1)))}`];if(Number(clip.fadeIn||0)>0)af.push(`afade=t=in:st=0:d=${Math.min(Number(clip.fadeIn),dur)}`);if(Number(clip.fadeOut||0)>0){const fo=Math.min(Number(clip.fadeOut),dur);af.push(`afade=t=out:st=${Math.max(0,dur-fo)}:d=${fo}`);}if(effects.includes('voice-enhance'))af.push('highpass=f=80','lowpass=f=12000','acompressor=threshold=-18dB:ratio=3:attack=20:release=250:makeup=2');if(effects.includes('noise-reduce'))af.push('afftdn=nf=-25');afLabels.push(`[${audio?input:input+1}:a:0]${af.join(',')}[a${vi}]`);
     }
     let filter=`${vfLabels.join(';')};${afLabels.join(';')};`;
     const vcat=vfLabels.map((_,i)=>`[v${i}]`).join('');const acat=afLabels.map((_,i)=>`[a${i}]`).join('');
@@ -55,6 +55,8 @@ export function registerAIRoute(app:Express,db:Database.Database){
       out.tracks.forEach((t:any)=>t.clips.sort((a:any,b:any)=>a.startTime-b.startTime));out.duration=Math.max(0,...out.tracks.flatMap((t:any)=>t.clips.map((c:any)=>c.endTime)));out.currentTime=Number(command.time??out.currentTime??0);const history=JSON.parse(p.history_json).slice(0,Number(p.history_index)+1);history.push(out);const bounded=history.slice(-100);db.prepare('UPDATE projects SET timeline_json=?,history_json=?,history_index=?,updated_at=? WHERE id=?').run(JSON.stringify(out),JSON.stringify(bounded),bounded.length-1,new Date().toISOString(),projectId);res.json({provider:process.env.AI_BASE_URL||process.env.AI_API_KEY||process.env.OPENAI_API_KEY?'ai':'local',command,timeline:out});
     }catch(error){console.error('ai-command failed',error);res.status(500).json({error:'Failed to execute AI command'});}
   });
-  app.post('/api/projects/:id/render-advanced',(req,res)=>advancedRender(req,res,db));
+  app.get('/api/projects/:id/render',(req,res)=>void advancedRender(req,res,db));
+  app.post('/api/projects/:id/render-advanced',(req,res)=>void advancedRender(req,res,db));
+  app.get('/api/projects/:id/render-advanced',(req,res)=>void advancedRender(req,res,db));
   const stack:any[]=(app as any)._router?.stack||[];const renderLayer=stack.find(l=>l?.route?.path==='/api/projects/:id/render');if(renderLayer?.route?.stack?.[0])renderLayer.route.stack[0].handle=(req:Request,res:Response)=>advancedRender(req,res,db);
 }
