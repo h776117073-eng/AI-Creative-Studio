@@ -29,7 +29,7 @@ export function localCommand(text:string,timeline:any,activeClipId?:string):Edit
   if(/(تلاشي|fade).*(خروج|نهاية|out)/.test(s))return{type:'fade_out',value:n??1,clipId:clip.id,message:'تمت إضافة تلاشي خروج.'};
   if(/(انتقال|transition)/.test(s)&&/(fade|تلاشي)/.test(s))return{type:'set_transition',transition:'fade',clipId:clip.id,value:n??0.5,message:'تمت إضافة انتقال تلاشي.'};
   if(/(انتقال|transition)/.test(s)&&/(dissolve|ذوبان)/.test(s))return{type:'set_transition',transition:'dissolve',clipId:clip.id,value:n??0.5,message:'تمت إضافة انتقال ذوبان.'};
-  return{type:'noop',message:'استخدم Split/Trim/Volume/Speed/Color/Effects أو اكتب أمرًا مباشرًا.'};
+  return{type:'noop',message:'استخدم أدوات التحرير المتاحة أو اكتب أمرًا مباشرًا.'};
 }
 export async function parseWithOpenAI(text:string,timeline:any,fallback:EditCommand,activeClipId?:string):Promise<EditCommand>{
   const clip=clipFor(timeline,activeClipId);const local=localCommand(text,timeline,activeClipId);const base=process.env.AI_BASE_URL||'https://api.openai.com/v1';const key=process.env.AI_API_KEY||process.env.OPENAI_API_KEY;const model=process.env.AI_MODEL||process.env.OPENAI_MODEL;
