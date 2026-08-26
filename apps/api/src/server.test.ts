@@ -85,6 +85,7 @@ describe('professional timeline API', () => {
 
   it('renders a real MP4 from the multi-track timeline', async () => {
     const response = await request(app).post(`/api/projects/${projectId}/render`);
+    if (response.status !== 200) console.error('RENDER_REGRESSION_ERROR', response.body);
     expect(response.status).toBe(200);
     expect(response.headers['content-type']).toMatch(/video\/mp4/);
     expect(Number(response.headers['content-length'] || 0)).toBeGreaterThan(1000);
