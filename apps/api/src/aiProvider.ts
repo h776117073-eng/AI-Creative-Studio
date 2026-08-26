@@ -28,7 +28,18 @@ export function localCommand(text:string,timeline:any,activeClipId?:string):Edit
   if(/(تلاشي|fade).*(دخول|بداية|in)/.test(s))return{type:'fade_in',value:n??1,clipId:clip.id,message:'تمت إضافة تلاشي دخول.'};
   if(/(تلاشي|fade).*(خروج|نهاية|out)/.test(s))return{type:'fade_out',value:n??1,clipId:clip.id,message:'تمت إضافة تلاشي خروج.'};
   if(/(انتقال|transition)/.test(s)&&/(fade|تلاشي)/.test(s))return{type:'set_transition',transition:'fade',clipId:clip.id,value:n??0.5,message:'تمت إضافة انتقال تلاشي.'};
-  if(/(انتقال|transition)/.test(s)&&/(dissolve|ذوبان)/.test(s))return{type:'set_transition',transition:'dissolve',clipId:clip.id,value:n??0.5,message:'تمت إضافة انتقال ذوبان.'};
+  if(/(انتقال|transition)/.test(s)&&/(dissolve|ذوبان|مزج)/.test(s))return{type:'set_transition',transition:'dissolve',clipId:clip.id,value:n??0.5,message:'تمت إضافة انتقال مزج.'};
+  if(/(انتقال|transition)/.test(s)&&/(zoom|تكبير)/.test(s))return{type:'set_transition',transition:'zoom',clipId:clip.id,value:n??0.5,message:'تمت إضافة انتقال تكبير.'};
+  const effectRules:[RegExp,string,string][]=[
+    [/(قالب|template).*(سينمائي|cinematic)/,'cinematic','تم تطبيق القالب السينمائي.'],[(/vlog/),'vlog','تم تطبيق قالب Vlog.'],[/(ريلز|reels)/,'reels','تم تطبيق قالب ريلز.'],
+    [/(تحسين الصوت|حسّن الصوت|voice enhance|noise)/,'voice-enhance','تم تحسين الصوت.'],[(/تمويه/),'blur','تم تطبيق التمويه.'],[/(وهج|glow)/,'glow','تم تطبيق الوهج.'],[/(حبيبات|grain|film grain)/,'grain','تم تطبيق حبيبات الفيلم.'],
+    [/(ليلي|سينمائية زرقاء|night)/,'night','تم تطبيق المعالجة الليلية السينمائية.'],[/(ملصق|sticker)/,'sticker','تمت إضافة الملصق.'],[/(رموز|emoji)/,'emoji','تمت إضافة الرموز.'],[/(تراكب|overlay|طبقة)/,'overlay','تمت إضافة طبقة التراكب.'],
+    [/(نص متحرك|animated text)/,'animated-text','تمت إضافة حركة للنص.'],[/(ترجمة تلقائية|auto captions|captions)/,'auto-captions','تم إنشاء مسار ترجمة تلقائية.'],[/(حذف الصمت|قص الصمت|silence)/,'silence-cut','تم تحليل الصمت وتطبيق قصه.'],
+    [/(مزامنة الإيقاع|beat sync|beats)/,'beat-sync','تمت مزامنة القطع مع الإيقاع.'],[/(تحسين الجودة|enhance|upscale)/,'enhance','تم تطبيق تحسين الجودة.'],[/(حركة كاميرا|camera motion)/,'camera-motion','تم تطبيق حركة كاميرا سينمائية.'],
+    [/(تتبع الحركة|tracking|motion track)/,'tracking','تم تفعيل تتبع الحركة.'],[/(تسجيل|تعليق صوتي|voiceover)/,'voiceover','تم تجهيز مسار التعليق الصوتي.'],[/(تجميد|freeze)/,'freeze','تم تثبيت الإطار الحالي.'],[/(لقطة|snapshot)/,'snapshot','تم حفظ لقطة الإطار.'],
+    [/(مفتاح AI|ai)/,'ai-pass','تم تشغيل أداة الذكاء الاصطناعي.']
+  ];
+  for(const [rx,effect,message] of effectRules)if(rx.test(s))return{type:'set_effect',effect,clipId:clip.id,message};
   return{type:'noop',message:'استخدم أدوات التحرير المتاحة أو اكتب أمرًا مباشرًا.'};
 }
 export async function parseWithOpenAI(text:string,timeline:any,fallback:EditCommand,activeClipId?:string):Promise<EditCommand>{
