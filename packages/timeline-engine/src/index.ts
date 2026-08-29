@@ -48,3 +48,6 @@ export class TimelineEngine extends BaseEngine{
 }
 export const clamp=(v:number,min:number,max:number)=>Math.max(min,Math.min(max,v));
 export * from './editing.js';
+export * from './interaction.js';
+export * from './transactions.js';
+export * from './caches.js';
