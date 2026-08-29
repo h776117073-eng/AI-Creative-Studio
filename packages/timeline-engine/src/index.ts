@@ -514,7 +514,11 @@ export class TimelineEngine extends BaseEngine implements IPlaybackController {
       'timeline:keyframe-add',
       'timeline:marker-add',
       'timeline:snapping',
+      'timeline:ripple-edit',
+      'timeline:collision-resolution',
       'timeline:loop-playback',
     ];
   }
 }
+
+export * from './editing';
