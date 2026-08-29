@@ -21,6 +21,7 @@ export class TimelineEngine extends BaseEngine{
  protected async onInitialize():Promise<void>{}
  protected override async onDestroy():Promise<void>{this.stop()}
  getState():ITimelineState{return structuredClone(this.timelineState)}
+ loadState(state:ITimelineState):void{this.stop();this.timelineState=structuredClone(state);this.recomputeDuration();this.timelineState.currentTime=this.clamp(this.timelineState.currentTime);this.changed()}
  getTrack(id:string){return this.timelineState.tracks.find(t=>t.id===id)}
  getAllTracks(){return[...this.timelineState.tracks]}
  addTrack(type:TrackType,name?:string,options?:Partial<ITrack>){if(this.timelineState.tracks.length>=this.maxTracks)throw new Error('Maximum track count reached');const t:ITrack={id:uuidv4(),name:name||`${type} ${this.timelineState.tracks.length+1}`,type,clips:[],muted:false,locked:false,visible:true,height:type==='audio'?80:64,order:this.timelineState.tracks.length,magnetic:type==='video',...options};this.timelineState.tracks.push(t);this.emitT('timeline:track:added',{track:t});this.changed();return t}
@@ -38,7 +39,7 @@ export class TimelineEngine extends BaseEngine{
  setLoop(enabled:boolean,region?:{start:number;end:number}){this.timelineState.loopEnabled=enabled;this.timelineState.loopRegion=enabled?region:undefined;this.changed()}
  play(){if(this.timelineState.isPlaying)return;this.timelineState.isPlaying=true;this.lastFrameTime=performance.now();this.emitT('timeline:play',{});this.changed();this.tick()}
  pause(){this.timelineState.isPlaying=false;if(this.animationFrameId!==null&&typeof cancelAnimationFrame==='function')cancelAnimationFrame(this.animationFrameId);this.animationFrameId=null;this.emitT('timeline:pause',{});this.changed()}
- stop(){this.pause();this.timelineState.currentTime=0;this.emitT('timeline:stop',{});this.changed()}
+ stop(){this.timelineState.isPlaying=false;if(this.animationFrameId!==null&&typeof cancelAnimationFrame==='function')cancelAnimationFrame(this.animationFrameId);this.animationFrameId=null;this.timelineState.currentTime=0;this.emitT('timeline:stop',{});this.changed()}
  snapTime(time:number,excludeClipId?:string,tolerance=this.snappingTolerance){let best=time,d=Math.max(0,tolerance);for(const target of this.snapTargets(excludeClipId)){const x=Math.abs(target-time);if(x<=d){best=target;d=x}}return best}
  getSnapTargets(excludeClipId?:string){return this.snapTargets(excludeClipId)}
  onTimeline<E extends keyof ITimelineEvents>(event:E,listener:(data:ITimelineEvents[E])=>void){this.timelineEmitter.on(event as string,listener as any);return this}
@@ -51,3 +52,4 @@ export * from './editing.js';
 export * from './interaction.js';
 export * from './transactions.js';
 export * from './caches.js';
+export * from './controller.js';
