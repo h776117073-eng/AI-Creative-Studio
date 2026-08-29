@@ -18,6 +18,8 @@ jobs:
         run: npm install
       - name: Build timeline engine
         run: npm run build -w @ai-creative-studio/timeline-engine
+      - name: Run timeline interaction self test
+        run: npm run test:self -w @ai-creative-studio/timeline-engine
 
   api:
     runs-on: ubuntu-latest
