@@ -12,8 +12,7 @@ export async function runTimelineSelfTest(): Promise<void> {
   const a = engine.addClip(video.id, { name: 'A', startTime: 0, duration: 2 });
   const b = engine.addClip(video.id, { name: 'B', startTime: 2, duration: 2 });
   if (!a || !b) throw new Error('clip creation failed');
-  const moved = engine.moveClip(b.id, overlay.id, 1, { snap: true });
-  if (!moved) throw new Error('move failed');
+  if (!engine.moveClip(b.id, overlay.id, 1, { snap: true })) throw new Error('move failed');
   const split = engine.splitClip(a.id, 1);
   if (!split || split.length !== 2) throw new Error('split failed');
 
@@ -46,8 +45,22 @@ export async function runTimelineSelfTest(): Promise<void> {
   if (!history.canUndo || !history.undo(s2)) throw new Error('undo failed');
   if (!history.canRedo || !history.redo(s1)) throw new Error('redo failed');
 
-  const tc = new ThumbnailCache<string>(4); tc.set(thumbnailKey('a', 0, 64), 'x'); if (!tc.get(thumbnailKey('a', 0, 64))) throw new Error('thumbnail cache failed');
-  const wc = new WaveformCache<Float32Array>(4); wc.set(waveformKey('a', 0, 2), new Float32Array([1])); if (!wc.get(waveformKey('a', 0, 2))) throw new Error('waveform cache failed');
+  const tc = new ThumbnailCache<string>(4);
+  tc.set(thumbnailKey('a', 0, 64), 'x');
+  if (!tc.get(thumbnailKey('a', 0, 64))) throw new Error('thumbnail cache failed');
+  const wc = new WaveformCache<Float32Array>(4);
+  wc.set(waveformKey('a', 0, 2), new Float32Array([1]));
+  if (!wc.get(waveformKey('a', 0, 2))) throw new Error('waveform cache failed');
+
+  const perfStart = Date.now();
+  const perfSelection = new SelectionEngine();
+  for (let i = 0; i < 5000; i += 1) perfSelection.add(`clip-${i}`);
+  for (let i = 0; i < 5000; i += 17) perfSelection.remove(`clip-${i}`);
+  for (let i = 0; i < 10000; i += 1) virtualizeTracks(5000, (i % 500) * 72, 500, 72, 4);
+  const perfMs = Date.now() - perfStart;
+  if (perfMs > 2500) throw new Error(`timeline interaction performance smoke test too slow: ${perfMs}ms`);
+  console.log(`timeline interaction performance smoke: PASS (${perfMs}ms)`);
+
   await engine.destroy();
 }
 
