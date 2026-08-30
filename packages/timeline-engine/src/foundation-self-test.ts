@@ -8,9 +8,9 @@ import {
   type ITimelineState,
 } from './index.js';
 
-const assert: (condition: unknown, message: string) => asserts condition = (condition, message) => {
+function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
-};
+}
 const close = (a: number, b: number, eps = 1e-4) => Math.abs(a - b) <= eps;
 
 const base: ITimelineState = {
