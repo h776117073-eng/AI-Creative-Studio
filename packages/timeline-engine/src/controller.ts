@@ -3,6 +3,7 @@ import { rippleTrim, findClip } from './editing.js';
 import { addOrUpdateKeyframe, enforceMagneticTrack, linkClips, moveGroup, rippleDeleteGroup, rollEditAdvanced, setSpeedCurve, setTransition, slipEditAdvanced, slideEditAdvanced, unlinkClips, quantizeFrame, sourceDuration, type SpeedPoint } from './advanced-editing.js';
 import { SelectionEngine, TrackTargeting, type ClipBounds, type EditIntent } from './interaction.js';
 import { TimelineHistory } from './transactions.js';
+import { extractRange, freezeFrame, insertClipAt, liftRange, normalizeProfessionalTimeline, rippleTrimLinked, setClipSpeed, setSpeedCurveCapCutStyle, type EditWindow, type InsertMode, type RetimePoint } from './professional-parity.js';
 
 export interface TimelineControllerConfig { id?: string; name?: string; frameRate?: number; maxTracks?: number; snappingTolerance?: number }
 
@@ -88,10 +89,18 @@ export class TimelineInteractionController {
   slide(clipId: string, deltaTime: number): boolean { return this.transact('Slide Edit', () => slideEditAdvanced(this.engine.getState(), clipId, deltaTime, this.engine.frameRate).changed); }
   setTransition(clipId: string, edge: 'in'|'out', type: string, duration: number): boolean { return this.transact('Transition', () => setTransition(this.engine.getState(), clipId, edge, type, duration).changed); }
   setSpeedCurve(clipId: string, points: SpeedPoint[]): boolean { return this.transact('Speed Curve', () => { const f=findClip(this.engine.getState(),clipId); return !!f && setSpeedCurve(f[0],points).changed; }); }
+  setClipSpeed(clipId: string, speed: number, preservePitch = true): boolean { return this.transact('Clip Speed', () => { const f=findClip(this.engine.getState(),clipId); return !!f && setClipSpeed(f[0],speed,preservePitch).changed; }); }
+  setSpeedCurveProfessional(clipId: string, points: RetimePoint[]): boolean { return this.transact('Professional Speed Curve', () => { const f=findClip(this.engine.getState(),clipId); return !!f && setSpeedCurveCapCutStyle(f[0],points,this.engine.frameRate).changed; }); }
+  freezeFrame(clipId: string, atTime?: number): boolean { return this.transact('Freeze Frame', () => freezeFrame(this.engine.getState(),clipId,atTime,this.engine.frameRate).changed); }
+  insertClip(clip: IClip, trackId: string, startTime: number, mode: InsertMode = 'insert'): boolean { return this.transact('Insert Clip', () => insertClipAt(this.engine.getState(),trackId,clip,startTime,mode,this.engine.frameRate).changed); }
+  liftRange(trackIds: string[], window: EditWindow): boolean { return this.transact('Lift Range', () => liftRange(this.engine.getState(),trackIds,window).changed); }
+  extractRange(trackIds: string[], window: EditWindow): boolean { return this.transact('Extract Range', () => extractRange(this.engine.getState(),trackIds,window).changed); }
+  rippleTrimLinked(clipId: string, edge: 'start'|'end', newSourceTime: number): boolean { return this.transact('Linked Ripple Trim', () => rippleTrimLinked(this.engine.getState(),clipId,edge,newSourceTime,this.engine.frameRate).changed); }
   addKeyframe(clipId: string, keyframe: Omit<import('./index.js').IKeyframe,'id'> & {id?: string}): boolean { return this.transact('Keyframe', () => { const f=findClip(this.engine.getState(),clipId); return !!f && addOrUpdateKeyframe(f[0],keyframe).changed; }); }
   linkSelected(): boolean { return this.transact('Link Clips', () => linkClips(this.engine.getState(), this.selection.selectedIds).changed); }
   unlinkSelected(): boolean { return this.transact('Unlink Clips', () => unlinkClips(this.engine.getState(), this.selection.selectedIds).changed); }
   enforceMagnetic(trackId: string): boolean { return this.transact('Magnetic Track', () => enforceMagneticTrack(this.engine.getState(),trackId).changed); }
+  normalize(): boolean { return this.transact('Normalize Timeline', () => normalizeProfessionalTimeline(this.engine.getState(),this.engine.frameRate).changed); }
   commitInteraction(label='تحرير'): void { if (!this.transactionBefore) return; this.history.commit(label,this.transactionBefore,this.getState()); this.transactionBefore=null; }
   cancelInteraction(): void { if (this.transactionBefore) this.engine.loadState(this.transactionBefore); this.transactionBefore=null; }
   undo(): ITimelineState|null { const s=this.history.undo(this.getState()); if (s) this.engine.loadState(s); return s; }
