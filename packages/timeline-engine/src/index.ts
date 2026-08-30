@@ -53,3 +53,4 @@ export * from './interaction.js';
 export * from './transactions.js';
 export * from './caches.js';
 export * from './controller.js';
+export * from './advanced-editing.js';
