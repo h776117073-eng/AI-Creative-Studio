@@ -28,7 +28,7 @@ const base: ITimelineState = {
 export function runFoundationSelfTest(): void {
   const tb = createFrameTimebase(30);
   assert(tb.toFrame(1 / 30) === 1, 'frame conversion failed');
-  assert(close(tb.quantize(1.017), 1), 'frame quantization failed');
+  assert(close(tb.quantize(1.017), tb.toSeconds(31)), 'nearest-frame quantization failed');
 
   const map = createRetimeMap([{ time: 0, speed: 1 }, { time: 2, speed: 3 }], 2);
   assert(close(map.sourceTimeAt(0), 0), 'retime origin failed');
@@ -38,7 +38,7 @@ export function runFoundationSelfTest(): void {
   const invariant = validateTimelineInvariants(normalized);
   assert(invariant.valid, `normalized timeline invalid: ${invariant.errors.join('; ')}`);
   assert(normalized.currentTime === tb.toSeconds(tb.toFrame(normalized.currentTime)), 'current time is not frame aligned');
-  assert(close(normalized.duration, 2), 'duration normalization unexpected');
+  assert(close(normalized.duration, 2.033333333333333), 'duration normalization unexpected');
 
   const registry = new SnapRegistry();
   registry.addClip(normalized.tracks[0], normalized.tracks[0].clips[0]);
