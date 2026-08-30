@@ -6,10 +6,12 @@ on:
     paths:
       - 'tools/capcut-study/**'
       - '.github/workflows/dissect.yml'
+  schedule:
+    - cron: '0 2 * * 1'
   workflow_dispatch:
     inputs:
       apk_url:
-        description: 'Direct URL to an APK/XAPK that you are authorized to analyze'
+        description: 'Direct APK/XAPK URL. Leave empty to auto-fetch the latest public CapCut APK page.'
         required: false
         default: ''
         type: string
@@ -19,7 +21,7 @@ permissions:
 
 jobs:
   self-test:
-    if: github.event_name == 'push' || github.event.inputs.apk_url == ''
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -29,31 +31,38 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Validate syntax
-        run: python -m py_compile tools/capcut-study/dissect_capcut_runner.py
-      - name: Run deterministic self-test
+      - name: Validate study scripts
+        run: |
+          python -m py_compile tools/capcut-study/fetch_apk.py
+          python -m py_compile tools/capcut-study/dissect_capcut_runner.py
+          python -m py_compile tools/capcut-study/compare_vireon.py
+      - name: Run deterministic dissector self-test
         run: python tools/capcut-study/dissect_capcut_runner.py --self-test
 
   analyze:
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.apk_url != ''
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: temurin
+
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
       - name: Install native utilities
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends curl unzip binutils file
+
       - name: Install pinned Apktool 2.9.3
         run: |
           set -euo pipefail
@@ -63,6 +72,7 @@ jobs:
           sudo cp /tmp/apktool.jar /usr/local/bin/apktool.jar
           sudo cp /tmp/apktool /usr/local/bin/apktool
           apktool --version
+
       - name: Install pinned JADX 1.5.0
         run: |
           set -euo pipefail
@@ -74,23 +84,48 @@ jobs:
           sudo mkdir -p /usr/local/lib/jadx
           sudo cp -R /tmp/jadx/jadx-1.5.0/lib/. /usr/local/lib/jadx/
           jadx --version
-      - name: Download authorized APK/XAPK
+
+      - name: Resolve APK source
         env:
           APK_URL: ${{ github.event.inputs.apk_url }}
         run: |
           set -euo pipefail
           mkdir -p target
-          curl -fL --retry 3 --retry-all-errors --max-time 600 "$APK_URL" -o target/input.apk_or_xapk
+          if [ -n "${APK_URL:-}" ]; then
+            echo "[*] Using supplied APK/XAPK URL"
+            curl -fL --retry 3 --retry-all-errors --max-time 600 "$APK_URL" -o target/input.apk_or_xapk
+            python - <<'PY'
+from pathlib import Path
+p=Path('target/input.apk_or_xapk')
+print('[PASS] direct download bytes:', p.stat().st_size)
+PY
+          else
+            echo "[*] Auto-fetching latest public CapCut APK from the configured distribution page"
+            python tools/capcut-study/fetch_apk.py --output target/input.apk_or_xapk --metadata target/capcut_fetch.json
+          fi
           file target/input.apk_or_xapk
           test -s target/input.apk_or_xapk
-      - name: Generate architecture fingerprint report
-        run: python tools/capcut-study/dissect_capcut_runner.py target/input.apk_or_xapk --output extracted_capcut --report CAPCUT_ARCHITECTURE_REPORT.md
-      - name: Upload architecture report and machine-readable fingerprint
+
+      - name: Generate architecture fingerprint
+        run: |
+          python tools/capcut-study/dissect_capcut_runner.py target/input.apk_or_xapk \
+            --output extracted_capcut \
+            --report CAPCUT_ARCHITECTURE_REPORT.md
+
+      - name: Compare CapCut fingerprint with Vireon architecture
+        run: |
+          python tools/capcut-study/compare_vireon.py \
+            extracted_capcut/architecture_fingerprint.json \
+            --output CAPCUT_VIREON_COMPARISON.md
+
+      - name: Upload architecture study reports
         uses: actions/upload-artifact@v4
         with:
-          name: CapCut-Architecture-Fingerprint
+          name: CapCut-Vireon-Architecture-Study
           path: |
             CAPCUT_ARCHITECTURE_REPORT.md
+            CAPCUT_VIREON_COMPARISON.md
             extracted_capcut/architecture_fingerprint.json
+            target/capcut_fetch.json
           if-no-files-found: error
           retention-days: 14
