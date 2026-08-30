@@ -6,7 +6,7 @@
   "types": "./src/index.ts",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test:self": "npx --yes tsx ./src/self-test.ts"
+    "test:self": "npx --yes tsx ./src/self-test.ts && npx --yes tsx ./src/foundation-self-test.ts"
   },
   "dependencies": {
     "@ai-creative-studio/core": "file:../core"
