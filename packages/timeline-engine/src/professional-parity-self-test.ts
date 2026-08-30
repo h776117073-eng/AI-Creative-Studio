@@ -13,7 +13,7 @@ import {
   validateTransitionPair,
 } from './professional-parity.js';
 
-const assert = (value: unknown, message: string): asserts value => { if (!value) throw new Error(message); };
+const assert: (value: unknown, message: string) => asserts value = (value, message) => { if (!value) throw new Error(message); };
 const close = (a:number,b:number,eps=1e-4)=>Math.abs(a-b)<=eps;
 const clip=(id:string,start:number,end:number,sourceDuration=12):IClip=>({id,name:id,startTime:start,endTime:end,trimStart:0,trimEnd:end-start,duration:end-start,speed:1,opacity:1,effects:[],animations:[],keyframes:[],metadata:{sourceDuration}});
 const state=(tracks:ITrack[]):ITimelineState=>({tracks,currentTime:0,duration:Math.max(0,...tracks.flatMap(t=>t.clips.map(c=>c.endTime))),isPlaying:false,playbackRate:1,loopEnabled:false,markers:[],snaps:[]});
