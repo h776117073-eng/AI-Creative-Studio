@@ -1,6 +1,6 @@
 name: Dissect Android Editor APK — Architecture Fingerprint
 
-on:
+'on':
   push:
     branches: [main]
     paths:
@@ -20,27 +20,7 @@ permissions:
   contents: read
 
 jobs:
-  self-test:
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Validate study scripts
-        run: |
-          python -m py_compile tools/capcut-study/fetch_apk.py
-          python -m py_compile tools/capcut-study/dissect_capcut_runner.py
-          python -m py_compile tools/capcut-study/compare_vireon.py
-      - name: Run deterministic dissector self-test
-        run: python tools/capcut-study/dissect_capcut_runner.py --self-test
-
-  analyze:
-    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+  validate-and-study:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -58,7 +38,15 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Validate study scripts
+        run: |
+          python -m py_compile tools/capcut-study/fetch_apk.py
+          python -m py_compile tools/capcut-study/dissect_capcut_runner.py
+          python -m py_compile tools/capcut-study/compare_vireon.py
+          python tools/capcut-study/dissect_capcut_runner.py --self-test
+
       - name: Install native utilities
+        if: ${{ github.event_name != 'push' || github.event_name == 'push' }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends curl unzip binutils file
@@ -94,15 +82,12 @@ jobs:
           if [ -n "${APK_URL:-}" ]; then
             echo "[*] Using supplied APK/XAPK URL"
             curl -fL --retry 3 --retry-all-errors --max-time 600 "$APK_URL" -o target/input.apk_or_xapk
-            python - <<'PY'
-from pathlib import Path
-p=Path('target/input.apk_or_xapk')
-print('[PASS] direct download bytes:', p.stat().st_size)
-PY
             printf '%s\n' '{"source":"supplied_url"}' > target/capcut_fetch.json
           else
-            echo "[*] Auto-fetching latest public CapCut APK from the configured distribution page"
-            python tools/capcut-study/fetch_apk.py --output target/input.apk_or_xapk --metadata target/capcut_fetch.json
+            echo "[*] Auto-fetching latest public CapCut APK"
+            python tools/capcut-study/fetch_apk.py \
+              --output target/input.apk_or_xapk \
+              --metadata target/capcut_fetch.json
           fi
           file target/input.apk_or_xapk
           test -s target/input.apk_or_xapk
