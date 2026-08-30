@@ -18,7 +18,7 @@ TERMS = (
     'timeline', 'track', 'segment', 'clip', 'keyframe', 'timerange', 'time_range', 'duration',
     'trim', 'split', 'transition', 'speed', 'curve', 'marker', 'playhead', 'ripple', 'slip',
     'slide', 'roll', 'snap', 'magnetic', 'draft', 'nle', 'composition', 'compositor', 'render',
-    'decoder', 'audio', 'waveform', 'media', 'source'
+    'decoder', 'audio', 'waveform', 'media', 'source', 'freeze', 'overwrite', 'insert'
 )
 
 
@@ -42,6 +42,18 @@ def rel(path: Path, root: Path) -> str:
     return str(path.resolve().relative_to(root.resolve()))
 
 
+def is_apk_container(path: Path) -> bool:
+    """Detect an APK by ZIP structure, independent of its filename extension."""
+    if not zipfile.is_zipfile(path):
+        return False
+    try:
+        with zipfile.ZipFile(path) as z:
+            names = set(z.namelist())
+            return 'AndroidManifest.xml' in names
+    except zipfile.BadZipFile:
+        return False
+
+
 def xapk_members(path: Path, out: Path) -> list[Path]:
     root = out / 'xapk'
     root.mkdir(parents=True, exist_ok=True)
@@ -62,9 +74,13 @@ def xapk_members(path: Path, out: Path) -> list[Path]:
 
 
 def inputs(path: Path, out: Path) -> list[Path]:
-    if path.suffix.lower() == '.xapk' or (zipfile.is_zipfile(path) and path.suffix.lower() != '.apk'):
+    # The workflow intentionally permits neutral names such as input.apk_or_xapk.
+    # Prefer content-based detection so a real APK is never mistaken for an XAPK.
+    if is_apk_container(path):
+        return [path]
+    if path.suffix.lower() == '.xapk' or zipfile.is_zipfile(path):
         return xapk_members(path, out)
-    return [path]
+    raise RuntimeError(f'Input is neither an APK container nor a supported XAPK/ZIP: {path}')
 
 
 def manifest(root: Path) -> dict[str, Any]:
@@ -100,11 +116,7 @@ def shaders(roots: list[Path]) -> list[dict[str, Any]]:
     for root in roots:
         for path in root.rglob('*'):
             if path.is_file() and (path.suffix.lower() in SHADERS or 'shader' in path.name.lower()):
-                rows.append({
-                    'path': rel(path, root),
-                    'size': path.stat().st_size,
-                    'sha256': digest(path),
-                })
+                rows.append({'path': rel(path, root), 'size': path.stat().st_size, 'sha256': digest(path)})
     return rows
 
 
@@ -120,10 +132,7 @@ def native(roots: list[Path]) -> list[dict[str, Any]]:
             symbol_lines = run(['nm', '-D', '--defined-only', str(path)], False).splitlines()
             string_lines = run(['strings', '-n', '5', str(path)], False).splitlines()
             symbol_hits = [line.strip() for line in symbol_lines if any(term in line.lower() for term in interesting_terms)][:60]
-            string_hits = sorted({
-                line.strip() for line in string_lines
-                if any(term in line.lower() for term in string_terms)
-            })[:80]
+            string_hits = sorted({line.strip() for line in string_lines if any(term in line.lower() for term in string_terms)})[:80]
             rows.append({
                 'name': path.name,
                 'abi': path.parent.name,
@@ -147,10 +156,7 @@ def source_scan(roots: list[Path]) -> dict[str, Any]:
             hits = {key: value for key, value in hits.items() if value}
             if hits:
                 counts.update(hits)
-                files.append({
-                    'path': rel(path, root),
-                    'terms': sorted(hits.items(), key=lambda item: (-item[1], item[0]))[:15],
-                })
+                files.append({'path': rel(path, root), 'terms': sorted(hits.items(), key=lambda item: (-item[1], item[0]))[:15]})
     return {
         'term_counts': counts.most_common(),
         'candidate_files': sorted(files, key=lambda item: sum(v for _, v in item['terms']), reverse=True)[:200],
@@ -176,12 +182,7 @@ def schemas(roots: list[Path]) -> dict[str, Any]:
         for path in root.rglob('*'):
             if not path.is_file() or path.suffix.lower() not in SCHEMAS or path.stat().st_size > 2_000_000:
                 continue
-            row: dict[str, Any] = {
-                'path': rel(path, root),
-                'suffix': path.suffix.lower(),
-                'size': path.stat().st_size,
-                'sha256': digest(path),
-            }
+            row: dict[str, Any] = {'path': rel(path, root), 'suffix': path.suffix.lower(), 'size': path.stat().st_size, 'sha256': digest(path)}
             if path.suffix.lower() in {'.json', '.json5'}:
                 try:
                     parsed = json.loads(path.read_text(errors='ignore'))
@@ -202,32 +203,19 @@ def write_report(data: dict[str, Any], report: Path) -> None:
         '# CapCut Architecture Fingerprint Study',
         '',
         '> Structural fingerprint only: no redistribution of decompiled proprietary source. Findings are used as input to an original Vireon architecture.',
-        '',
-        '## Summary',
-        '',
+        '', '## Summary', '',
         f"- APKs: **{summary['apks']}**",
         f"- Native libraries: **{summary['native']}**",
         f"- Shader-like files: **{summary['shaders']}**",
         f"- Schema/config files: **{summary['schemas']}**",
         f"- Timeline/media candidate source files: **{summary['timeline_files']}**",
-        '',
-        '## Manifest fingerprints',
-        '',
+        '', '## Manifest fingerprints', '',
     ]
     for item in data['manifests']:
-        lines.extend([
-            f"### {item['apk']}",
-            f"- SHA-256: `{item['sha256']}`",
-            f"- Attributes: `{json.dumps(item['manifest'].get('attributes', {}), ensure_ascii=False)}`",
-            '',
-        ])
+        lines.extend([f"### {item['apk']}", f"- SHA-256: `{item['sha256']}`", f"- Attributes: `{json.dumps(item['manifest'].get('attributes', {}), ensure_ascii=False)}`", ''])
     lines += ['## Native layer', '']
     for lib in data['native'][:100]:
-        lines += [
-            f"### `{lib['name']}` ({lib['abi']})",
-            f"- `{lib['path']}` — {lib['size']} bytes — `{lib['sha256'][:16]}…`",
-            '',
-        ]
+        lines += [f"### `{lib['name']}` ({lib['abi']})", f"- `{lib['path']}` — {lib['size']} bytes — `{lib['sha256'][:16]}…`", '']
         if lib['symbols']:
             lines += ['```text', *lib['symbols'][:30], '```', '']
         if lib['strings']:
@@ -239,13 +227,12 @@ def write_report(data: dict[str, Any], report: Path) -> None:
     lines += ['', '## Common schema keys', '']
     lines += [f"- `{key}` — {count}" for key, count in data['schemas_data']['common_keys'][:150]]
     lines += [
-        '', '## Vireon design implications',
-        '',
+        '', '## Vireon design implications', '',
         '- Canonical frame timebase with explicit source-time ↔ timeline-time mapping.',
         '- First-class tracks with targeting, locking, visibility, magnetic/ripple policy and deterministic collision resolution.',
         '- EditIntent + transaction snapshots so every gesture previews deterministically and commits atomically.',
         '- Render graph separated from UI; timeline state is the source of truth for web, Android and future desktop renderers.',
-        '- Separate demux/decode, frame cache, thumbnails, waveforms, proxies and final export from timeline semantics.',
+        '- Separate demux/decode, frame cache, thumbnails, waveforms, proxies and export from timeline semantics.',
         '- AI command vocabulary should target timeline primitives rather than screen coordinates.',
     ]
     report.write_text('\n'.join(lines) + '\n', encoding='utf-8')
@@ -258,30 +245,23 @@ def self_test() -> None:
     (root / 'assets/shader').mkdir(parents=True)
     (root / 'lib/arm64-v8a').mkdir(parents=True)
     (root / 'jadx/com/example').mkdir(parents=True)
-    (root / 'AndroidManifest.xml').write_text(
-        '<manifest package="com.example.editor" android:versionName="1.0">'
-        '<uses-permission android:name="android.permission.RECORD_AUDIO"/></manifest>',
-        encoding='utf-8'
-    )
+    (root / 'AndroidManifest.xml').write_text('<manifest package="com.example.editor" android:versionName="1.0"><uses-permission android:name="android.permission.RECORD_AUDIO"/></manifest>', encoding='utf-8')
     (root / 'assets/shader/a.frag').write_text('void main(){}', encoding='utf-8')
-    (root / 'assets/draft.json').write_text(
-        '{"timeline":{"tracks":[{"segments":[{"start":0,"duration":1,"keyframes":[]}] } ]}}',
-        encoding='utf-8'
-    )
-    (root / 'jadx/com/example/T.java').write_text(
-        'class T { timeline track keyframe timerange clip split render(); }', encoding='utf-8'
-    )
-    result = {
-        'shaders': shaders([root]),
-        'sources': source_scan([root / 'jadx']),
-        'schemas_data': schemas([root]),
-        'native': [],
-    }
+    (root / 'assets/draft.json').write_text('{"timeline":{"tracks":[{"segments":[{"start":0,"duration":1,"keyframes":[]}] } ]}}', encoding='utf-8')
+    (root / 'jadx/com/example/T.java').write_text('class T { timeline track keyframe timerange clip split render(); }', encoding='utf-8')
+    result = {'shaders': shaders([root]), 'sources': source_scan([root / 'jadx']), 'schemas_data': schemas([root]), 'native': []}
     assert len(result['shaders']) == 1
     assert result['sources']['candidate_files']
     assert any(key == 'timeline' for key, _ in result['schemas_data']['common_keys'])
     manifest_data = manifest(root)
     assert manifest_data['attributes'].get('package') == 'com.example.editor'
+
+    # Verify content-based APK detection with a neutral filename, which mirrors CI output names.
+    fake_apk = root / 'neutral.apk_or_xapk'
+    with zipfile.ZipFile(fake_apk, 'w') as z:
+        z.writestr('AndroidManifest.xml', '<manifest package="com.example"/>')
+    assert is_apk_container(fake_apk), 'neutral-name APK detection failed'
+    assert inputs(fake_apk, root / 'out') == [fake_apk], 'APK was incorrectly treated as XAPK'
     shutil.rmtree(root)
     print('[PASS] architecture dissector self-test')
 
@@ -293,13 +273,11 @@ def main() -> int:
     parser.add_argument('--report', default='CAPCUT_ARCHITECTURE_REPORT.md')
     parser.add_argument('--self-test', action='store_true')
     args = parser.parse_args()
-
     if args.self_test:
         self_test()
         return 0
     if not args.input:
         parser.error('input APK/XAPK required unless --self-test')
-
     input_path = Path(args.input).resolve()
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
@@ -309,27 +287,16 @@ def main() -> int:
     shader_files = shaders(apk_dirs)
     source_data = source_scan(jadx_dirs)
     schema_data = schemas(apk_dirs)
-    manifests = [
-        {'apk': apk.name, 'sha256': digest(apk), 'manifest': manifest(root)}
-        for apk, root in zip(apks, apk_dirs)
-    ]
+    manifests = [{'apk': apk.name, 'sha256': digest(apk), 'manifest': manifest(root)} for apk, root in zip(apks, apk_dirs)]
     data = {
-        'summary': {
-            'apks': len(apks),
-            'native': len(native_libs),
-            'shaders': len(shader_files),
-            'schemas': len(schema_data['files']),
-            'timeline_files': len(source_data['candidate_files']),
-        },
+        'summary': {'apks': len(apks), 'native': len(native_libs), 'shaders': len(shader_files), 'schemas': len(schema_data['files']), 'timeline_files': len(source_data['candidate_files'])},
         'manifests': manifests,
         'native': native_libs,
         'shaders': shader_files,
         'sources': source_data,
         'schemas_data': schema_data,
     }
-    (output / 'architecture_fingerprint.json').write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8'
-    )
+    (output / 'architecture_fingerprint.json').write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
     write_report(data, Path(args.report))
     print('[DONE] architecture fingerprint complete')
     return 0
