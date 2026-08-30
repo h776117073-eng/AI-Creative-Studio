@@ -69,16 +69,20 @@ jobs:
         run: |
           set -euo pipefail
           curl -fsSL --retry 5 --retry-all-errors https://github.com/skylot/jadx/releases/download/v1.5.6/jadx-1.5.6.zip -o /tmp/jadx.zip
-          rm -rf /tmp/jadx /opt/jadx
+          rm -rf /tmp/jadx
           mkdir -p /tmp/jadx
           unzip -q /tmp/jadx.zip -d /tmp/jadx
-          JADX_ROOT="$(find /tmp/jadx -mindepth 1 -maxdepth 1 -type d -name 'jadx*' -print -quit)"
-          test -n "$JADX_ROOT"
+          JADX_BIN="$(find /tmp/jadx -type f -path '*/bin/jadx' -print -quit)"
+          test -n "$JADX_BIN"
+          JADX_HOME="$(dirname "$(dirname "$JADX_BIN")")"
+          test -d "$JADX_HOME/lib"
+          "$JADX_HOME/bin/jadx" --version
           sudo rm -rf /opt/jadx
-          sudo cp -R "$JADX_ROOT" /opt/jadx
-          test -x /opt/jadx/bin/jadx
-          sudo ln -sf /opt/jadx/bin/jadx /usr/local/bin/jadx
-          jadx --version
+          sudo cp -R "$JADX_HOME" /opt/jadx
+          sudo chmod +x /opt/jadx/bin/jadx
+          echo 'alias jadx=/opt/jadx/bin/jadx' >> "$HOME/.bash_aliases"
+          echo "/opt/jadx/bin" >> "$GITHUB_PATH"
+          /opt/jadx/bin/jadx --version
       - name: Resolve APK source
         env:
           APK_URL: ${{ github.event.inputs.apk_url }}
