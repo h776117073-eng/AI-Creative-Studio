@@ -38,7 +38,8 @@ export function runFoundationSelfTest(): void {
   const invariant = validateTimelineInvariants(normalized);
   assert(invariant.valid, `normalized timeline invalid: ${invariant.errors.join('; ')}`);
   assert(normalized.currentTime === tb.toSeconds(tb.toFrame(normalized.currentTime)), 'current time is not frame aligned');
-  assert(close(normalized.duration, 2.033333333333333), 'duration normalization unexpected');
+  assert(close(normalized.duration, 2), 'duration normalization unexpected');
+  assert(close(normalized.tracks[0].clips[0].startTime, 0), 'clip start did not quantize to frame');
 
   const registry = new SnapRegistry();
   registry.addClip(normalized.tracks[0], normalized.tracks[0].clips[0]);
