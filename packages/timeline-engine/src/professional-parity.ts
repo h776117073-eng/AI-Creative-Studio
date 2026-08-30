@@ -1,4 +1,4 @@
-import type { IClip, ITrack, ITimelineState } from './index.js';
+import type { IClip, IKeyframe, ITrack, ITimelineState } from './index.js';
 import { findClip, recomputeDuration, sortTracks } from './editing.js';
 import { linkedGroup, quantizeFrame, sourceDuration } from './advanced-editing.js';
 
@@ -13,6 +13,7 @@ export interface RetimePoint { time: number; speed: number }
 export interface EditWindow { start: number; end: number }
 export interface ParityResult { changed: boolean; reason?: string; affectedClipIds: string[] }
 type TrackWithMetadata = ITrack & { metadata?: Record<string, unknown> };
+
 const durationOf = (clip: IClip) => Math.max(MIN_DURATION, clip.endTime - clip.startTime);
 const updateDuration = (clip: IClip) => { clip.duration = Math.max(MIN_DURATION, clip.endTime - clip.startTime); };
 
@@ -38,7 +39,7 @@ export function setSpeedCurveCapCutStyle(clip: IClip, points: RetimePoint[], fps
   return { changed: true, affectedClipIds: [clip.id] };
 }
 
-export function freezeFrame(state: ITimelineState, clipId: string, atTime?: number, fps = 30): ParityResult {
+export function freezeFrame(state: ITimelineState, clipId: string, atTime?: number, fps = 30, holdDuration = 1): ParityResult {
   const found = findClip(state, clipId);
   if (!found) return { changed: false, reason: 'Clip not found', affectedClipIds: [] };
   const [clip, track] = found;
@@ -46,27 +47,42 @@ export function freezeFrame(state: ITimelineState, clipId: string, atTime?: numb
   const local = atTime === undefined ? Math.max(0, Math.min(clip.duration, state.currentTime - clip.startTime)) : Math.max(0, Math.min(clip.duration, atTime));
   const frameTime = quantizeFrame(local, fps);
   const source = clip.trimStart + Math.min(frameTime * Math.max(0.01, clip.speed), clip.trimEnd - clip.trimStart);
-  clip.metadata = { ...(clip.metadata ?? {}), speedMode: 'freeze', freezeFrameSourceTime: Math.min(source, clipSourceDuration(clip)), freezeFrameTimelineTime: frameTime };
-  return { changed: true, affectedClipIds: [clip.id] };
+  const hold = Math.max(MIN_DURATION, quantizeFrame(Math.max(MIN_DURATION, holdDuration), fps));
+  const oldEnd = clip.endTime;
+  clip.endTime += hold;
+  updateDuration(clip);
+  for (const c of track.clips) if (c.id !== clip.id && c.startTime >= oldEnd - EPS) { c.startTime += hold; c.endTime += hold; updateDuration(c); }
+  clip.metadata = { ...(clip.metadata ?? {}), speedMode: 'freeze', freezeFrameSourceTime: Math.min(source, clipSourceDuration(clip)), freezeFrameTimelineTime: frameTime, freezeFrameDuration: hold };
+  sortTracks(state); recomputeDuration(state);
+  return { changed: true, affectedClipIds: track.clips.map(c => c.id) };
 }
 
-function cloneLeftSegment(clip: IClip, end: number, fps: number): IClip {
+function cloneLeftSegment(clip: IClip, end: number, fps: number, id = clip.id): IClip {
   const result = structuredClone(clip);
-  const ratio = clamp((end - clip.startTime) / durationOf(clip), 0, 1);
-  result.endTime = Math.max(result.startTime + MIN_DURATION, quantizeFrame(end, fps));
+  const localEnd = Math.max(MIN_DURATION, quantizeFrame(end - clip.startTime, fps));
+  const ratio = clamp(localEnd / durationOf(clip), 0, 1);
+  result.id = id;
+  result.endTime = clip.startTime + localEnd;
   result.trimEnd = result.trimStart + (clip.trimEnd - clip.trimStart) * ratio;
+  result.keyframes = result.keyframes.filter(k => k.time <= localEnd + EPS);
   updateDuration(result);
   return result;
 }
 
-function cloneRightSegment(clip: IClip, start: number, fps: number): IClip {
+function cloneRightSegment(clip: IClip, start: number, fps: number, id: string): IClip {
   const result = structuredClone(clip);
-  const ratio = clamp((start - clip.startTime) / durationOf(clip), 0, 1);
-  result.startTime = Math.min(result.endTime - MIN_DURATION, quantizeFrame(start, fps));
+  const localStart = Math.max(0, quantizeFrame(start - clip.startTime, fps));
+  const ratio = clamp(localStart / durationOf(clip), 0, 1);
+  result.id = id;
+  result.startTime = quantizeFrame(start, fps);
   result.trimStart = clip.trimStart + (clip.trimEnd - clip.trimStart) * ratio;
+  result.endTime = clip.endTime;
+  result.keyframes = result.keyframes.map(k => ({ ...k, time: Math.max(0, k.time - localStart) }));
   updateDuration(result);
   return result;
 }
+
+function uniqueSegmentId(base: string, start: number, suffix: string): string { return `${base}:${suffix}:${Math.round(start * 1000)}`; }
 
 export function insertClipAt(state: ITimelineState, trackId: string, clip: IClip, startTime: number, mode: InsertMode = 'insert', fps = 30): ParityResult {
   const track = state.tracks.find(t => t.id === trackId);
@@ -77,25 +93,25 @@ export function insertClipAt(state: ITimelineState, trackId: string, clip: IClip
   const duration = durationOf(next);
   const end = start + duration;
   const affected = new Set<string>([next.id]);
+  const occupiedIds = new Set(track.clips.map(c => c.id));
 
   if (mode === 'insert' || track.magnetic) {
     const rebuilt: IClip[] = [];
     for (const existing of track.clips) {
       if (existing.endTime <= start + EPS) { rebuilt.push(existing); continue; }
       if (existing.startTime < start - EPS && existing.endTime > start + EPS) {
-        const left = cloneLeftSegment(existing, start, fps);
-        const right = structuredClone(existing);
-        const ratio = clamp((start - existing.startTime) / durationOf(existing), 0, 1);
-        right.startTime = start + duration;
-        right.endTime = existing.endTime + duration;
-        right.trimStart = existing.trimStart + (existing.trimEnd - existing.trimStart) * ratio;
+        const rightId = uniqueSegmentId(existing.id, start, 'insert-right');
+        const left = cloneLeftSegment(existing, start, fps, existing.id);
+        const right = cloneRightSegment(existing, start, fps, rightId);
+        right.startTime += duration;
+        right.endTime += duration;
         updateDuration(right);
+        affected.add(existing.id); affected.add(rightId);
         rebuilt.push(left, right);
-        affected.add(existing.id);
         continue;
       }
-      existing.startTime += duration;
-      existing.endTime += duration;
+      existing.startTime = quantizeFrame(existing.startTime + duration, fps);
+      existing.endTime = quantizeFrame(existing.endTime + duration, fps);
       affected.add(existing.id);
       rebuilt.push(existing);
     }
@@ -105,11 +121,12 @@ export function insertClipAt(state: ITimelineState, trackId: string, clip: IClip
     for (const existing of track.clips) {
       if (existing.endTime <= start + EPS || existing.startTime >= end - EPS) { rebuilt.push(existing); continue; }
       affected.add(existing.id);
-      if (existing.startTime < start - EPS) rebuilt.push(cloneLeftSegment(existing, start, fps));
-      if (existing.endTime > end + EPS) rebuilt.push(cloneRightSegment(existing, end, fps));
+      if (existing.startTime < start - EPS) rebuilt.push(cloneLeftSegment(existing, start, fps, existing.id));
+      if (existing.endTime > end + EPS) rebuilt.push(cloneRightSegment(existing, end, fps, uniqueSegmentId(existing.id, end, 'overwrite-right')));
     }
     track.clips = rebuilt;
   }
+  if (occupiedIds.has(next.id)) next.id = uniqueSegmentId(next.id, start, 'inserted');
   next.startTime = start; next.endTime = end; next.duration = duration;
   track.clips.push(next);
   sortTracks(state); recomputeDuration(state);
@@ -156,12 +173,12 @@ export function rippleTrimLinked(state: ITimelineState, clipId: string, edge: 's
   if (edge === 'start') {
     const next = Math.max(0, Math.min(value, clip.trimEnd - MIN_DURATION)), delta = next - clip.trimStart, oldStart = clip.startTime;
     clip.trimStart = next; clip.startTime = Math.max(0, oldStart + delta); updateDuration(clip);
-    for (const t of state.tracks) for (const c of t.clips) if (c.id !== clipId && c.startTime >= oldStart - EPS) { c.startTime += delta; c.endTime += delta; }
+    for (const c of track.clips) if (c.id !== clipId && c.startTime >= oldStart - EPS) { c.startTime += delta; c.endTime += delta; }
   } else {
     const next = Math.min(clipSourceDuration(clip), Math.max(clip.trimStart + MIN_DURATION, value)), oldEnd = clip.endTime;
     clip.trimEnd = next; clip.endTime = clip.startTime + (clip.trimEnd - clip.trimStart); updateDuration(clip);
     const delta = clip.duration - beforeDuration;
-    if (delta) for (const t of state.tracks) for (const c of t.clips) if (c.id !== clipId && c.startTime >= oldEnd - EPS) { c.startTime += delta; c.endTime += delta; }
+    if (delta) for (const c of track.clips) if (c.id !== clipId && c.startTime >= oldEnd - EPS) { c.startTime += delta; c.endTime += delta; }
   }
   const deltaDuration = clip.duration - beforeDuration;
   if (Math.abs(deltaDuration) > EPS) for (const t of state.tracks) for (const c of t.clips) if (selected.has(c.id) && c.id !== clipId) {
