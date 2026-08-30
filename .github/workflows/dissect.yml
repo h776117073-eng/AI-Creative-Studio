@@ -29,10 +29,10 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Validate dissector syntax
-        run: python -m py_compile tools/capcut-study/dissect_capcut.py
-      - name: Run deterministic dissector self-test
-        run: python tools/capcut-study/dissect_capcut.py --self-test
+      - name: Validate syntax
+        run: python -m py_compile tools/capcut-study/dissect_capcut_runner.py
+      - name: Run deterministic self-test
+        run: python tools/capcut-study/dissect_capcut_runner.py --self-test
 
   analyze:
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.apk_url != ''
@@ -41,70 +41,51 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: temurin
-
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
       - name: Install native utilities
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends wget curl unzip binutils file
-
+          sudo apt-get install -y --no-install-recommends curl unzip binutils file
       - name: Install pinned Apktool 2.9.3
         run: |
           set -euo pipefail
-          mkdir -p "$HOME/tools/apktool"
-          curl -fsSL --retry 3 --retry-all-errors \
-            https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar \
-            -o "$HOME/tools/apktool/apktool.jar"
-          curl -fsSL --retry 3 --retry-all-errors \
-            https://raw.githubusercontent.com/iBotPeaches/Apktool/v2.9.3/scripts/linux/apktool \
-            -o "$HOME/tools/apktool/apktool"
-          chmod +x "$HOME/tools/apktool/apktool"
-          sudo cp "$HOME/tools/apktool/apktool.jar" /usr/local/bin/apktool.jar
-          sudo cp "$HOME/tools/apktool/apktool" /usr/local/bin/apktool
+          curl -fsSL --retry 3 --retry-all-errors https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar -o /tmp/apktool.jar
+          curl -fsSL --retry 3 --retry-all-errors https://raw.githubusercontent.com/iBotPeaches/Apktool/v2.9.3/scripts/linux/apktool -o /tmp/apktool
+          chmod +x /tmp/apktool
+          sudo cp /tmp/apktool.jar /usr/local/bin/apktool.jar
+          sudo cp /tmp/apktool /usr/local/bin/apktool
           apktool --version
-
       - name: Install pinned JADX 1.5.0
         run: |
           set -euo pipefail
-          curl -fsSL --retry 3 --retry-all-errors \
-            https://github.com/skylot/jadx/releases/download/v1.5.0/jadx-1.5.0.zip \
-            -o /tmp/jadx.zip
+          curl -fsSL --retry 3 --retry-all-errors https://github.com/skylot/jadx/releases/download/v1.5.0/jadx-1.5.0.zip -o /tmp/jadx.zip
           mkdir -p /tmp/jadx
           unzip -q /tmp/jadx.zip -d /tmp/jadx
           sudo cp /tmp/jadx/jadx-1.5.0/bin/jadx /usr/local/bin/jadx
-          sudo cp /tmp/jadx/jadx-1.5.0/bin/jadx-gui /usr/local/bin/jadx-gui
+          sudo chmod +x /usr/local/bin/jadx
           sudo mkdir -p /usr/local/lib/jadx
           sudo cp -R /tmp/jadx/jadx-1.5.0/lib/. /usr/local/lib/jadx/
-          sudo chmod +x /usr/local/bin/jadx /usr/local/bin/jadx-gui
           jadx --version
-
       - name: Download authorized APK/XAPK
         env:
           APK_URL: ${{ github.event.inputs.apk_url }}
         run: |
           set -euo pipefail
           mkdir -p target
-          curl -fL --retry 3 --retry-all-errors --max-time 600 "$APK_URL" -o target/capcut_target
-          file target/capcut_target
-          test -s target/capcut_target
-
+          curl -fL --retry 3 --retry-all-errors --max-time 600 "$APK_URL" -o target/input.apk_or_xapk
+          file target/input.apk_or_xapk
+          test -s target/input.apk_or_xapk
       - name: Generate architecture fingerprint report
-        run: |
-          python tools/capcut-study/dissect_capcut.py target/capcut_target \
-            --output extracted_capcut \
-            --report CAPCUT_ARCHITECTURE_REPORT.md
-
-      - name: Upload non-source architecture study artifacts
+        run: python tools/capcut-study/dissect_capcut_runner.py target/input.apk_or_xapk --output extracted_capcut --report CAPCUT_ARCHITECTURE_REPORT.md
+      - name: Upload architecture report and machine-readable fingerprint
         uses: actions/upload-artifact@v4
         with:
           name: CapCut-Architecture-Fingerprint
@@ -113,12 +94,3 @@ jobs:
             extracted_capcut/architecture_fingerprint.json
           if-no-files-found: error
           retention-days: 14
-
-      - name: Upload tool output for audit (metadata only)
-        uses: actions/upload-artifact@v4
-        with:
-          name: CapCut-Architecture-Metadata
-          path: |
-            extracted_capcut/xapk/**
-          if-no-files-found: ignore
-          retention-days: 7
