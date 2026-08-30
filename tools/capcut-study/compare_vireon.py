@@ -61,8 +61,8 @@ def write_report(fingerprint: dict[str, Any], output: Path) -> None:
         "",
         "## Comparison matrix",
         "",
-        "| Vireon subsystem | Structural evidence detected | Implementation direction |
-|---|---:|---|",
+        "| Vireon subsystem | Structural evidence detected | Implementation direction |",
+        "|---|---:|---|",
     ]
     for category, score in scores.items():
         level = "high" if score >= 20 else "medium" if score >= 7 else "low"
