@@ -18,7 +18,9 @@ import {
   unlinkClips,
 } from './advanced-editing.js';
 
-const assert = (condition: unknown, message: string): asserts condition => { if (!condition) throw new Error(message); };
+function assert(condition: unknown, message: string): asserts condition {
+  if (!condition) throw new Error(message);
+}
 const close = (a: number, b: number, eps = 1e-4) => Math.abs(a - b) <= eps;
 const clip = (id: string, start: number, end: number, sourceDuration = 10): IClip => ({ id, name: id, startTime: start, endTime: end, trimStart: start, trimEnd: end, duration: end - start, speed: 1, opacity: 1, effects: [], animations: [], keyframes: [], metadata: { sourceDuration } });
 const state = (tracks: ITimelineState['tracks']): ITimelineState => ({ tracks, currentTime: 0, duration: Math.max(0, ...tracks.flatMap(t => t.clips.map(c => c.endTime))), isPlaying: false, playbackRate: 1, loopEnabled: false, markers: [], snaps: [] });
