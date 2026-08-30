@@ -38,7 +38,7 @@ jobs:
         run: python tools/capcut-study/dissect_capcut_runner.py --self-test
 
   analyze:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -86,8 +86,10 @@ jobs:
           set -euo pipefail
           mkdir -p target
           if [ -n "${APK_URL:-}" ]; then
+            echo "[*] Using supplied APK/XAPK URL"
             curl -fL --retry 5 --retry-all-errors --max-time 600 "$APK_URL" -o target/input.apk_or_xapk
           else
+            echo "[*] Auto-fetching latest public CapCut APK from configured distribution page"
             python tools/capcut-study/fetch_apk.py --output target/input.apk_or_xapk --metadata target/capcut_fetch.json
           fi
           file target/input.apk_or_xapk
