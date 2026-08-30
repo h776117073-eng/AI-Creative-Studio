@@ -1,6 +1,6 @@
 import { TimelineEngine, type IClip, type ITrack, type ITimelineState } from './index.js';
-import { rippleTrim } from './editing.js';
-import { addOrUpdateKeyframe, enforceMagneticTrack, moveGroup, rippleDeleteGroup, rollEditAdvanced, setSpeedCurve, setTransition, slipEditAdvanced, slideEditAdvanced, type SpeedPoint } from './advanced-editing.js';
+import { rippleTrim, findClip } from './editing.js';
+import { addOrUpdateKeyframe, enforceMagneticTrack, linkClips, moveGroup, rippleDeleteGroup, rollEditAdvanced, setSpeedCurve, setTransition, slipEditAdvanced, slideEditAdvanced, unlinkClips, quantizeFrame, sourceDuration, type SpeedPoint } from './advanced-editing.js';
 import { SelectionEngine, TrackTargeting, type ClipBounds, type EditIntent } from './interaction.js';
 import { TimelineHistory } from './transactions.js';
 
@@ -38,57 +38,65 @@ export class TimelineInteractionController {
         if (!targetId) return this.getState();
         const result = moveGroup(base, ids, targetId, intent.deltaTime, { snap: true, ripple: false, magnetic: true, fps: this.engine.frameRate, tolerance: this.engine.snappingTolerance });
         if (!result.changed) return this.getState();
-        this.engine.loadState(base);
-        return this.getState();
+        this.engine.loadState(base); return this.getState();
       }
       case 'trim-start': {
         const base = this.transactionBefore ? structuredClone(this.transactionBefore) : this.getState();
         const found = findClip(base, intent.clipId); if (!found) return this.getState();
-        rippleTrim(base, intent.clipId, 'start', Math.max(0, found[0].trimStart + intent.deltaTime), false);
-        this.engine.loadState(base); return this.getState();
+        const max = sourceDuration(found[0]);
+        const next = Math.min(max - 0.01, Math.max(0, quantizeFrame(found[0].trimStart + intent.deltaTime, this.engine.frameRate)));
+        rippleTrim(base, intent.clipId, 'start', next, false); this.engine.loadState(base); return this.getState();
       }
       case 'trim-end': {
         const base = this.transactionBefore ? structuredClone(this.transactionBefore) : this.getState();
         const found = findClip(base, intent.clipId); if (!found) return this.getState();
-        rippleTrim(base, intent.clipId, 'end', Math.max(found[0].trimStart + .01, found[0].trimEnd + intent.deltaTime), false);
-        this.engine.loadState(base); return this.getState();
+        const min = found[0].trimStart + .01; const max = sourceDuration(found[0]);
+        const next = Math.min(max, Math.max(min, quantizeFrame(found[0].trimEnd + intent.deltaTime, this.engine.frameRate)));
+        rippleTrim(base, intent.clipId, 'end', next, false); this.engine.loadState(base); return this.getState();
       }
       case 'scroll': case 'zoom': return this.getState();
       default: return this.getState();
     }
   }
 
-  deleteSelected(ripple = true): ITimelineState {
-    const next = this.getState();
-    const result = rippleDeleteGroup(next, this.selection.selectedIds, false);
-    if (result.changed) this.engine.loadState(next);
-    if (ripple && !result.changed && this.selection.selectedIds.length) this.engine.loadState(next);
-    this.selection.clear();
+  previewRoll(leftClipId: string, rightClipId: string, boundary: number): ITimelineState {
+    const base = this.transactionBefore ? structuredClone(this.transactionBefore) : this.getState();
+    if (rollEditAdvanced(base, leftClipId, rightClipId, boundary, this.engine.frameRate).changed) this.engine.loadState(base);
+    return this.getState();
+  }
+  previewSlip(clipId: string, deltaSourceTime: number): ITimelineState {
+    const base = this.transactionBefore ? structuredClone(this.transactionBefore) : this.getState();
+    const found = findClip(base, clipId);
+    if (found && slipEditAdvanced(found[0], deltaSourceTime, this.engine.frameRate).changed) this.engine.loadState(base);
+    return this.getState();
+  }
+  previewSlide(clipId: string, deltaTime: number): ITimelineState {
+    const base = this.transactionBefore ? structuredClone(this.transactionBefore) : this.getState();
+    if (slideEditAdvanced(base, clipId, deltaTime, this.engine.frameRate).changed) this.engine.loadState(base);
     return this.getState();
   }
 
-  roll(leftClipId: string, rightClipId: string, boundary: number): boolean { return this.transact('Roll Edit', () => rollEditAdvanced(this.engine.getState(), leftClipId, rightClipId, boundary, this.engine.frameRate).changed); }
-  slip(clipId: string, deltaSourceTime: number): boolean {
-    return this.transact('Slip Edit', () => { const f=findClip(this.engine.getState(),clipId); return !!f && slipEditAdvanced(f[0],deltaSourceTime,this.engine.frameRate).changed; });
+  deleteSelected(ripple = true): ITimelineState {
+    const next = this.getState();
+    const result = rippleDeleteGroup(next, this.selection.selectedIds, ripple && this.selection.selectedIds.length > 1);
+    if (result.changed) this.engine.loadState(next);
+    this.selection.clear();
+    return this.getState();
   }
+  roll(leftClipId: string, rightClipId: string, boundary: number): boolean { return this.transact('Roll Edit', () => rollEditAdvanced(this.engine.getState(), leftClipId, rightClipId, boundary, this.engine.frameRate).changed); }
+  slip(clipId: string, deltaSourceTime: number): boolean { return this.transact('Slip Edit', () => { const f=findClip(this.engine.getState(),clipId); return !!f && slipEditAdvanced(f[0],deltaSourceTime,this.engine.frameRate).changed; }); }
   slide(clipId: string, deltaTime: number): boolean { return this.transact('Slide Edit', () => slideEditAdvanced(this.engine.getState(), clipId, deltaTime, this.engine.frameRate).changed); }
   setTransition(clipId: string, edge: 'in'|'out', type: string, duration: number): boolean { return this.transact('Transition', () => setTransition(this.engine.getState(), clipId, edge, type, duration).changed); }
   setSpeedCurve(clipId: string, points: SpeedPoint[]): boolean { return this.transact('Speed Curve', () => { const f=findClip(this.engine.getState(),clipId); return !!f && setSpeedCurve(f[0],points).changed; }); }
   addKeyframe(clipId: string, keyframe: Omit<import('./index.js').IKeyframe,'id'> & {id?: string}): boolean { return this.transact('Keyframe', () => { const f=findClip(this.engine.getState(),clipId); return !!f && addOrUpdateKeyframe(f[0],keyframe).changed; }); }
+  linkSelected(): boolean { return this.transact('Link Clips', () => linkClips(this.engine.getState(), this.selection.selectedIds).changed); }
+  unlinkSelected(): boolean { return this.transact('Unlink Clips', () => unlinkClips(this.engine.getState(), this.selection.selectedIds).changed); }
   enforceMagnetic(trackId: string): boolean { return this.transact('Magnetic Track', () => enforceMagneticTrack(this.engine.getState(),trackId).changed); }
-
   commitInteraction(label='تحرير'): void { if (!this.transactionBefore) return; this.history.commit(label,this.transactionBefore,this.getState()); this.transactionBefore=null; }
   cancelInteraction(): void { if (this.transactionBefore) this.engine.loadState(this.transactionBefore); this.transactionBefore=null; }
   undo(): ITimelineState|null { const s=this.history.undo(this.getState()); if (s) this.engine.loadState(s); return s; }
   redo(): ITimelineState|null { const s=this.history.redo(this.getState()); if (s) this.engine.loadState(s); return s; }
   canUndo(): boolean { return this.history.canUndo; }
   canRedo(): boolean { return this.history.canRedo; }
-
-  private transact(label:string, action:()=>boolean): boolean {
-    const before=this.getState();
-    const changed=action();
-    if (changed) this.history.commit(label,before,this.getState());
-    return changed;
-  }
+  private transact(label:string, action:()=>boolean): boolean { const before=this.getState(); const changed=action(); if (changed) this.history.commit(label,before,this.getState()); return changed; }
 }
-function findClip(state: ITimelineState, clipId: string): [IClip,ITrack]|null { for (const track of state.tracks) { const clip=track.clips.find(c=>c.id===clipId); if (clip) return [clip,track]; } return null; }
