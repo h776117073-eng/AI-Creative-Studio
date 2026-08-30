@@ -54,3 +54,4 @@ export * from './transactions.js';
 export * from './caches.js';
 export * from './controller.js';
 export * from './advanced-editing.js';
+export * from './timeline-foundation.js';
