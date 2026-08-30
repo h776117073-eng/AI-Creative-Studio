@@ -69,15 +69,15 @@ jobs:
         run: |
           set -euo pipefail
           curl -fsSL --retry 5 --retry-all-errors https://github.com/skylot/jadx/releases/download/v1.5.6/jadx-1.5.6.zip -o /tmp/jadx.zip
-          rm -rf /tmp/jadx && mkdir -p /tmp/jadx
+          rm -rf /tmp/jadx /opt/jadx
+          mkdir -p /tmp/jadx
           unzip -q /tmp/jadx.zip -d /tmp/jadx
-          JADX_BIN="$(find /tmp/jadx -type f -path '*/bin/jadx' -print -quit)"
-          test -n "$JADX_BIN"
-          JADX_ROOT="$(dirname "$(dirname "$JADX_BIN")")"
-          sudo cp "$JADX_BIN" /usr/local/bin/jadx
-          sudo chmod +x /usr/local/bin/jadx
-          sudo mkdir -p /usr/local/lib/jadx
-          sudo cp -R "$JADX_ROOT/lib/." /usr/local/lib/jadx/
+          JADX_ROOT="$(find /tmp/jadx -mindepth 1 -maxdepth 1 -type d -name 'jadx*' -print -quit)"
+          test -n "$JADX_ROOT"
+          sudo rm -rf /opt/jadx
+          sudo cp -R "$JADX_ROOT" /opt/jadx
+          test -x /opt/jadx/bin/jadx
+          sudo ln -sf /opt/jadx/bin/jadx /usr/local/bin/jadx
           jadx --version
       - name: Resolve APK source
         env:
