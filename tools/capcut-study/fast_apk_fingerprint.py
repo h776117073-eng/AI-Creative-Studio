@@ -20,23 +20,32 @@ def printable(data: bytes) -> str:
 
 def scan(path: Path) -> dict:
     counts=Counter(); descriptors=set(); dex_files=[]; total_dex=0
+    native=[]; shaders=[]; configs=[]; asset_hits=[]
     with zipfile.ZipFile(path) as z:
+        names=z.namelist()
         for info in z.infolist():
             n=info.filename
-            if not re.fullmatch(r'classes\d*\.dex', Path(n).name):
-                continue
-            dex_files.append(n); data=z.read(info); total_dex += len(data); text=printable(data)
-            for term in TERMS:
-                counts[term] += text.count(term)
-            for match in re.finditer(r'L([a-zA-Z0-9_$/]{3,160});', text):
-                value=match.group(1)
-                if any(term in value for term in TERMS): descriptors.add(value)
-        names=z.namelist()
-        asset_hits=[n for n in names if any(term in n.lower() for term in TERMS)]
+            if re.fullmatch(r'classes\d*\.dex', Path(n).name):
+                dex_files.append(n); data=z.read(info); total_dex += len(data); text=printable(data)
+                for term in TERMS: counts[term] += text.count(term)
+                for match in re.finditer(r'L([a-zA-Z0-9_$/]{3,160});', text):
+                    value=match.group(1)
+                    if any(term in value for term in TERMS): descriptors.add(value)
         native=[n for n in names if n.endswith('.so')]
         shaders=[n for n in names if Path(n).suffix.lower() in {'.glsl','.frag','.vert','.comp','.geom','.spv','.metal','.hlsl'} or 'shader' in Path(n).name.lower()]
         configs=[n for n in names if Path(n).suffix.lower() in {'.json','.json5','.xml','.yaml','.yml','.proto','.toml'}]
-    return {'summary':{'apk_bytes':path.stat().st_size,'apk_sha256':sha256(path),'dex_files':len(dex_files),'dex_bytes':total_dex,'native':len(native),'shaders':len(shaders),'schemas':len(configs),'timeline_signals':sum(counts.values())},'dex_files':dex_files,'term_counts':counts.most_common(),'timeline_candidate_descriptors':sorted(descriptors)[:1000],'asset_path_hits':sorted(asset_hits)[:1000],'native_paths':native[:2000],'shader_paths':shaders[:1000],'schema_paths':configs[:2000]}
+        asset_hits=[n for n in names if any(term in n.lower() for term in TERMS)]
+    candidate_files=[{'path':d,'terms':counts.most_common(15)} for d in sorted(descriptors)[:300]]
+    return {
+      'analysis_status':'fast-structural-only',
+      'summary':{'apks':1,'apk_bytes':path.stat().st_size,'apk_sha256':sha256(path),'dex_files':len(dex_files),'dex_bytes':total_dex,'native':len(native),'shaders':len(shaders),'schemas':len(configs),'timeline_files':len(candidate_files)},
+      'manifests':[{'apk':path.name,'sha256':sha256(path),'manifest':{'exists':True,'attributes':{},'permissions':[]}}],
+      'native':[{'name':Path(n).name,'abi':Path(n).parent.name,'path':n,'size':0,'sha256':'' ,'symbols':[],'strings':[]} for n in native],
+      'shaders':[{'path':n,'size':0,'sha256':''} for n in shaders],
+      'sources':{'term_counts':counts.most_common(),'candidate_files':candidate_files},
+      'schemas_data':{'files':[{'path':n,'suffix':Path(n).suffix.lower(),'size':0,'sha256':''} for n in configs[:2000]],'common_keys':counts.most_common(200)},
+      'fast_scan':{'dex_files':dex_files,'dex_bytes':total_dex,'timeline_candidate_descriptors':sorted(descriptors)[:1000],'asset_path_hits':sorted(asset_hits)[:1000],'native_paths':native[:2000],'shader_paths':shaders[:1000],'schema_paths':configs[:2000]}
+    }
 
 
 def main():
