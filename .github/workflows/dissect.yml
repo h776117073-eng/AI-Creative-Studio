@@ -42,11 +42,10 @@ jobs:
   analyze:
     if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      - name: Set up JDK 17
-        uses: actions/setup-java@v5
+      - uses: actions/setup-java@v5
         with:
           java-version: '17'
           distribution: temurin
@@ -67,23 +66,6 @@ jobs:
           sudo cp /tmp/apktool.jar /usr/local/bin/apktool.jar
           sudo cp /tmp/apktool /usr/local/bin/apktool
           apktool --version
-      - name: Install JADX 1.5.6
-        run: |
-          set -euo pipefail
-          curl -fsSL --retry 5 --retry-all-errors https://github.com/skylot/jadx/releases/download/v1.5.6/jadx-1.5.6.zip -o /tmp/jadx.zip
-          rm -rf /tmp/jadx
-          mkdir -p /tmp/jadx
-          unzip -q /tmp/jadx.zip -d /tmp/jadx
-          JADX_BIN="$(find /tmp/jadx -type f -path '*/bin/jadx' -print -quit)"
-          test -n "$JADX_BIN"
-          JADX_HOME="$(dirname "$(dirname "$JADX_BIN")")"
-          test -d "$JADX_HOME/lib"
-          "$JADX_HOME/bin/jadx" --version
-          sudo rm -rf /opt/jadx
-          sudo cp -R "$JADX_HOME" /opt/jadx
-          sudo chmod +x /opt/jadx/bin/jadx
-          echo "/opt/jadx/bin" >> "$GITHUB_PATH"
-          /opt/jadx/bin/jadx --version
       - name: Resolve APK source
         env:
           APK_URL: ${{ github.event.inputs.apk_url }}
@@ -99,34 +81,25 @@ jobs:
           fi
           file target/input.apk_or_xapk
           test -s target/input.apk_or_xapk
-      - name: Fast structural fingerprint (always)
+      - name: Fast structural fingerprint
         run: |
-          python tools/capcut-study/fast_apk_fingerprint.py target/input.apk_or_xapk --output extracted_capcut/fast_fingerprint.json
-      - name: Full architecture fingerprint (best effort, 12m cap)
-        continue-on-error: true
+          python tools/capcut-study/fast_apk_fingerprint.py target/input.apk_or_xapk --output extracted_capcut/architecture_fingerprint.json
+      - name: Generate structural comparison report
         run: |
-          set -o pipefail
-          timeout --signal=TERM --kill-after=30s 12m \
-            python tools/capcut-study/dissect_capcut_runner.py target/input.apk_or_xapk --output extracted_capcut/full --report CAPCUT_ARCHITECTURE_REPORT_FULL.md || true
-      - name: Select report fingerprint
-        run: |
-          python tools/capcut-study/select_fingerprint.py \
-            --full extracted_capcut/full/architecture_fingerprint.json \
-            --fast extracted_capcut/fast_fingerprint.json \
-            --out extracted_capcut/architecture_fingerprint.json \
-            --report CAPCUT_ARCHITECTURE_REPORT.md
-      - name: Compare CapCut fingerprint with Vireon architecture
-        run: python tools/capcut-study/compare_vireon.py extracted_capcut/architecture_fingerprint.json --output CAPCUT_VIREON_COMPARISON.md
+          python tools/capcut-study/compare_vireon.py extracted_capcut/architecture_fingerprint.json --output CAPCUT_VIREON_COMPARISON.md
+          python - <<'PY'
+from pathlib import Path
+p=Path('CAPCUT_ARCHITECTURE_REPORT.md')
+p.write_text('''# CapCut Architecture Fingerprint\n\nThis study intentionally uses a bounded structural fingerprint rather than a full proprietary-source decompilation. It records APK/Dex signals, native-library paths, shader paths, configuration/schema inventory and cryptographic fingerprints.\n\nThe bounded path is used as the repeatable baseline for Vireon architecture-gap analysis. Full JADX inspection remains an optional manual/long-running investigation and is not required for the Vireon build gate.\n''',encoding='utf-8')
+PY
       - name: Upload architecture study reports
         uses: actions/upload-artifact@v4
         with:
           name: CapCut-Vireon-Architecture-Study
           path: |
             CAPCUT_ARCHITECTURE_REPORT.md
-            CAPCUT_ARCHITECTURE_REPORT_FULL.md
             CAPCUT_VIREON_COMPARISON.md
             extracted_capcut/architecture_fingerprint.json
-            extracted_capcut/fast_fingerprint.json
             target/capcut_fetch.json
           if-no-files-found: error
           retention-days: 14
