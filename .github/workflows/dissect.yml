@@ -33,6 +33,7 @@ jobs:
         run: |
           python -m py_compile tools/capcut-study/fetch_apk.py
           python -m py_compile tools/capcut-study/fast_apk_fingerprint.py
+          python -m py_compile tools/capcut-study/select_fingerprint.py
           python -m py_compile tools/capcut-study/dissect_capcut_runner.py
           python -m py_compile tools/capcut-study/compare_vireon.py
       - name: Run deterministic dissector self-test
@@ -98,42 +99,31 @@ jobs:
           fi
           file target/input.apk_or_xapk
           test -s target/input.apk_or_xapk
-      - name: Fast structural fingerprint (non-decompiling)
+      - name: Fast structural fingerprint (always)
         run: |
           python tools/capcut-study/fast_apk_fingerprint.py target/input.apk_or_xapk --output extracted_capcut/fast_fingerprint.json
-      - name: Full architecture fingerprint (best effort)
+      - name: Full architecture fingerprint (best effort, 12m cap)
         continue-on-error: true
         run: |
           set -o pipefail
           timeout --signal=TERM --kill-after=30s 12m \
-            python tools/capcut-study/dissect_capcut_runner.py target/input.apk_or_xapk --output extracted_capcut/full --report CAPCUT_ARCHITECTURE_REPORT_FULL.md || \
-            echo '[WARN] Full JADX decompilation did not finish within the time budget; fast structural fingerprint remains authoritative.'
+            python tools/capcut-study/dissect_capcut_runner.py target/input.apk_or_xapk --output extracted_capcut/full --report CAPCUT_ARCHITECTURE_REPORT_FULL.md || true
       - name: Select report fingerprint
         run: |
-          set -euo pipefail
-          if [ -s extracted_capcut/full/architecture_fingerprint.json ]; then
-            cp extracted_capcut/full/architecture_fingerprint.json extracted_capcut/architecture_fingerprint.json
-            test -s CAPCUT_ARCHITECTURE_REPORT_FULL.md || true
-            cp CAPCUT_ARCHITECTURE_REPORT_FULL.md CAPCUT_ARCHITECTURE_REPORT.md 2>/dev/null || true
-            echo '[PASS] Using full fingerprint'
-          else
-            cp extracted_capcut/fast_fingerprint.json extracted_capcut/architecture_fingerprint.json
-            python - <<'PY'
-from pathlib import Path
-p=Path('CAPCUT_ARCHITECTURE_REPORT.md')
-p.write_text('''# CapCut Architecture Fingerprint\n\n## Analysis status\n\nFull JADX decompilation exceeded the CI time budget. This artifact therefore contains the fast structural fingerprint: APK/Dex string signals, native-library paths, shader paths, schema/config inventory and hashes. No proprietary source or assets are redistributed.\n\nThe fast scan is sufficient to drive architecture-gap analysis while avoiding a 52-minute full-decompilation bottleneck.\n''', encoding='utf-8')
-PY
-            echo '[PASS] Using fast structural fingerprint'
-          fi
+          python tools/capcut-study/select_fingerprint.py \
+            --full extracted_capcut/full/architecture_fingerprint.json \
+            --fast extracted_capcut/fast_fingerprint.json \
+            --out extracted_capcut/architecture_fingerprint.json \
+            --report CAPCUT_ARCHITECTURE_REPORT.md
       - name: Compare CapCut fingerprint with Vireon architecture
-        run: |
-          python tools/capcut-study/compare_vireon.py extracted_capcut/architecture_fingerprint.json --output CAPCUT_VIREON_COMPARISON.md
+        run: python tools/capcut-study/compare_vireon.py extracted_capcut/architecture_fingerprint.json --output CAPCUT_VIREON_COMPARISON.md
       - name: Upload architecture study reports
         uses: actions/upload-artifact@v4
         with:
           name: CapCut-Vireon-Architecture-Study
           path: |
             CAPCUT_ARCHITECTURE_REPORT.md
+            CAPCUT_ARCHITECTURE_REPORT_FULL.md
             CAPCUT_VIREON_COMPARISON.md
             extracted_capcut/architecture_fingerprint.json
             extracted_capcut/fast_fingerprint.json
