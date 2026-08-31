@@ -2,6 +2,7 @@ import { TimelineEngine, type IClip, type ITimelineState } from './index.js';
 import { SelectionEngine, TimelineViewport, virtualizeTracks, GestureEngine } from './interaction.js';
 import { TimelineHistory } from './transactions.js';
 import { thumbnailKey, waveformKey, ThumbnailCache, WaveformCache } from './caches.js';
+import { runProfessionalParitySelfTest } from './professional-parity-self-test.js';
 import {
   addOrUpdateKeyframe,
   collectSnapCandidates,
@@ -18,21 +19,20 @@ import {
   unlinkClips,
 } from './advanced-editing.js';
 
-function assert(condition: unknown, message: string): asserts condition {
-  if (!condition) throw new Error(message);
-}
+function assert(condition: unknown, message: string): asserts condition { if (!condition) throw new Error(message); }
 const close = (a: number, b: number, eps = 1e-4) => Math.abs(a - b) <= eps;
 const clip = (id: string, start: number, end: number, sourceDuration = 10): IClip => ({ id, name: id, startTime: start, endTime: end, trimStart: 0, trimEnd: end - start, duration: end - start, speed: 1, opacity: 1, effects: [], animations: [], keyframes: [], metadata: { sourceDuration } });
 const state = (tracks: ITimelineState['tracks']): ITimelineState => ({ tracks, currentTime: 0, duration: Math.max(0, ...tracks.flatMap(t => t.clips.map(c => c.endTime))), isPlaying: false, playbackRate: 1, loopEnabled: false, markers: [], snaps: [] });
 
 export async function runTimelineSelfTest(): Promise<void> {
+  runProfessionalParitySelfTest();
   const engine = new TimelineEngine({ id: 'self-test', name: 'Timeline Self Test', frameRate: 30, maxTracks: 99, snappingTolerance: 0.05 });
   await engine.initialize();
   const video = engine.addTrack('video', 'Video 1', { magnetic: true });
   const overlay = engine.addTrack('overlay', 'Overlay 1');
   assert(video && overlay, 'track creation failed');
-  const a = engine.addClip(video.id, { name: 'A', startTime: 0, duration: 2 });
-  const b = engine.addClip(video.id, { name: 'B', startTime: 2, duration: 2 });
+  const a = engine.addClip(video.id, { name: 'A', startTime: 0, duration: 2, sourceDuration: 10, mediaType: 'video' });
+  const b = engine.addClip(video.id, { name: 'B', startTime: 2, duration: 2, sourceDuration: 10, mediaType: 'video' });
   assert(a && b, 'clip creation failed');
   assert(engine.moveClip(b.id, overlay.id, 1, { snap: true }), 'move failed');
   const split = engine.splitClip(a.id, 1);
