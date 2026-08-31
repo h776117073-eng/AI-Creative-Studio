@@ -12,7 +12,7 @@ export function Workspace() {
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-[#080a0f]">
       <VireonProfessionalWorkspace projectId={projectId} />
-      <MediaImportButton />
+      <MediaImportButton projectId={projectId} />
     </div>
   );
 }
