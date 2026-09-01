@@ -1,4 +1,3 @@
-import type { EventEmitter } from 'eventemitter3';
 import type { RootState } from './store.js';
 import type { IAction } from './actions.js';
 
@@ -15,6 +14,10 @@ export interface StatePersistenceAdapter {
   save(state: RootState, version: number): Promise<void>;
 }
 
+export interface StateEventEmitter {
+  emit(event: string, payload: unknown): unknown;
+}
+
 export type StateReducer = (state: RootState, action: IAction) => RootState;
 export type StateListener = (state: RootState, action?: IAction) => void;
 
@@ -26,13 +29,13 @@ export class RuntimeStateStore {
   private historyIndex = -1;
   private version = 0;
   private listeners = new Set<StateListener>();
-  private emitter?: EventEmitter<any>;
+  private emitter?: StateEventEmitter;
   private persistence?: StatePersistenceAdapter;
 
   constructor(
     initialState: RootState,
-    reducer: StateReducer = (state) => state,
-    options: { maxSnapshots?: number; emitter?: EventEmitter<any>; persistence?: StatePersistenceAdapter } = {},
+    reducer: StateReducer = state => state,
+    options: { maxSnapshots?: number; emitter?: StateEventEmitter; persistence?: StatePersistenceAdapter } = {},
   ) {
     this.state = initialState;
     this.reducer = reducer;
@@ -42,13 +45,8 @@ export class RuntimeStateStore {
     this.recordSnapshot();
   }
 
-  getState(): RootState {
-    return this.state;
-  }
-
-  getVersion(): number {
-    return this.version;
-  }
+  getState(): RootState { return this.state; }
+  getVersion(): number { return this.version; }
 
   subscribe(listener: StateListener): () => void {
     this.listeners.add(listener);
@@ -66,41 +64,32 @@ export class RuntimeStateStore {
 
   dispatch(action: IAction): RootState {
     const next = this.reducer(this.state, action);
-    if (next === this.state) return this.state;
-    return this.setState(next, action);
+    return next === this.state ? this.state : this.setState(next, action);
   }
 
-  canUndo(): boolean {
-    return this.historyIndex > 0;
-  }
-
-  canRedo(): boolean {
-    return this.historyIndex >= 0 && this.historyIndex < this.snapshots.length - 1;
-  }
+  canUndo(): boolean { return this.historyIndex > 0; }
+  canRedo(): boolean { return this.historyIndex >= 0 && this.historyIndex < this.snapshots.length - 1; }
 
   undo(): RootState | null {
     if (!this.canUndo()) return null;
     this.historyIndex -= 1;
-    const snapshot = this.snapshots[this.historyIndex];
-    this.state = snapshot.state;
+    this.state = this.snapshots[this.historyIndex].state;
     this.version += 1;
-    this.notify(snapshot.action);
+    this.notify(this.snapshots[this.historyIndex].action);
     return this.state;
   }
 
   redo(): RootState | null {
     if (!this.canRedo()) return null;
     this.historyIndex += 1;
-    const snapshot = this.snapshots[this.historyIndex];
-    this.state = snapshot.state;
+    this.state = this.snapshots[this.historyIndex].state;
     this.version += 1;
-    this.notify(snapshot.action);
+    this.notify(this.snapshots[this.historyIndex].action);
     return this.state;
   }
 
-  snapshot(): StateSnapshot {
-    return this.snapshots[this.historyIndex];
-  }
+  snapshot(): StateSnapshot { return this.snapshots[this.historyIndex]; }
+  getHistory(): StateSnapshot[] { return [...this.snapshots]; }
 
   restore(snapshot: StateSnapshot): RootState {
     this.state = snapshot.state;
@@ -108,10 +97,6 @@ export class RuntimeStateStore {
     this.notify(snapshot.action);
     void this.persist();
     return this.state;
-  }
-
-  getHistory(): StateSnapshot[] {
-    return [...this.snapshots];
   }
 
   async hydrate(): Promise<RootState> {
@@ -128,16 +113,8 @@ export class RuntimeStateStore {
   }
 
   private recordSnapshot(action?: IAction): void {
-    if (this.historyIndex < this.snapshots.length - 1) {
-      this.snapshots = this.snapshots.slice(0, this.historyIndex + 1);
-    }
-    this.snapshots.push({
-      id: `${this.version}-${this.snapshots.length}`,
-      version: this.version,
-      timestamp: Date.now(),
-      state: this.state,
-      action,
-    });
+    if (this.historyIndex < this.snapshots.length - 1) this.snapshots = this.snapshots.slice(0, this.historyIndex + 1);
+    this.snapshots.push({ id: `${this.version}-${this.snapshots.length}`, version: this.version, timestamp: Date.now(), state: this.state, action });
     while (this.snapshots.length > this.maxSnapshots) this.snapshots.shift();
     this.historyIndex = this.snapshots.length - 1;
   }
@@ -149,10 +126,6 @@ export class RuntimeStateStore {
 
   private async persist(): Promise<void> {
     if (!this.persistence) return;
-    try {
-      await this.persistence.save(this.state, this.version);
-    } catch {
-      // Persistence is best-effort; state transitions remain deterministic.
-    }
+    try { await this.persistence.save(this.state, this.version); } catch { /* best effort */ }
   }
 }
