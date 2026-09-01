@@ -1,14 +1,13 @@
 import { BaseEngine, EngineConfigSchema } from '@ai-creative-studio/core';
-import { z } from 'zod';
 import { RuntimeStateStore, type StatePersistenceAdapter, type StateReducer } from './runtimeStore.js';
 import { createInitialState, type RootState } from './store.js';
+import { z } from 'zod';
 
 const StateConfigSchema = EngineConfigSchema.extend({
   persistenceEnabled: z.boolean().optional().default(false),
   syncEnabled: z.boolean().optional().default(false),
   maxSnapshots: z.number().int().positive().optional().default(100),
 });
-
 type StateConfig = z.infer<typeof StateConfigSchema>;
 
 export class StateEngine extends BaseEngine {
@@ -31,19 +30,12 @@ export class StateEngine extends BaseEngine {
     if (this.persistenceEnabled) await this.stateStore.hydrate();
   }
 
-  getStore(): RuntimeStateStore {
-    return this.stateStore;
-  }
+  getStore(): RuntimeStateStore { return this.stateStore; }
 
   getCapabilities(): string[] {
-    const capabilities = [
-      'state-management',
-      'undo-redo',
-      'snapshots',
-      'versioning',
-    ];
+    const capabilities = ['state-management','undo-redo','snapshots','versioning'];
     if (this.persistenceEnabled) capabilities.push('persistence');
-    if (this.syncEnabled) capabilities.push('realtime-sync');
+    if (this.syncEnabled) capabilities.push('sync-configured');
     return capabilities;
   }
 }
