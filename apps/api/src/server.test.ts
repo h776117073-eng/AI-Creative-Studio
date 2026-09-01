@@ -83,8 +83,28 @@ describe('professional timeline API', () => {
     expect(redo.body.timeline.tracks.find((t:any)=>t.type==='video').clips[0].rotate).toBe(90);
   });
 
-  it('renders a real MP4 from the multi-track timeline', async () => {
-    const response = await request(app).post(`/api/projects/${projectId}/render`);
+  it('accepts high-speed timeline values without truncating them at 4x', async () => {
+    const project = await request(app).get(`/api/projects/${projectId}`);
+    const clipId = project.body.timeline.tracks.find((t:any)=>t.type==='video').clips[0].id;
+    const speed = await request(app).post(`/api/projects/${projectId}/ai-command`).send({ text:'اجعل السرعة 8x', clipId, playhead: 1 });
+    expect(speed.status).toBe(200);
+    expect(speed.body.timeline.tracks.find((t:any)=>t.type==='video').clips[0].speed).toBe(8);
+  });
+
+  it('rejects effects that have no actual renderer implementation', async () => {
+    const project = await request(app).get(`/api/projects/${projectId}`);
+    const timeline = structuredClone(project.body.timeline);
+    const clip = timeline.tracks.find((t:any)=>t.type==='video').clips[0];
+    clip.effects = ['tracking'];
+    const response = await request(app).post(`/api/projects/${projectId}/timeline`).send({ timeline });
+    expect(response.status).toBe(200);
+    const render = await request(app).post(`/api/projects/${projectId}/render-advanced`);
+    expect(render.status).toBe(422);
+    expect(render.body.unsupportedEffect).toBe('tracking');
+  });
+
+  it('renders a real MP4 from the multi-track timeline at a requested bounded resolution', async () => {
+    const response = await request(app).post(`/api/projects/${projectId}/render`).send({ width: 1920, height: 1080 });
     if (response.status !== 200) console.error('RENDER_REGRESSION_ERROR', response.body);
     expect(response.status).toBe(200);
     expect(response.headers['content-type']).toMatch(/video\/mp4/);
