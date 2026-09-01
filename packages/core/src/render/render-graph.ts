@@ -2,29 +2,9 @@ export type RenderNodeType = 'source'|'decode'|'crop'|'transform'|'retime'|'mask
 
 export type RenderImplementationStatus = 'implemented'|'partial'|'unsupported';
 
-export interface RenderNode {
-  id: string;
-  type: RenderNodeType;
-  inputs: string[];
-  params: Record<string, unknown>;
-  status: RenderImplementationStatus;
-}
-
-export interface RenderGraph {
-  version: 1;
-  width: number;
-  height: number;
-  frameRate: number;
-  duration: number;
-  nodes: RenderNode[];
-  diagnostics: string[];
-}
-
-export interface TimelineLike {
-  duration?: number;
-  tracks?: Array<{ type?: string; clips?: Array<Record<string, unknown>> }>;
-}
-
+export interface RenderNode { id: string; type: RenderNodeType; inputs: string[]; params: Record<string, unknown>; status: RenderImplementationStatus; }
+export interface RenderGraph { version: 1; width: number; height: number; frameRate: number; duration: number; nodes: RenderNode[]; diagnostics: string[]; }
+export interface TimelineLike { duration?: number; tracks?: Array<{ type?: string; clips?: Array<Record<string, unknown>> }> }
 const IMPLEMENTED_EFFECTS = new Set(['blur','vignette','grain','enhance','night','voice-enhance','noise-reduce']);
 
 export function normalizeRenderGraph(input: TimelineLike, options: { width?: number; height?: number; frameRate?: number } = {}): RenderGraph {
@@ -33,15 +13,16 @@ export function normalizeRenderGraph(input: TimelineLike, options: { width?: num
   const frameRate = Math.max(1, Math.min(240, Number(options.frameRate ?? 30)));
   const nodes: RenderNode[] = [];
   const diagnostics: string[] = [];
-  const add = (type: RenderNodeType, params: Record<string, unknown>, status: RenderImplementationStatus, inputs: string[] = []) => {
-    const node = { id: `${type}-${nodes.length + 1}`, type, inputs, params, status } satisfies RenderNode;
+  const add = (type: RenderNodeType, params: Record<string, unknown>, status: RenderImplementationStatus = 'implemented', inputs: string[] = []) => {
+    const node: RenderNode = { id: `${type}-${nodes.length + 1}`, type, inputs, params, status };
     nodes.push(node);
     if (status !== 'implemented') diagnostics.push(`${type}:${String(params.reason ?? status)}`);
     return node.id;
   };
 
-  const videoTracks = (input.tracks ?? []).filter(t => t.type === 'video');
-  const audioTracks = (input.tracks ?? []).filter(t => t.type === 'audio');
+  const tracks = input.tracks ?? [];
+  const videoTracks = tracks.filter(t => t.type === 'video');
+  const audioTracks = tracks.filter(t => t.type === 'audio');
   let previousComposite: string | undefined;
   for (const track of videoTracks) {
     for (const clip of track.clips ?? []) {
@@ -60,9 +41,13 @@ export function normalizeRenderGraph(input: TimelineLike, options: { width?: num
         tail = add('effect', { effect }, implemented ? 'implemented' : 'unsupported', [tail]);
       }
       const color = add('color', { brightness: clip.brightness ?? 0, contrast: clip.contrast ?? 1, saturation: clip.saturation ?? 1, grayscale: !!clip.grayscale }, 'implemented', [tail]);
-      const transition = clip.transitionIn || clip.transitionOut;
-      if (transition) tail = add('composite', { transition }, transition.type === 'fade' || transition.type === 'dissolve' ? 'partial' : 'unsupported', [previousComposite ?? color, color]);
-      else tail = color;
+      const transitionValue = clip.transitionIn ?? clip.transitionOut;
+      if (transitionValue && typeof transitionValue === 'object') {
+        const transition = transitionValue as Record<string, unknown>;
+        const transitionType = String(transition.type ?? 'cut');
+        const status: RenderImplementationStatus = transitionType === 'fade' || transitionType === 'dissolve' ? 'partial' : 'unsupported';
+        tail = add('composite', { transition }, status, [previousComposite ?? color, color]);
+      } else tail = color;
       previousComposite = add('composite', { blendMode: clip.blendMode ?? 'normal' }, 'implemented', [tail]);
     }
   }
@@ -74,13 +59,10 @@ export function normalizeRenderGraph(input: TimelineLike, options: { width?: num
       add('audio', { volume: clip.volume ?? 1, speed: clip.speed ?? 1, effects: clip.effects ?? [] }, 'implemented', [decode]);
     }
   }
-  const textTracks = (input.tracks ?? []).filter(t => t.type === 'text');
-  for (const track of textTracks) for (const clip of track.clips ?? []) if (clip.text) add('text', { text: clip.text, startTime: clip.startTime, endTime: clip.endTime }, 'implemented');
-
+  const textTracks = tracks.filter(t => t.type === 'text');
+  for (const track of textTracks) for (const clip of track.clips ?? []) if (clip.text) add('text', { text: clip.text, startTime: clip.startTime, endTime: clip.endTime });
   add('encode', { width, height, frameRate, codec: 'h264', audioCodec: 'aac' }, 'implemented', previousComposite ? [previousComposite] : []);
   return { version: 1, width, height, frameRate, duration: Math.max(0, Number(input.duration ?? 0)), nodes, diagnostics };
 }
 
-function clampInt(value: number, min: number, max: number): number {
-  return Math.round(Math.max(min, Math.min(max, Number.isFinite(value) ? value : min)));
-}
+function clampInt(value: number, min: number, max: number): number { return Math.round(Math.max(min, Math.min(max, Number.isFinite(value) ? value : min))); }
