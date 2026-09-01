@@ -92,13 +92,16 @@ describe('professional timeline API', () => {
   });
 
   it('rejects effects that have no actual renderer implementation', async () => {
-    const project = await request(app).get(`/api/projects/${projectId}`);
+    const isolated = await request(app).post('/api/projects').send({ name: 'Unsupported Effect Test' });
+    const isolatedId = isolated.body.id;
+    await request(app).post(`/api/projects/${isolatedId}/upload`).attach('file', fixture);
+    const project = await request(app).get(`/api/projects/${isolatedId}`);
     const timeline = structuredClone(project.body.timeline);
     const clip = timeline.tracks.find((t:any)=>t.type==='video').clips[0];
     clip.effects = ['tracking'];
-    const response = await request(app).post(`/api/projects/${projectId}/timeline`).send({ timeline });
+    const response = await request(app).post(`/api/projects/${isolatedId}/timeline`).send({ timeline });
     expect(response.status).toBe(200);
-    const render = await request(app).post(`/api/projects/${projectId}/render-advanced`);
+    const render = await request(app).post(`/api/projects/${isolatedId}/render-advanced`);
     expect(render.status).toBe(422);
     expect(render.body.unsupportedEffect).toBe('tracking');
   });
