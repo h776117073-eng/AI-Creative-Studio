@@ -12,7 +12,7 @@
     "dev:api": "npm run dev -w @ai-creative-studio/api",
     "build": "npm run build:core && npm run build:engines && npm run build:apps && npm run build:api",
     "build:core": "npm run build -w @ai-creative-studio/core",
-    "build:engines": "npm run build -w @ai-creative-studio/creative-engine -w @ai-creative-studio/timeline-engine -w @ai-creative-studio/rendering-engine -w @ai-creative-studio/animation-engine -w @ai-creative-studio/asset-engine -w @ai-creative-studio/project-engine -w @ai-creative-studio/ai-engine -w @ai-creative-studio/command-engine -w @ai-creative-studio/state-engine -w @ai-creative-studio/plugin-engine",
+    "build:engines": "for config in packages/*/tsconfig.json; do npx tsc -p \"$config\" || exit $?; done",
     "build:apps": "npm run build -w @ai-creative-studio/web",
     "build:api": "npm run build -w @ai-creative-studio/api",
     "test": "npm run test --workspaces",
