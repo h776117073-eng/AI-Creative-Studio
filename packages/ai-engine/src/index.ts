@@ -215,7 +215,7 @@ export class AIEngine extends BaseEngine {
 
   getAgentsByCapability(capability: string): IAgent[] {
     const result: IAgent[] = [];
-    this.agines.forEach(agent => {
+    this.agents.forEach(agent => {
       if (agent.capabilities.includes(capability)) {
         result.push(agent);
       }

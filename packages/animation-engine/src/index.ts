@@ -84,6 +84,37 @@ export interface IAnimationEvents {
 
 export type EasingFunction = (t: number) => number;
 
+/** Solve a CSS cubic-bezier timing curve for a normalized input. */
+function cubicBezierAt(x1: number, y1: number, x2: number, y2: number, x: number): number {
+  const clamp = (v: number) => Math.max(0, Math.min(1, v));
+  const cx = 3 * x1;
+  const bx = 3 * (x2 - x1) - cx;
+  const ax = 1 - cx - bx;
+  const cy = 3 * y1;
+  const by = 3 * (y2 - y1) - cy;
+  const ay = 1 - cy - by;
+  const sampleX = (t: number) => ((ax * t + bx) * t + cx) * t;
+  const sampleY = (t: number) => ((ay * t + by) * t + cy) * t;
+  const sampleDX = (t: number) => (3 * ax * t + 2 * bx) * t + cx;
+  let t = clamp(x);
+  for (let i = 0; i < 8; i++) {
+    const dx = sampleX(t) - x;
+    const slope = sampleDX(t);
+    if (Math.abs(dx) < 1e-7) break;
+    if (Math.abs(slope) < 1e-7) break;
+    t = clamp(t - dx / slope);
+  }
+  let lo = 0;
+  let hi = 1;
+  for (let i = 0; i < 12; i++) {
+    const mid = (lo + hi) / 2;
+    if (sampleX(mid) < x) lo = mid;
+    else hi = mid;
+  }
+  const refined = Math.abs(sampleX(t) - x) < 1e-5 ? t : (lo + hi) / 2;
+  return clamp(sampleY(refined));
+}
+
 export const EasingFunctions: Record<EasingType, EasingFunction> = {
   'linear': (t) => t,
   'ease-in': (t) => t * t * t,
@@ -107,7 +138,7 @@ export const EasingFunctions: Record<EasingType, EasingFunction> = {
     const c3 = c1 + 1;
     return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
   },
-  'cubic-bezier': (t) => t,
+  'cubic-bezier': (t) => cubicBezierAt(0.42, 0, 0.58, 1, t),
 };
 
 export class AnimationEngine extends BaseEngine {
@@ -153,7 +184,7 @@ export class AnimationEngine extends BaseEngine {
       name: options?.name || `${type}-${property}`,
       type,
       startTime: options?.startTime ?? 0,
-      duration: options?.duration ?? this.defaultDuration,
+      duration: Math.max(Number.EPSILON, options?.duration ?? this.defaultDuration),
       delay: options?.delay ?? 0,
       easing: options?.easing ?? this.defaultEasing,
       iterations: options?.iterations ?? 1,
@@ -340,7 +371,8 @@ export class AnimationEngine extends BaseEngine {
       }
     }
 
-    const localProgress = (progress - startKf.offset) / (endKf.offset - startKf.offset);
+    const span = endKf.offset - startKf.offset;
+    const localProgress = span <= Number.EPSILON ? 1 : Math.max(0, Math.min(1, (progress - startKf.offset) / span));
     const easingFn = EasingFunctions[startKf.easing];
     const easedProgress = easingFn(localProgress);
 

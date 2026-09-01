@@ -9,7 +9,7 @@ import {
 import { z } from 'zod';
 
 const RenderingEngineConfigSchema = EngineConfigSchema.extend({
-  useWebGL: z.boolean().optional().default(true),
+  useWebGL: z.boolean().optional().default(false),
   antialiasing: z.boolean().optional().default(true),
   backgroundColor: z.object({ r: z.number(), g: z.number(), b: z.number() }).optional(),
   maxTextureSize: z.number().optional().default(4096),
@@ -138,7 +138,8 @@ export class RenderingEngine extends BaseEngine {
   setCanvas(canvas: HTMLCanvasElement): void {
     this.canvas = canvas;
 
-    if (this.usingWebGL) {
+    const experimentalWebGL = this.usingWebGL && canvas.dataset.renderMode === 'webgl-experimental';
+    if (experimentalWebGL) {
       const context = canvas.getContext('webgl2') || canvas.getContext('webgl');
       if (context) {
         this.gl = context as WebGLRenderingContext;
@@ -170,7 +171,7 @@ export class RenderingEngine extends BaseEngine {
   resize(width: number, height: number): void {
     this.width = width;
     this.height = height;
-    this.pixelRatio = window.devicePixelRatio || 1;
+    this.pixelRatio = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
 
     if (this.canvas) {
       const actualWidth = width * this.pixelRatio;
@@ -282,7 +283,7 @@ export class RenderingEngine extends BaseEngine {
         width: this.width,
         height: this.height,
         pixelRatio: this.pixelRatio,
-        devicePixelRatio: window.devicePixelRatio || 1,
+        devicePixelRatio: typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1,
       },
       time: renderTime,
       frame: this.currentFrame,

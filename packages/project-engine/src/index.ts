@@ -397,7 +397,7 @@ export class ProjectEngine extends BaseEngine {
     const restoredProject = backup.data as IFullProject;
     restoredProject.metadata.updatedAt = Date.now();
 
-    const graph = ProjectGraph.deserialize(backup.data as any);
+    const graph = ProjectGraph.deserialize(restoredProject.graph as any);
     restoredProject.graph = graph;
 
     this.projects.set(projectId, restoredProject);
