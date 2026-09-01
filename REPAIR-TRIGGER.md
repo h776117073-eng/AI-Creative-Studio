@@ -1,1 +1,1 @@
-Temporary repair trigger. Removed after verification.
+Temporary repair trigger. Validation is active.
