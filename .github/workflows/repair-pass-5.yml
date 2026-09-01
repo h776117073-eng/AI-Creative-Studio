@@ -1,0 +1,108 @@
+name: Repair Pass 5
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - name: Repair workspace build graph and renderer
+        shell: python
+        run: |
+          from pathlib import Path
+          import json, re
+
+          # Every TypeScript package with a tsconfig must expose a deterministic build script.
+          for p in sorted(Path('packages').glob('*/package.json')):
+              data=json.loads(p.read_text(encoding='utf-8'))
+              pkg_dir=p.parent
+              if (pkg_dir/'tsconfig.json').exists():
+                  scripts=data.setdefault('scripts',{})
+                  scripts.setdefault('build','tsc -p tsconfig.json')
+                  p.write_text(json.dumps(data,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+                  print('build script ensured:',p)
+
+          def patch(path, fn):
+              p=Path(path); old=p.read_text(encoding='utf-8'); new=fn(old); p.write_text(new,encoding='utf-8')
+              print(path, 'changed' if new!=old else 'unchanged')
+
+          runner="""\nfunction runFFmpeg(args:string[],timeoutMs=180000):Promise<void>{return new Promise((resolve,reject)=>{const child=spawn('ffmpeg',args,{stdio:['ignore','ignore','pipe']});let stderr='';const timer=setTimeout(()=>{child.kill('SIGKILL');reject(new Error(`FFmpeg timed out\\n${stderr.slice(-4000)}`));},timeoutMs);child.stderr.on('data',d=>{stderr+=String(d);if(stderr.length>12000)stderr=stderr.slice(-12000);});child.once('error',e=>{clearTimeout(timer);reject(e)});child.once('close',code=>{clearTimeout(timer);if(code===0)resolve();else reject(new Error(`FFmpeg exited ${code}\\n${stderr.slice(-4000)}`))});});}\n"""
+
+          def server(s):
+              s=s.replace("import { execFileSync, spawnSync } from 'node:child_process';","import { execFileSync, spawn } from 'node:child_process';",1)
+              if 'function runFFmpeg(args:string[]' not in s:
+                  pat=r"(function hasAudio\(path:string\)\{[\s\S]*?\}\n)(function getProject)"
+                  s,n=re.subn(pat,lambda m:m.group(1)+runner+m.group(2),s,count=1)
+                  if n!=1: raise SystemExit('server runner insertion failed')
+              s=s.replace("app.post('/api/projects/:id/render',(req,res)=>{","app.post('/api/projects/:id/render',async(req,res)=>{",1)
+              old="const result=spawnSync('ffmpeg',args,{encoding:'utf8',timeout:180000});if(result.status!==0||!existsSync(output))return res.status(500).json({error:'FFmpeg render failed',detail:result.stderr?.slice(-3500)});res.download(output,'ai-creative-studio.mp4',()=>{try{unlinkSync(output);}catch{}});"
+              new="try{await runFFmpeg(args);}catch(error){try{if(existsSync(output))unlinkSync(output);}catch{};return res.status(500).json({error:'FFmpeg render failed',detail:error instanceof Error?error.message:String(error)});}if(!existsSync(output))return res.status(500).json({error:'FFmpeg render produced no output'});res.download(output,'ai-creative-studio.mp4',()=>{try{unlinkSync(output);}catch{}});"
+              if old in s: s=s.replace(old,new,1)
+              elif 'spawnSync' in s: raise SystemExit('server render block not found')
+              if 'const requestedWidth=' not in s:
+                  anchor="const output=join(EXPORTS,`${randomUUID()}.mp4`);const args="
+                  rep="const requestedWidth=Math.max(256,Math.min(3840,Number(req.body?.width||1280)));const requestedHeight=Math.max(144,Math.min(2160,Number(req.body?.height||720)));filter=filter.replaceAll('scale=1280:720','scale='+requestedWidth+':'+requestedHeight).replaceAll('pad=1280:720','pad='+requestedWidth+':'+requestedHeight);const output=join(EXPORTS,`${randomUUID()}.mp4`);const args="
+                  if anchor not in s: raise SystemExit('server resolution anchor not found')
+                  s=s.replace(anchor,rep,1)
+              if 'spawnSync' in s: raise SystemExit('server spawnSync remains')
+              return s
+          patch('apps/api/src/server.ts',server)
+
+          def ai(s):
+              s=s.replace("import { execFileSync, spawnSync } from 'node:child_process';","import { execFileSync, spawn } from 'node:child_process';",1)
+              if 'function runFFmpeg(args:string[]' not in s:
+                  pat=r"(const hasAudio=\(path:string\)=>\{[\s\S]*?\};\n)"
+                  s,n=re.subn(pat,lambda m:m.group(1)+runner,s,count=1)
+                  if n!=1: raise SystemExit('AI runner insertion failed')
+              old="const result=spawnSync('ffmpeg',['-y',...inputs,'-filter_complex',filter,'-map','[vout]','-map','[aout]','-c:v','libx264','-preset','veryfast','-pix_fmt','yuv420p','-c:a','aac','-movflags','+faststart',output],{encoding:'utf8',timeout:180000});if(result.status!==0||!existsSync(output))return res.status(500).json({error:'FFmpeg advanced render failed',detail:result.stderr?.slice(-4000)});res.download(output,'ai-creative-studio.mp4',()=>{try{unlinkSync(output);}catch{}});"
+              new="try{await runFFmpeg(['-y',...inputs,'-filter_complex',filter,'-map','[vout]','-map','[aout]','-c:v','libx264','-preset','veryfast','-pix_fmt','yuv420p','-c:a','aac','-movflags','+faststart',output]);}catch(error){try{if(existsSync(output))unlinkSync(output);}catch{};return res.status(500).json({error:'FFmpeg advanced render failed',detail:error instanceof Error?error.message:String(error)});}if(!existsSync(output))return res.status(500).json({error:'FFmpeg advanced render produced no output'});res.download(output,'ai-creative-studio.mp4',()=>{try{unlinkSync(output);}catch{}});"
+              if old in s: s=s.replace(old,new,1)
+              elif 'spawnSync' in s: raise SystemExit('AI render block not found')
+              s=s.replace("const atempo=(speed:number)=>{let x=Math.max(.25,Math.min(4,speed));","const atempo=(speed:number)=>{let x=Math.max(.1,Math.min(100,speed));",1)
+              s=s.replace("const speed=Math.max(.25,Math.min(4,Number(clip.speed||1)));","const speed=Math.max(.1,Math.min(100,Number(clip.speed||1)));",1)
+              s=s.replace("else if(command.type==='set_speed')target.speed=Math.max(.25,Math.min(4,Number(command.value??1)));","else if(command.type==='set_speed')target.speed=Math.max(.1,Math.min(100,Number(command.value??1)));",1)
+              if 'SUPPORTED_RENDER_EFFECTS' not in s:
+                  marker="const escText=(text:string)=>String(text).replace(/\\\\/g,'\\\\\\\\').replace(/:/g,'\\\\:').replace(/'/g,\"\\\\'\").replace(/%/g,'\\\\%').replace(/\\n/g,'\\\\n');"
+                  if marker not in s: raise SystemExit('AI effect marker missing')
+                  s=s.replace(marker,marker+"const SUPPORTED_RENDER_EFFECTS=new Set(['blur','vignette','grain','enhance','night','voice-enhance','noise-reduce']);",1)
+              old_effect="else if(command.type==='set_effect'){const effect=String(command.effect||'').toLowerCase();target.effects=target.effects.filter((e:string)=>e!==effect);if(effect)target.effects.push(effect);}"
+              new_effect="else if(command.type==='set_effect'){const effect=String(command.effect||'').toLowerCase();if(!SUPPORTED_RENDER_EFFECTS.has(effect)){return res.status(422).json({provider:'local',command:{type:'noop',message:`التأثير ${effect||'المطلوب'} غير مدعوم في المُصيّر الحالي.`},unsupportedEffect:effect,timeline});}target.effects=target.effects.filter((e:string)=>e!==effect);if(effect)target.effects.push(effect);}"
+              if old_effect in s: s=s.replace(old_effect,new_effect,1)
+              if 'const requestedWidth=' not in s:
+                  anchor="const output=join(EXPORTS,`${randomUUID()}.mp4`);try{await runFFmpeg"
+                  rep="const requestedWidth=Math.max(256,Math.min(3840,Number(req.body?.width||1280)));const requestedHeight=Math.max(144,Math.min(2160,Number(req.body?.height||720)));filter=filter.replaceAll('scale=1280:720','scale='+requestedWidth+':'+requestedHeight).replaceAll('pad=1280:720','pad='+requestedWidth+':'+requestedHeight);const output=join(EXPORTS,`${randomUUID()}.mp4`);try{await runFFmpeg"
+                  if anchor not in s: raise SystemExit('AI resolution anchor missing')
+                  s=s.replace(anchor,rep,1)
+              if 'spawnSync' in s: raise SystemExit('AI spawnSync remains')
+              return s
+          patch('apps/api/src/aiRoute.ts',ai)
+
+      - name: Validate full repository
+        shell: bash
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ffmpeg
+          npm install --ignore-scripts --no-audit --no-fund
+          npm run build
+          npm run test:api
+          npm run lint
+          npm run typecheck
+      - name: Commit only on green validation
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/*/package.json apps/api/src/server.ts apps/api/src/aiRoute.ts
+          git diff --cached --check
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "fix(build): make workspace builds and render pipeline consistent"
+          git push
