@@ -1,0 +1,86 @@
+name: Repair Pass 2
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply render and capability fixes
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              s = p.read_text(encoding='utf-8')
+              if old not in s:
+                  raise SystemExit(f'Expected text not found in {path}: {old[:180]!r}')
+              p.write_text(s.replace(old, new, 1), encoding='utf-8')
+
+          # 1) Keep advanced AI rendering consistent with the timeline speed range.
+          replace_once('apps/api/src/aiRoute.ts', 'const atempo=(speed:number)=>{let x=Math.max(.25,Math.min(4,speed));', 'const atempo=(speed:number)=>{let x=Math.max(.1,Math.min(100,speed));')
+          replace_once('apps/api/src/aiRoute.ts', 'const speed=Math.max(.25,Math.min(4,Number(clip.speed||1)));', 'const speed=Math.max(.1,Math.min(100,Number(clip.speed||1)));')
+          replace_once('apps/api/src/aiRoute.ts', "else if(command.type==='set_speed')target.speed=Math.max(.25,Math.min(4,Number(command.value??1)));", "else if(command.type==='set_speed')target.speed=Math.max(.1,Math.min(100,Number(command.value??1)));")
+
+          # 2) Replace blocking ffmpeg calls with an awaitable process runner in API routes.
+          replace_once('apps/api/src/server.ts', "import { execFileSync, spawnSync } from 'node:child_process';", "import { execFileSync, spawn } from 'node:child_process';")
+          server_helper = """\nfunction runFFmpeg(args:string[], timeoutMs=180000):Promise<void>{\n  return new Promise((resolve,reject)=>{\n    const child=spawn('ffmpeg',args,{stdio:['ignore','ignore','pipe']});\n    let stderr='';\n    const timer=setTimeout(()=>{child.kill('SIGKILL');reject(new Error(`FFmpeg timed out after ${timeoutMs}ms\\n${stderr.slice(-3500)}`));},timeoutMs);\n    child.stderr.on('data',d=>{stderr+=String(d);if(stderr.length>12000)stderr=stderr.slice(-12000);});\n    child.once('error',error=>{clearTimeout(timer);reject(error);});\n    child.once('close',code=>{clearTimeout(timer);if(code===0)resolve();else reject(new Error(`FFmpeg exited with code ${code}\\n${stderr.slice(-3500)}`));});\n  });\n}\n"""
+          marker="function hasAudio(path:string){try{return execFileSync('ffprobe',['-v','error','-select_streams','a:0','-show_entries','stream=codec_type','-of','default=nw=1:nk=1',path],{encoding:'utf8',timeout:30000}).trim()==='audio';}catch{return false;}}\n"
+          replace_once('apps/api/src/server.ts', marker, marker+server_helper)
+          replace_once('apps/api/src/server.ts', "app.post('/api/projects/:id/render',(req,res)=>{", "app.post('/api/projects/:id/render',async(req,res)=>{")
+          old_render="const result=spawnSync('ffmpeg',args,{encoding:'utf8',timeout:180000});if(result.status!==0||!existsSync(output))return res.status(500).json({error:'FFmpeg render failed',detail:result.stderr?.slice(-3500)});res.download(output,'ai-creative-studio.mp4',()=>{try{unlinkSync(output);}catch{}});"
+          new_render="try{await runFFmpeg(args);}catch(error){try{if(existsSync(output))unlinkSync(output);}catch{};return res.status(500).json({error:'FFmpeg render failed',detail:error instanceof Error?error.message:String(error)});}if(!existsSync(output))return res.status(500).json({error:'FFmpeg render produced no output'});res.download(output,'ai-creative-studio.mp4',()=>{try{unlinkSync(output);}catch{}});"
+          replace_once('apps/api/src/server.ts', old_render, new_render)
+
+          # 3) Do the same for advanced renderer.
+          replace_once('apps/api/src/aiRoute.ts', "import { execFileSync, spawnSync } from 'node:child_process';", "import { execFileSync, spawn } from 'node:child_process';")
+          ai_helper = """\nfunction runFFmpeg(args:string[], timeoutMs=180000):Promise<void>{\n  return new Promise((resolve,reject)=>{\n    const child=spawn('ffmpeg',args,{stdio:['ignore','ignore','pipe']});\n    let stderr='';\n    const timer=setTimeout(()=>{child.kill('SIGKILL');reject(new Error(`FFmpeg timed out after ${timeoutMs}ms\\n${stderr.slice(-4000)}`));},timeoutMs);\n    child.stderr.on('data',d=>{stderr+=String(d);if(stderr.length>12000)stderr=stderr.slice(-12000);});\n    child.once('error',error=>{clearTimeout(timer);reject(error);});\n    child.once('close',code=>{clearTimeout(timer);if(code===0)resolve();else reject(new Error(`FFmpeg exited with code ${code}\\n${stderr.slice(-4000)}`));});\n  });\n}\n"""
+          replace_once('apps/api/src/aiRoute.ts', marker, marker+ai_helper)
+          old_adv="const output=join(EXPORTS,`${randomUUID()}.mp4`);const result=spawnSync('ffmpeg',['-y',...inputs,'-filter_complex',filter,'-map','[vout]','-map','[aout]','-c:v','libx264','-preset','veryfast','-pix_fmt','yuv420p','-c:a','aac','-movflags','+faststart',output],{encoding:'utf8',timeout:180000});if(result.status!==0||!existsSync(output))return res.status(500).json({error:'FFmpeg advanced render failed',detail:result.stderr?.slice(-4000)});res.download(output,'ai-creative-studio.mp4',()=>{try{unlinkSync(output);}catch{}});"
+          new_adv="const output=join(EXPORTS,`${randomUUID()}.mp4`);try{await runFFmpeg(['-y',...inputs,'-filter_complex',filter,'-map','[vout]','-map','[aout]','-c:v','libx264','-preset','veryfast','-pix_fmt','yuv420p','-c:a','aac','-movflags','+faststart',output]);}catch(error){try{if(existsSync(output))unlinkSync(output);}catch{};return res.status(500).json({error:'FFmpeg advanced render failed',detail:error instanceof Error?error.message:String(error)});}if(!existsSync(output))return res.status(500).json({error:'FFmpeg advanced render produced no output'});res.download(output,'ai-creative-studio.mp4',()=>{try{unlinkSync(output);}catch{}});"
+          replace_once('apps/api/src/aiRoute.ts', old_adv, new_adv)
+
+          # 4) Make advanced rendering honest: only effects with real filter implementations are accepted.
+          marker2="const escText=(text:string)=>String(text).replace(/\\\\/g,'\\\\\\\\').replace(/:/g,'\\\\:').replace(/'/g,\"\\\\'\").replace(/%/g,'\\\\%').replace(/\\n/g,'\\\\n');\n"
+          supported="const SUPPORTED_RENDER_EFFECTS=new Set(['blur','vignette','grain','enhance','night','voice-enhance','noise-reduce']);\n"
+          replace_once('apps/api/src/aiRoute.ts', marker2, marker2+supported)
+          old_effect="else if(command.type==='set_effect'){const effect=String(command.effect||'').toLowerCase();target.effects=target.effects.filter((e:string)=>e!==effect);if(effect)target.effects.push(effect);}"
+          new_effect="else if(command.type==='set_effect'){const effect=String(command.effect||'').toLowerCase();if(!SUPPORTED_RENDER_EFFECTS.has(effect)){return res.status(422).json({provider:'local',command:{type:'noop',message:`التأثير ${effect||'المطلوب'} غير مدعوم في المُصيّر الحالي.`},unsupportedEffect:effect,timeline});}target.effects=target.effects.filter((e:string)=>e!==effect);if(effect)target.effects.push(effect);}"
+          replace_once('apps/api/src/aiRoute.ts', old_effect, new_effect)
+
+          # 5) Add safe, bounded output-resolution selection to both render paths.
+          replace_once('apps/api/src/server.ts', "const output=join(EXPORTS,`${randomUUID()}.mp4`);const args=['-y',...inputs,'-filter_complex',filter,'-map','[cv]','-map','[aout]','-c:v','libx264'", "const requestedWidth=Math.max(256,Math.min(3840,Number(req.body?.width||1280)));const requestedHeight=Math.max(144,Math.min(2160,Number(req.body?.height||720)));filter=filter.replaceAll('scale=1280:720','scale='+requestedWidth+':'+requestedHeight).replaceAll('pad=1280:720','pad='+requestedWidth+':'+requestedHeight);const output=join(EXPORTS,`${randomUUID()}.mp4`);const args=['-y',...inputs,'-filter_complex',filter,'-map','[cv]','-map','[aout]','-c:v','libx264'")
+          replace_once('apps/api/src/aiRoute.ts', "const output=join(EXPORTS,`${randomUUID()}.mp4`);try{await runFFmpeg", "const requestedWidth=Math.max(256,Math.min(3840,Number(req.body?.width||1280)));const requestedHeight=Math.max(144,Math.min(2160,Number(req.body?.height||720)));filter=filter.replaceAll('scale=1280:720','scale='+requestedWidth+':'+requestedHeight).replaceAll('pad=1280:720','pad='+requestedWidth+':'+requestedHeight);const output=join(EXPORTS,`${randomUUID()}.mp4`);try{await runFFmpeg")
+
+          print('repair pass 2 applied')
+      - name: Validate application
+        shell: bash
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ffmpeg
+          npm install --ignore-scripts --no-audit --no-fund
+          npm run build
+          npm run test:api
+      - name: Commit fixes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/api/src/server.ts apps/api/src/aiRoute.ts
+          git diff --cached --check
+          if git diff --cached --quiet; then echo "No changes to commit"; exit 0; fi
+          git commit -m "fix(render): make ffmpeg async and capabilities honest"
+          git push
