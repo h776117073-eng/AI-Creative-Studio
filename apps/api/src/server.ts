@@ -5,7 +5,7 @@ import Database from 'better-sqlite3';
 import { mkdirSync, existsSync, unlinkSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { extname, join, resolve, basename } from 'node:path';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { registerAIRoute } from './aiRoute.js';
 
 const ROOT=resolve(process.cwd(),'../..');
@@ -32,6 +32,7 @@ const newTrack=(type:string,name:string,order:number)=>({id:randomUUID(),name,ty
 const timelineTemplate=()=>({version:3,duration:0,currentTime:0,tracks:[newTrack('video','Video 1',0),newTrack('audio','Audio 1',1),newTrack('text','Text 1',2),newTrack('overlay','Overlay 1',3)],markers:[]});
 function readDuration(path:string){try{return Number(execFileSync('ffprobe',['-v','error','-show_entries','format=duration','-of','default=nw=1:nk=1',path],{encoding:'utf8',timeout:30000}).trim())||0;}catch{return 0;}}
 function hasAudio(path:string){try{return execFileSync('ffprobe',['-v','error','-select_streams','a:0','-show_entries','stream=codec_type','-of','default=nw=1:nk=1',path],{encoding:'utf8',timeout:30000}).trim()==='audio';}catch{return false;}}
+function runFFmpeg(args:string[],timeoutMs=180000):Promise<void>{return new Promise((resolve,reject)=>{const child=spawn('ffmpeg',args,{stdio:['ignore','ignore','pipe']});let stderr='';const timer=setTimeout(()=>{child.kill('SIGKILL');reject(new Error(`FFmpeg timed out\n${stderr.slice(-4000)}`));},timeoutMs);child.stderr.on('data',d=>{stderr+=String(d);if(stderr.length>12000)stderr=stderr.slice(-12000);});child.once('error',e=>{clearTimeout(timer);reject(e)});child.once('close',code=>{clearTimeout(timer);if(code===0)resolve();else reject(new Error(`FFmpeg exited ${code}\n${stderr.slice(-4000)}`))});});}
 function getProject(id:string){return db.prepare('SELECT * FROM projects WHERE id=?').get(id) as any;}
 function getAssets(id:string){return db.prepare('SELECT * FROM assets WHERE project_id=? ORDER BY created_at').all(id) as any[];}
 function payload(id:string){const p=getProject(id);if(!p)return null;return{id:p.id,name:p.name,updatedAt:p.updated_at,createdAt:p.created_at,timeline:JSON.parse(p.timeline_json),historyIndex:p.history_index,historyLength:JSON.parse(p.history_json).length,assets:getAssets(id).map(a=>({...a,url:`/media/${basename(a.path)}`}))};}
@@ -72,7 +73,7 @@ app.post('/api/projects/:id/redo',(req,res)=>{const id=String(req.params.id);con
 
 function atempo(speed:number){let x=Math.max(.1,Math.min(100,speed));const parts:string[]=[];while(x>2){parts.push('atempo=2');x/=2;}while(x<.5){parts.push('atempo=0.5');x/=.5;}parts.push(`atempo=${x}`);return parts.join(',');}
 
-app.post('/api/projects/:id/render',(req,res)=>{
+app.post('/api/projects/:id/render',async(req,res)=>{
   const id=String(req.params.id);const p=getProject(id);if(!p)return res.status(404).json({error:'Project not found'});
   const timeline=normalizeTimeline(JSON.parse(p.timeline_json));const vtrack=videoTrack(timeline);const videoClips=vtrack.clips.filter((c:any)=>c.duration>0);if(!videoClips.length)return res.status(422).json({error:'No video clips'});
   const audioTracks=timeline.tracks.filter((t:any)=>t.type==='audio'&&!t.muted);const externalAudio=audioTracks.flatMap((t:any)=>t.clips.filter((c:any)=>c.duration>0).map((c:any)=>({...c,track:t})));
@@ -84,8 +85,11 @@ app.post('/api/projects/:id/render',(req,res)=>{
   const mixLabels:string[]=['[ca]'];
   for(const clip of externalAudio){const asset=db.prepare('SELECT * FROM assets WHERE id=?').get(clip.assetId) as any;if(!asset||!existsSync(asset.path)||!hasAudio(asset.path))continue;const inputIndex=idx;inputs.push('-ss',String(clip.trimStart),'-t',String(Math.max(.01,clip.trimEnd-clip.trimStart)),'-i',asset.path);const delay=Math.max(0,Math.round(Number(clip.startTime||0)*1000));const vol=Math.max(0,Math.min(4,Number(clip.volume??1)));filter+=`[${inputIndex}:a:0]aresample=48000,volume=${vol},adelay=${delay}:all=1[ma${inputIndex}];`;mixLabels.push(`[ma${inputIndex}]`);idx++;}
   if(mixLabels.length===1)filter+='[ca]anull[aout];';else filter+=`${mixLabels.join('')}amix=inputs=${mixLabels.length}:duration=longest:dropout_transition=0:normalize=0[aout];`;
+  const requestedWidth=Math.max(256,Math.min(3840,Number(req.body?.width||1280)));const requestedHeight=Math.max(144,Math.min(2160,Number(req.body?.height||720)));filter=filter.replaceAll('scale=1280:720','scale='+requestedWidth+':'+requestedHeight).replaceAll('pad=1280:720','pad='+requestedWidth+':'+requestedHeight);
   const output=join(EXPORTS,`${randomUUID()}.mp4`);const args=['-y',...inputs,'-filter_complex',filter,'-map','[cv]','-map','[aout]','-c:v','libx264','-preset','veryfast','-pix_fmt','yuv420p','-c:a','aac','-movflags','+faststart',output];
-  const result=spawnSync('ffmpeg',args,{encoding:'utf8',timeout:180000});if(result.status!==0||!existsSync(output))return res.status(500).json({error:'FFmpeg render failed',detail:result.stderr?.slice(-3500)});res.download(output,'ai-creative-studio.mp4',()=>{try{unlinkSync(output);}catch{}});
+  try{await runFFmpeg(args);}catch(error){try{if(existsSync(output))unlinkSync(output);}catch{};return res.status(500).json({error:'FFmpeg render failed',detail:error instanceof Error?error.message:String(error)});}
+  if(!existsSync(output))return res.status(500).json({error:'FFmpeg render produced no output'});
+  res.download(output,'ai-creative-studio.mp4',()=>{try{unlinkSync(output);}catch{}});
 });
 
 registerAIRoute(app,db);
