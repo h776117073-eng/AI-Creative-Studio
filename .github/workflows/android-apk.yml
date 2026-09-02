@@ -55,6 +55,7 @@ jobs:
           python3 tools/android/enhance_vireon_product.py android-build/clearcut
           python3 tools/android/apply_locale_bootstrap.py android-build/clearcut
           python3 tools/android/harden_vireon_ui.py android-build/clearcut
+          python3 tools/android/harden_vireon_agent.py android-build/clearcut
       - name: Remove stale upstream dependency verification metadata from ephemeral build
         run: rm -f android-build/clearcut/gradle/verification-metadata.xml
       - name: Configure CI source-audit exclusions
