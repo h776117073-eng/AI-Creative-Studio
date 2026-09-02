@@ -1,4 +1,4 @@
-name: Dissect Android Editor APK — Architecture Fingerprint
+name: Dissect Android Editor APK — CapCut Architecture Study
 
 on:
   push:
@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       apk_url:
-        description: 'Direct APK/XAPK URL. Leave empty to auto-fetch the latest public CapCut APK page.'
+        description: 'Direct APK/XAPK URL. Leave empty to fetch public CapCut APK.'
         required: false
         default: ''
         type: string
@@ -34,15 +34,16 @@ jobs:
           python -m py_compile tools/capcut-study/fetch_apk.py
           python -m py_compile tools/capcut-study/fast_apk_fingerprint.py
           python -m py_compile tools/capcut-study/select_fingerprint.py
+          python -m py_compile tools/capcut-study/dissect_capcut.py
           python -m py_compile tools/capcut-study/dissect_capcut_runner.py
           python -m py_compile tools/capcut-study/compare_vireon.py
       - name: Run deterministic dissector self-test
         run: python tools/capcut-study/dissect_capcut_runner.py --self-test
 
   analyze:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v5
@@ -66,6 +67,14 @@ jobs:
           sudo cp /tmp/apktool.jar /usr/local/bin/apktool.jar
           sudo cp /tmp/apktool /usr/local/bin/apktool
           apktool --version
+      - name: Install JADX 1.5.6
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 5 --retry-all-errors https://github.com/skylot/jadx/releases/download/v1.5.6/jadx-1.5.6.zip -o /tmp/jadx.zip
+          mkdir -p /opt/jadx
+          unzip -q /tmp/jadx.zip -d /opt/jadx
+          sudo ln -sf /opt/jadx/bin/jadx /usr/local/bin/jadx
+          jadx --version
       - name: Resolve APK source
         env:
           APK_URL: ${{ github.event.inputs.apk_url }}
@@ -73,33 +82,85 @@ jobs:
           set -euo pipefail
           mkdir -p target
           if [ -n "${APK_URL:-}" ]; then
-            echo "[*] Using supplied APK/XAPK URL"
             curl -fL --retry 5 --retry-all-errors --max-time 600 "$APK_URL" -o target/input.apk_or_xapk
           else
-            echo "[*] Auto-fetching latest public CapCut APK from configured distribution page"
             python tools/capcut-study/fetch_apk.py --output target/input.apk_or_xapk --metadata target/capcut_fetch.json
           fi
           file target/input.apk_or_xapk
           test -s target/input.apk_or_xapk
-      - name: Fast structural fingerprint
+      - name: Execute actual APK/XAPK decompilation
         run: |
-          python tools/capcut-study/fast_apk_fingerprint.py target/input.apk_or_xapk --output extracted_capcut/architecture_fingerprint.json
-      - name: Generate structural comparison report
-        run: |
-          python tools/capcut-study/compare_vireon.py extracted_capcut/architecture_fingerprint.json --output CAPCUT_VIREON_COMPARISON.md
+          set -euo pipefail
+          rm -rf extracted_capcut
+          mkdir -p extracted_capcut/apktool_out extracted_capcut/jadx_out
           python - <<'PY'
 from pathlib import Path
-p=Path('CAPCUT_ARCHITECTURE_REPORT.md')
-p.write_text('''# CapCut Architecture Fingerprint\n\nThis study intentionally uses a bounded structural fingerprint rather than a full proprietary-source decompilation. It records APK/Dex signals, native-library paths, shader paths, configuration/schema inventory and cryptographic fingerprints.\n\nThe bounded path is used as the repeatable baseline for Vireon architecture-gap analysis. Full JADX inspection remains an optional manual/long-running investigation and is not required for the Vireon build gate.\n''',encoding='utf-8')
+import shutil, zipfile
+src=Path('target/input.apk_or_xapk')
+out=Path('target/apks'); out.mkdir(parents=True, exist_ok=True)
+
+def is_apk(p):
+    try:
+        with zipfile.ZipFile(p) as z:
+            return 'AndroidManifest.xml' in z.namelist()
+    except zipfile.BadZipFile:
+        return False
+if is_apk(src):
+    shutil.copy2(src, out/'main.apk')
+else:
+    with zipfile.ZipFile(src) as z:
+        found=0
+        for i in z.infolist():
+            if i.filename.lower().endswith('.apk'):
+                dest=out/f'apk_{found}.apk'; dest.parent.mkdir(parents=True,exist_ok=True)
+                with z.open(i) as a, dest.open('wb') as b: shutil.copyfileobj(a,b)
+                found += 1
+        if found == 0: raise SystemExit('No APK members found')
 PY
-      - name: Upload architecture study reports
+          for apk in target/apks/*.apk; do
+            tag=$(basename "$apk" .apk)
+            apktool d -f "$apk" -o "extracted_capcut/apktool_out/$tag"
+            jadx -d "extracted_capcut/jadx_out/$tag" --no-res --output-format java "$apk"
+          done
+      - name: Generate deep architecture report without retaining proprietary source in the repository
+        run: |
+          python - <<'PY'
+from pathlib import Path
+import hashlib, json, re
+from collections import Counter
+root=Path('extracted_capcut')
+manifest_rows=[]; libs=[]; java_files=[]; term_counts=Counter(); schema=Counter(); shader_files=[]
+terms=('timeline','track','clip','segment','keyframe','trim','split','transition','speed','curve','playhead','ripple','render','decoder','encoder','compositor','audio','waveform','media','source')
+for p in (root/'apktool_out').glob('*'):
+    m=p/'AndroidManifest.xml'
+    manifest_rows.append({'apk':p.name,'manifest_exists':m.exists(),'manifest_head':m.read_text(errors='ignore')[:4000] if m.exists() else ''})
+    for so in (p/'lib').rglob('*.so') if (p/'lib').exists() else []:
+        h=hashlib.sha256(so.read_bytes()).hexdigest(); libs.append({'path':str(so.relative_to(p)),'abi':so.parent.name,'size':so.stat().st_size,'sha256':h})
+    for s in p.rglob('*'):
+        if s.is_file() and (s.suffix.lower() in {'.glsl','.frag','.vert','.comp','.geom','.spv','.metal','.hlsl'} or 'shader' in s.name.lower()):
+            shader_files.append({'path':str(s.relative_to(p)),'size':s.stat().st_size,'sha256':hashlib.sha256(s.read_bytes()).hexdigest()})
+    for s in p.rglob('*'):
+        if s.is_file() and s.suffix.lower() in {'.json','.json5','.xml','.yaml','.yml','.proto','.toml'}:
+            schema[s.suffix.lower()] += 1
+for p in (root/'jadx_out').rglob('*.java'):
+    text=p.read_text(errors='ignore'); low=text.lower(); hits={t:len(re.findall(r'\b'+re.escape(t)+r'\b',low)) for t in terms}; hits={k:v for k,v in hits.items() if v}
+    if hits:
+        java_files.append({'path':str(p.relative_to(root/'jadx_out')),'terms':hits})
+        term_counts.update(hits)
+report={'study':'capcut-architecture-deep-decompile','status':'completed','note':'Decompiled output is analyzed ephemerally in CI; proprietary source/assets are not copied into the Vireon repository or redistributed.','manifest':manifest_rows,'native_libraries':sorted(libs,key=lambda x:x['path']),'shaders':shader_files,'schema_file_counts':dict(schema),'timeline_term_counts':term_counts.most_common(),'candidate_java_files':sorted(java_files,key=lambda x:sum(x['terms'].values()),reverse=True)[:500]}
+Path('CAPCUT_DEEP_ARCHITECTURE.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
+lines=['# CapCut Deep Architecture Study','','The CI job performed real Apktool resource decoding and JADX DEX→Java decompilation on the fetched APK/XAPK. The resulting source tree is temporary CI material and is not redistributed.','',f"Candidate Java files: **{len(java_files)}**",f"Native libraries: **{len(libs)}**",f"Shader-like assets: **{len(shader_files)}**",'', '## Timeline/media signals','']
+lines += [f"- `{k}`: {v}" for k,v in term_counts.most_common()]
+lines += ['', '## Vireon implementation implications', '- Normalize source-time/timeline-time mapping.', '- Treat clip/segment/range/keyframe/transition as typed timeline primitives.', '- Separate decode/cache/proxy/render from timeline state.', '- Route AI commands to typed editor operations and transactions, not UI text matching.', '- Keep preview and offline render on the same normalized render graph.']
+Path('CAPCUT_DEEP_ARCHITECTURE.md').write_text('\n'.join(lines)+'\n',encoding='utf-8')
+PY
+      - name: Upload deep study artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: CapCut-Vireon-Architecture-Study
+          name: CapCut-Vireon-Deep-Architecture-Study
           path: |
-            CAPCUT_ARCHITECTURE_REPORT.md
-            CAPCUT_VIREON_COMPARISON.md
-            extracted_capcut/architecture_fingerprint.json
+            CAPCUT_DEEP_ARCHITECTURE.md
+            CAPCUT_DEEP_ARCHITECTURE.json
             target/capcut_fetch.json
           if-no-files-found: error
           retention-days: 14
