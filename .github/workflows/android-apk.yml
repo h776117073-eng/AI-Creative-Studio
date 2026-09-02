@@ -58,6 +58,7 @@ jobs:
         run: |
           python3 tools/android/apply_clearcut_patch.py android-build/clearcut
           python3 tools/android/fix_clearcut_patch.py android-build/clearcut
+          python3 tools/android/upgrade_vireon_ai_patch.py android-build/clearcut
 
       - name: Remove stale upstream dependency verification metadata from ephemeral build
         run: rm -f android-build/clearcut/gradle/verification-metadata.xml
