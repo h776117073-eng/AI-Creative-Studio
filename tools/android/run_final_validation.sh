@@ -5,8 +5,15 @@ export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
 export ANDROID_SDK_ROOT="$ANDROID_HOME"
 SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
 
-"$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses >/dev/null || true
-"$SDKMANAGER" --sdk_root="$ANDROID_HOME" "platforms;android-36" "build-tools;36.0.0" "platform-tools" "emulator" >/dev/null
+# sdkmanager can close stdin after consuming packages; don't let yes(1)/SIGPIPE fail the build under pipefail.
+set +o pipefail
+yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses >/dev/null || true
+yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" "platforms;android-36" "build-tools;36.0.0" "platform-tools" "emulator" >/dev/null || true
+set -o pipefail
+
+test -d "$ANDROID_HOME/platforms/android-36"
+test -d "$ANDROID_HOME/build-tools/36.0.0"
+test -x "$ANDROID_HOME/emulator/emulator"
 
 rm -rf android-build
 mkdir -p android-build/clearcut
@@ -37,8 +44,9 @@ popd >/dev/null
 python3 tools/android/verify_and_prepare_apk.py android-build/clearcut android-build/AI-Creative-Studio-debug.apk
 python3 tools/android/validate_product_smoke.py android-build/clearcut
 
-# Headless emulator acceptance test.
-"$SDKMANAGER" --sdk_root="$ANDROID_HOME" "system-images;android-35;google_apis;x86_64" >/dev/null
+set +o pipefail
+yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" "system-images;android-35;google_apis;x86_64" >/dev/null || true
+set -o pipefail
 if ! "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" list avd | grep -q '^Name: vireon-ci$'; then
   echo "no" | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n vireon-ci -k "system-images;android-35;google_apis;x86_64" --force --device "pixel_6"
 fi
@@ -65,7 +73,6 @@ s=open('android-build/vireon-ar.xml',encoding='utf-8').read()
 required=['Vireon','الإعدادات','مساعد المونتاج الذكي','تصدير','الصوت','القص']
 missing=[x for x in required if x not in s]
 if missing: raise SystemExit(f'Arabic UI markers missing: {missing}')
-print('Arabic UI smoke passed')
 PY
 adb exec-out screencap -p > android-build/vireon-ar.png
 python3 - <<'PY'
@@ -99,7 +106,7 @@ missing=[x for x in required if x not in s]
 if missing: raise SystemExit(f'English UI markers missing: {missing}')
 for x in ('الإعدادات','مساعد المونتاج الذكي','الصوت','القص','تصدير'):
   if x in s: raise SystemExit(f'Arabic leakage after English switch: {x}')
-print('English UI smoke passed')
+print('Arabic and English UI smoke passed')
 PY
 adb exec-out screencap -p > android-build/vireon-en.png
 
