@@ -21,7 +21,7 @@ env:
 jobs:
   build-apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Checkout product repository
         uses: actions/checkout@v4
@@ -59,6 +59,8 @@ jobs:
           python3 tools/android/apply_clearcut_patch.py android-build/clearcut
           python3 tools/android/fix_clearcut_patch.py android-build/clearcut
           python3 tools/android/upgrade_vireon_ai_patch.py android-build/clearcut
+          python3 tools/android/enhance_vireon_product.py android-build/clearcut
+          python3 tools/android/apply_locale_bootstrap.py android-build/clearcut
 
       - name: Remove stale upstream dependency verification metadata from ephemeral build
         run: rm -f android-build/clearcut/gradle/verification-metadata.xml
@@ -94,6 +96,102 @@ jobs:
 
       - name: Product smoke validation
         run: python3 tools/android/validate_product_smoke.py android-build/clearcut
+
+      - name: Install Android emulator image
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" "system-images;android-35;google_apis;x86_64" >/dev/null
+          echo "no" | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n vireon-ci -k "system-images;android-35;google_apis;x86_64" --force --device "pixel_6"
+
+      - name: UI smoke test on headless emulator (Arabic + English)
+        env:
+          APK_PATH: android-build/AI-Creative-Studio-debug.apk
+        run: |
+          set -euo pipefail
+          export ANDROID_AVD_HOME="$HOME/.android/avd"
+          "$ANDROID_HOME/emulator/emulator" -avd vireon-ci -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot > /tmp/vireon-emulator.log 2>&1 &
+          EMU_PID=$!
+          trap 'adb emu kill || true; kill "$EMU_PID" 2>/dev/null || true' EXIT
+          adb wait-for-device
+          for _ in $(seq 1 90); do
+            BOOTED=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)
+            [ "$BOOTED" = "1" ] && break
+            sleep 2
+          done
+          test "$(adb shell getprop sys.boot_completed | tr -d '\r')" = "1"
+          adb install -r "$APK_PATH"
+          adb shell am force-stop com.aicreativestudio.mobile
+          adb shell am start -n com.aicreativestudio.mobile/.MainActivity
+          sleep 8
+          adb shell uiautomator dump /sdcard/vireon-ar.xml >/dev/null
+          adb pull /sdcard/vireon-ar.xml android-build/vireon-ar.xml >/dev/null
+          python3 - <<'PY'
+import xml.etree.ElementTree as ET
+p='android-build/vireon-ar.xml'
+s=open(p,encoding='utf-8').read()
+required=['Vireon','الإعدادات','مساعد المونتاج الذكي']
+missing=[x for x in required if x not in s]
+if missing: raise SystemExit(f'Missing Arabic UI markers: {missing}')
+print('Arabic UI smoke markers:', ', '.join(required))
+PY
+          adb exec-out screencap -p > android-build/vireon-ar.png
+
+          python3 - <<'PY'
+import subprocess, xml.etree.ElementTree as ET, time
+xml_path='android-build/vireon-ar.xml'
+
+def tap(text):
+    root=ET.parse(xml_path).getroot()
+    for node in root.iter('node'):
+        hay=' '.join([node.attrib.get(k,'') for k in ('text','content-desc','resource-id')])
+        if text in hay:
+            b=node.attrib.get('bounds','')
+            nums=[int(x) for x in __import__('re').findall(r'\d+', b)]
+            if len(nums)==4:
+                x=(nums[0]+nums[2])//2; y=(nums[1]+nums[3])//2
+                subprocess.run(['adb','shell','input','tap',str(x),str(y)],check=True)
+                return
+    raise SystemExit(f'Unable to locate UI node: {text}')
+
+tap('الإعدادات')
+time.sleep(1)
+subprocess.run(['adb','shell','uiautomator','dump','/sdcard/vireon-lang.xml'],check=True,stdout=subprocess.DEVNULL)
+subprocess.run(['adb','pull','/sdcard/vireon-lang.xml','android-build/vireon-lang.xml'],check=True,stdout=subprocess.DEVNULL)
+lang=open('android-build/vireon-lang.xml',encoding='utf-8').read()
+if 'English' not in lang: raise SystemExit('English selector missing')
+root=ET.fromstring(lang)
+for node in root.iter('node'):
+    if node.attrib.get('text')=='English':
+        b=node.attrib.get('bounds',''); import re
+        nums=[int(x) for x in re.findall(r'\d+', b)]
+        if len(nums)==4:
+            x=(nums[0]+nums[2])//2; y=(nums[1]+nums[3])//2
+            subprocess.run(['adb','shell','input','tap',str(x),str(y)],check=True)
+            break
+else:
+    raise SystemExit('English selector bounds not found')
+time.sleep(3)
+subprocess.run(['adb','shell','uiautomator','dump','/sdcard/vireon-en.xml'],check=True,stdout=subprocess.DEVNULL)
+subprocess.run(['adb','pull','/sdcard/vireon-en.xml','android-build/vireon-en.xml'],check=True,stdout=subprocess.DEVNULL)
+en=open('android-build/vireon-en.xml',encoding='utf-8').read()
+for marker in ('Vireon','Settings','Export'):
+    if marker not in en: raise SystemExit(f'English UI marker missing: {marker}')
+print('English UI smoke markers: Vireon, Settings, Export')
+PY
+          adb exec-out screencap -p > android-build/vireon-en.png
+
+      - name: Upload UI smoke evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: vireon-ui-smoke-evidence
+          path: |
+            android-build/vireon-ar.png
+            android-build/vireon-en.png
+            android-build/vireon-ar.xml
+            android-build/vireon-en.xml
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
