@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/android-apk.yml'
+      - '.github/workflows/integrated-ci.yml'
       - 'tools/android/**'
       - 'third_party/**'
       - 'packages/**'
@@ -13,11 +14,12 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/android-apk.yml'
+      - '.github/workflows/integrated-ci.yml'
       - 'tools/android/**'
       - 'third_party/**'
       - 'packages/**'
       - 'apps/android/**'
-  workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -28,6 +30,7 @@ env:
 
 jobs:
   build-apk:
+    name: Android APK + emulator product verification
     runs-on: ubuntu-latest
     timeout-minutes: 70
     steps:
@@ -38,7 +41,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
-      - name: Install Android API 36 toolchain from preinstalled SDK
+      - name: Install Android API 36 toolchain
         run: |
           set -e
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
@@ -55,7 +58,7 @@ jobs:
           curl -L --fail --retry 3 --retry-all-errors "https://github.com/SysAdminDoc/ClearCut/archive/${CLEARCUT_SHA}.tar.gz" -o /tmp/clearcut.tar.gz
           tar -xzf /tmp/clearcut.tar.gz --strip-components=1 -C android-build/clearcut
           chmod +x android-build/clearcut/gradlew
-      - name: Apply AI Creative Studio product integration
+      - name: Apply Vireon Android product layer
         run: |
           python3 tools/android/apply_clearcut_patch.py android-build/clearcut
           python3 tools/android/fix_clearcut_patch.py android-build/clearcut
@@ -64,38 +67,34 @@ jobs:
           python3 tools/android/apply_locale_bootstrap.py android-build/clearcut
           python3 tools/android/harden_vireon_ui.py android-build/clearcut
           python3 tools/android/harden_vireon_agent.py android-build/clearcut
-      - name: Remove stale upstream dependency verification metadata from ephemeral build
-        run: rm -f android-build/clearcut/gradle/verification-metadata.xml
       - name: Configure CI source-audit exclusions
-        run: python3 tools/android/configure_ci_test_filter.py android-build/clearcut
+        run: |
+          rm -f android-build/clearcut/gradle/verification-metadata.xml
+          python3 tools/android/configure_ci_test_filter.py android-build/clearcut
       - name: Run native Kotlin/Compose unit tests
         working-directory: android-build/clearcut
         run: ./gradlew :app:testQaUnitTest --no-daemon --stacktrace -Dorg.gradle.dependency.verification=off -PciSourceAuditExclusions=true
-      - name: Verify test report and coverage count
+      - name: Verify test count >= 1500
         run: |
           RESULTS="android-build/clearcut/app/build/test-results/testQaUnitTest"
           test -d "$RESULTS"
           TEST_COUNT=$(grep -Roh 'tests="[0-9][0-9]*"' "$RESULTS" | sed -E 's/[^0-9]//g' | awk '{s+=$1} END{print s+0}')
-          echo "Runtime unit tests completed: $TEST_COUNT"
+          echo "Native test count: $TEST_COUNT"
           test "$TEST_COUNT" -ge 1500
       - name: Build installable debug APK
         working-directory: android-build/clearcut
         run: ./gradlew :app:assembleDebug --no-daemon --stacktrace -Dorg.gradle.dependency.verification=off
-      - name: Locate and validate generated APK
+      - name: Validate APK and product integration
         run: |
           python3 tools/android/verify_and_prepare_apk.py android-build/clearcut android-build/AI-Creative-Studio-debug.apk
-          echo "APK_PATH=android-build/AI-Creative-Studio-debug.apk" >> "$GITHUB_ENV"
-      - name: Product smoke validation
-        run: python3 tools/android/validate_product_smoke.py android-build/clearcut
-      - name: Install Android emulator image
+          python3 tools/android/validate_product_smoke.py android-build/clearcut
+      - name: Create headless Android emulator
         run: |
           set -euo pipefail
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" "system-images;android-35;google_apis;x86_64" >/dev/null
           echo "no" | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n vireon-ci -k "system-images;android-35;google_apis;x86_64" --force --device "pixel_6"
-      - name: UI smoke test on headless emulator (Arabic + English)
-        env:
-          APK_PATH: android-build/AI-Creative-Studio-debug.apk
+      - name: Install APK and smoke-test Arabic then English UI
         run: |
           set -euo pipefail
           export ANDROID_AVD_HOME="$HOME/.android/avd"
@@ -109,7 +108,7 @@ jobs:
             sleep 2
           done
           test "$(adb shell getprop sys.boot_completed | tr -d '\r')" = "1"
-          adb install -r "$APK_PATH"
+          adb install -r android-build/AI-Creative-Studio-debug.apk
           adb shell am force-stop com.aicreativestudio.mobile
           adb shell am start -n com.aicreativestudio.mobile/.MainActivity --ez vireon_smoke true
           sleep 10
@@ -121,73 +120,61 @@ s=open('android-build/vireon-ar.xml',encoding='utf-8').read()
 required=['Vireon','الإعدادات','مساعد المونتاج الذكي','تصدير','الصوت','القص']
 missing=[x for x in required if x not in s]
 if missing: raise SystemExit(f'Missing Arabic UI markers: {missing}')
-print('Arabic UI markers present:', ', '.join(required))
 PY
           adb exec-out screencap -p > android-build/vireon-ar.png
           python3 - <<'PY'
 import subprocess,xml.etree.ElementTree as ET,re,time
-xml='android-build/vireon-ar.xml'
-def locate(text):
-    root=ET.parse(xml).getroot()
-    for n in root.iter('node'):
-        hay=' '.join(n.attrib.get(k,'') for k in ('text','content-desc','resource-id'))
-        if text in hay:
-            nums=[int(x) for x in re.findall(r'\d+',n.attrib.get('bounds',''))]
-            if len(nums)==4:return (nums[0]+nums[2])//2,(nums[1]+nums[3])//2
-    return None
-pt=locate('الإعدادات')
-if not pt: raise SystemExit('Settings control not found in Arabic UI')
+p='android-build/vireon-ar.xml'
+root=ET.parse(p).getroot()
+pt=None
+for n in root.iter('node'):
+    if 'الإعدادات' in ' '.join(n.attrib.get(k,'') for k in ('text','content-desc','resource-id')):
+        v=[int(x) for x in re.findall(r'\d+',n.attrib.get('bounds',''))]
+        if len(v)==4: pt=((v[0]+v[2])//2,(v[1]+v[3])//2); break
+if not pt: raise SystemExit('Settings control not found')
 subprocess.run(['adb','shell','input','tap',str(pt[0]),str(pt[1])],check=True)
 time.sleep(1)
-subprocess.run(['adb','shell','uiautomator','dump','/sdcard/vireon-settings.xml'],check=True,stdout=subprocess.DEVNULL)
-subprocess.run(['adb','pull','/sdcard/vireon-settings.xml','android-build/vireon-settings.xml'],check=True,stdout=subprocess.DEVNULL)
-s=open('android-build/vireon-settings.xml',encoding='utf-8').read()
-if 'English' not in s: raise SystemExit('English language selector not found')
-root=ET.fromstring(s)
+subprocess.run(['adb','shell','uiautomator','dump','/sdcard/settings.xml'],check=True,stdout=subprocess.DEVNULL)
+subprocess.run(['adb','pull','/sdcard/settings.xml','android-build/settings.xml'],check=True,stdout=subprocess.DEVNULL)
+root=ET.parse('android-build/settings.xml').getroot()
 for n in root.iter('node'):
     if n.attrib.get('text')=='English':
-        nums=[int(x) for x in re.findall(r'\d+',n.attrib.get('bounds',''))]
-        if len(nums)==4:
-            subprocess.run(['adb','shell','input','tap',str((nums[0]+nums[2])//2),str((nums[1]+nums[3])//2)],check=True);break
-else: raise SystemExit('English selector bounds missing')
+        v=[int(x) for x in re.findall(r'\d+',n.attrib.get('bounds',''))]
+        if len(v)==4:
+            subprocess.run(['adb','shell','input','tap',str((v[0]+v[2])//2),str((v[1]+v[3])//2)],check=True); break
+else: raise SystemExit('English selector not found')
 time.sleep(4)
-subprocess.run(['adb','shell','uiautomator','dump','/sdcard/vireon-en.xml'],check=True,stdout=subprocess.DEVNULL)
-subprocess.run(['adb','pull','/sdcard/vireon-en.xml','android-build/vireon-en.xml'],check=True,stdout=subprocess.DEVNULL)
-en=open('android-build/vireon-en.xml',encoding='utf-8').read()
+subprocess.run(['adb','shell','uiautomator','dump','/sdcard/en.xml'],check=True,stdout=subprocess.DEVNULL)
+subprocess.run(['adb','pull','/sdcard/en.xml','android-build/en.xml'],check=True,stdout=subprocess.DEVNULL)
+s=open('android-build/en.xml',encoding='utf-8').read()
 required=['Vireon','Settings','AI Editing Assistant','Export','Audio','Cut']
-missing=[x for x in required if x not in en]
+missing=[x for x in required if x not in s]
 if missing: raise SystemExit(f'Missing English UI markers: {missing}')
-for forbidden in ('الإعدادات','مساعد المونتاج الذكي','الصوت','القص','تصدير'):
-    if forbidden in en: raise SystemExit(f'Arabic literal leaked after English switch: {forbidden}')
-print('English UI markers present and sampled Arabic labels absent:', ', '.join(required))
+for x in ('الإعدادات','مساعد المونتاج الذكي','الصوت','القص','تصدير'):
+    if x in s: raise SystemExit(f'Arabic leakage after English switch: {x}')
+print('Arabic and English UI smoke passed')
 PY
           adb exec-out screencap -p > android-build/vireon-en.png
-      - name: Upload UI smoke evidence
+      - name: Upload final Android APK and UI evidence
         uses: actions/upload-artifact@v4
         with:
-          name: vireon-ui-smoke-evidence
+          name: vireon-final-android-validation
           path: |
+            android-build/AI-Creative-Studio-debug.apk
             android-build/vireon-ar.png
             android-build/vireon-en.png
             android-build/vireon-ar.xml
-            android-build/vireon-settings.xml
-            android-build/vireon-en.xml
+            android-build/settings.xml
+            android-build/en.xml
           if-no-files-found: error
-          retention-days: 14
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: ai-creative-studio-kotlin-apk
-          path: ${{ env.APK_PATH }}
-          if-no-files-found: error
-          retention-days: 14
-      - name: Upload test reports
+          retention-days: 30
+      - name: Upload Android test reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ai-creative-studio-kotlin-test-reports
+          name: vireon-final-android-test-reports
           path: |
             android-build/clearcut/app/build/reports/tests/testQaUnitTest/**
             android-build/clearcut/app/build/test-results/testQaUnitTest/**
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 14
