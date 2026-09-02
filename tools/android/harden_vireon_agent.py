@@ -74,10 +74,25 @@ agent.write_text(text,encoding='utf-8')
 
 screen=UI/'VireonEditorScreen.kt'
 s=screen.read_text(encoding='utf-8')
+s=s.replace('''fun VireonEditorScreen(
+    onBack: () -> Unit = {},
+    viewModel: EditorViewModel = hiltViewModel(),
+)''','''fun VireonEditorScreen(
+    onBack: () -> Unit = {},
+    viewModel: EditorViewModel = hiltViewModel(),
+)''')
+s=s.replace('''                VireonTopBar(
+                    isAr = isAr,
+                    onBack = onBack,''','''                VireonTopBar(
+                    isAr = isAr,
+                    viewModel = viewModel,
+                    onBack = onBack,''',1)
+s=s.replace('''@Composable private fun VireonTopBar(isAr: Boolean, onBack: () -> Unit, onAssistant: () -> Unit, onSettings: () -> Unit) {''','''@Composable private fun VireonTopBar(isAr: Boolean, viewModel: EditorViewModel, onBack: () -> Unit, onAssistant: () -> Unit, onSettings: () -> Unit) {''',1)
 s=s.replace('''        IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, if (isAr) "رجوع" else "Back") }
         IconButton(onClick = onAssistant)''','''        IconButton(onClick = { viewModel.undo() }) { Icon(Icons.Default.Undo, if (isAr) "تراجع" else "Undo") }
         IconButton(onClick = { viewModel.redo() }) { Icon(Icons.Default.Redo, if (isAr) "إعادة" else "Redo") }
+        IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, if (isAr) "رجوع" else "Back") }
         IconButton(onClick = onAssistant)''',1)
 s=s.replace('''        Button(onClick = {}, shape = RoundedCornerShape(9.dp), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 7.dp)) {''','''        Button(onClick = { viewModel.showExportSheet() }, shape = RoundedCornerShape(9.dp), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 7.dp)) {''',1)
 screen.write_text(s,encoding='utf-8')
-print('Vireon agent hardened to confirmed native editor APIs')
+print('Vireon agent hardened and shell controls wired')
