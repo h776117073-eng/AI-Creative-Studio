@@ -9,6 +9,14 @@ on:
       - 'third_party/**'
       - 'packages/**'
       - 'apps/android/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/android-apk.yml'
+      - 'tools/android/**'
+      - 'third_party/**'
+      - 'packages/**'
+      - 'apps/android/**'
   workflow_dispatch:
 
 permissions:
