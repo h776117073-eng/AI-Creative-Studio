@@ -3,10 +3,12 @@ import sys
 
 ROOT = Path(sys.argv[1])
 UI = ROOT / "app/src/main/java/com/novacut/editor/ui/editor"
-RES = ROOT / "app/src/main/res/values-ar"
+RES_AR = ROOT / "app/src/main/res/values-ar"
+RES_BASE = ROOT / "app/src/main/res/values"
 ASSETS = ROOT / "app/src/main/assets"
 UI.mkdir(parents=True, exist_ok=True)
-RES.mkdir(parents=True, exist_ok=True)
+RES_AR.mkdir(parents=True, exist_ok=True)
+RES_BASE.mkdir(parents=True, exist_ok=True)
 ASSETS.mkdir(parents=True, exist_ok=True)
 
 (UI / "VireonQuantizedIntentModel.kt").write_text(r"""
@@ -16,7 +18,7 @@ import org.json.JSONObject
 import java.text.Normalizer
 import java.util.Locale
 
-/** Tiny deterministic offline command model using INT8-range feature weights. */
+/** Tiny deterministic offline INT8-weighted intent model for complex editor commands. */
 object VireonQuantizedIntentModel {
     private data class Intent(val name: String, val terms: List<String>, val bias: Int)
     private val intents = listOf(
@@ -53,16 +55,13 @@ object VireonQuantizedIntentModel {
             put("quantization", "int8")
             put("normalized", normalized)
         }
-        val array = org.json.JSONArray()
-        ops.forEach { array.put(it) }
-        output.put("operations", array)
+        val array = org.json.JSONArray(); ops.forEach { array.put(it) }; output.put("operations", array)
         output.put("confidence", if (ops.isEmpty()) 0.0 else ops.map { it.optDouble("confidence", 0.0) }.average())
         return output.toString()
     }
 
     private fun classify(part: String): JSONObject? {
-        var best: Intent? = null
-        var bestScore = 0
+        var best: Intent? = null; var bestScore = 0
         for (intent in intents) {
             var score = intent.bias
             for (term in intent.terms) if (part.contains(normalize(term))) score += 32
@@ -71,8 +70,7 @@ object VireonQuantizedIntentModel {
         val intent = best ?: return null
         if (bestScore < 40) return null
         return JSONObject().apply {
-            put("intent", intent.name)
-            put("confidence", (bestScore / 96.0).coerceAtMost(0.99))
+            put("intent", intent.name); put("confidence", (bestScore / 96.0).coerceAtMost(0.99))
             Regex("(\\d+(?:[.]\\d+)?)\\s*(?:ثانية|ثواني|sec|secs|s)").find(part)?.groupValues?.get(1)?.toDoubleOrNull()?.let { put("seconds", it) }
             Regex("(\\d+(?:[.]\\d+)?)\\s*%").find(part)?.groupValues?.get(1)?.toDoubleOrNull()?.let { put("percent", it) }
             Regex("(?:إلى|الى|at|to)?\\s*(\\d+(?:[.]\\d+)?)\\s*x").find(part)?.groupValues?.get(1)?.toDoubleOrNull()?.let { put("speed", it) }
@@ -94,9 +92,15 @@ package com.novacut.editor.ui.editor
 import android.content.Context
 import org.json.JSONObject
 
-/** Natural-language agent: analyze -> plan -> execute through native editor operations. */
+/** Arabic command agent: normalize -> classify -> execute only through existing native editor APIs. */
 object VireonArabicCommandAgent {
     data class Plan(val operations: List<JSONObject>, val confidence: Double, val model: String)
+
+    private val executable = setOf(
+        "SPLIT", "DELETE_SILENCE", "DENOISE", "DUPLICATE", "SPEED", "CAMERA_MOTION",
+        "COLOR_CURVE", "COLOR_GRADE", "CINEMATIC_NIGHT", "CAPTIONS", "MOTION_TRACK",
+        "BACKGROUND_REMOVE", "AUDIO"
+    )
 
     fun plan(text: String): Plan {
         val raw = JSONObject(VireonQuantizedIntentModel.analyze(text))
@@ -105,24 +109,21 @@ object VireonArabicCommandAgent {
         return Plan(operations, raw.optDouble("confidence", 0.0), raw.optString("model", "unknown"))
     }
 
+    fun hasExecutableOperations(plan: Plan): Boolean = plan.operations.any { executable.contains(it.optString("intent")) }
+
     suspend fun execute(context: Context, viewModel: EditorViewModel, text: String) {
         val plan = plan(text)
-        val state = viewModel.state.value
         for (op in plan.operations) when (op.optString("intent")) {
             "SPLIT" -> viewModel.splitAtPlayhead()
             "DELETE_SILENCE", "DENOISE" -> viewModel.analyzeAndReduceNoise()
             "DUPLICATE" -> viewModel.duplicateSelectedClip()
             "SPEED" -> viewModel.showSpeedCurveEditor()
-            "CAMERA_MOTION", "KEYFRAME", "ROTATE", "FLIP", "UPSCALE" -> viewModel.showTransformPanel()
+            "CAMERA_MOTION" -> viewModel.showTransformPanel()
             "COLOR_CURVE", "COLOR_GRADE", "CINEMATIC_NIGHT" -> viewModel.showColorGrading()
-            "MASK" -> { viewModel.addMask(MaskType.ELLIPSE); viewModel.showMaskEditor() }
-            "TRANSITION" -> state.selectedClipId?.let { id -> viewModel.setTransition(id, Transition(TransitionType.DISSOLVE, 500L, TransitionEasing.EASE_IN_OUT)) }
-            "TEXT" -> viewModel.addTextOverlay(TextOverlay(text = op.optString("text", "نص جديد"), startTimeMs = viewModel.playheadMs.value, endTimeMs = viewModel.playheadMs.value + 3000L, animationIn = TextAnimation.FADE))
             "CAPTIONS" -> viewModel.showPanel(PanelId.CAPTION_EDITOR)
             "MOTION_TRACK" -> viewModel.showPanel(PanelId.AI_TOOLS)
             "BACKGROUND_REMOVE" -> viewModel.showAiToolsPanel()
             "AUDIO" -> viewModel.showAudioMixer()
-            "TRIM" -> viewModel.showAiToolsPanel()
         }
     }
 }
@@ -132,25 +133,34 @@ command_executor = UI / "AssistantCommandExecutor.kt"
 if command_executor.exists():
     source = command_executor.read_text()
     marker = "suspend fun EditorViewModel.executeAssistantCommand(context: Context, request: AssistantRequest) {\n"
-    agent_call = "    val agentPlan = VireonArabicCommandAgent.plan(request.text)\n    if (agentPlan.operations.isNotEmpty() && agentPlan.confidence >= 0.42) { VireonArabicCommandAgent.execute(context, this, request.text); return }\n"
+    agent_call = "    val agentPlan = VireonArabicCommandAgent.plan(request.text)\n    if (VireonArabicCommandAgent.hasExecutableOperations(agentPlan) && agentPlan.confidence >= 0.42) { VireonArabicCommandAgent.execute(context, this, request.text); return }\n"
     if marker in source and agent_call not in source:
         source = source.replace(marker, marker + agent_call, 1)
         command_executor.write_text(source)
 
-(RES / "strings.xml").write_text(r"""<?xml version="1.0" encoding="utf-8"?>
+base_xml = RES_BASE / "vireon_strings.xml"
+base_xml.write_text(r'''<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vireon_product_name">Vireon — Smart Video Editor</string><string name="vireon_project">Project</string><string name="vireon_media">Media</string><string name="vireon_templates">Templates</string><string name="vireon_music">Music</string><string name="vireon_text">Text</string><string name="vireon_stickers">Stickers</string><string name="vireon_effects">Effects</string><string name="vireon_transitions">Transitions</string><string name="vireon_filters">Filters</string><string name="vireon_adjust">Adjust</string><string name="vireon_tools">Tools</string>
+    <string name="vireon_cut">Cut</string><string name="vireon_speed">Speed</string><string name="vireon_color">Color</string><string name="vireon_chroma">Chroma Key</string><string name="vireon_stabilize">Stabilize</string><string name="vireon_motion">Motion</string><string name="vireon_blend">Blend</string><string name="vireon_mask">Mask</string><string name="vireon_tracking">Motion Tracking</string><string name="vireon_audio">Audio</string><string name="vireon_ai_tools">AI Tools</string><string name="vireon_background">Background</string>
+    <string name="vireon_export">Export</string><string name="vireon_save">Save</string><string name="vireon_new_project">New Project</string><string name="vireon_assistant">Editor Assistant</string><string name="vireon_execute">Execute</string><string name="vireon_type_command">Type a command…</string>
+</resources>
+''', encoding="utf-8")
+
+(RES_AR / "strings.xml").write_text(r'''<?xml version="1.0" encoding="utf-8"?>
 <resources>
 <string name="vireon_product_name">Vireon — محرر الفيديو الذكي</string><string name="vireon_project">المشروع</string><string name="vireon_media">الوسائط</string><string name="vireon_templates">القوالب</string><string name="vireon_music">موسيقى</string><string name="vireon_text">نص</string><string name="vireon_stickers">ملصقات</string><string name="vireon_effects">تأثيرات</string><string name="vireon_transitions">انتقالات</string><string name="vireon_filters">فلاتر</string><string name="vireon_adjust">ضبط</string><string name="vireon_tools">أدوات</string>
-<string name="vireon_cut">قص</string><string name="vireon_speed">سرعة</string><string name="vireon_color">تعديل اللون</string><string name="vireon_chroma">مفتاح الكروما</string><string name="vireon_stabilize">تثبيت</string><string name="vireon_motion">تحريك</string><string name="vireon_blend">مزج</string><string name="vireon_mask">قناع</string><string name="vireon_tracking">تتبع الحركة</string><string name="vireon_audio">الصوت</string><string name="vireon_ai_tools">أدوات الذكاء الاصطناعي</string><string name="vireon_background">الخلفية</string>
+<string name="vireon_cut">قص</string><string name="vireon_speed">السرعة</string><string name="vireon_color">الألوان</string><string name="vireon_chroma">مفتاح الكروما</string><string name="vireon_stabilize">تثبيت</string><string name="vireon_motion">تحريك</string><string name="vireon_blend">مزج</string><string name="vireon_mask">قناع</string><string name="vireon_tracking">تتبع الحركة</string><string name="vireon_audio">الصوت</string><string name="vireon_ai_tools">أدوات الذكاء الاصطناعي</string><string name="vireon_background">الخلفية</string>
 <string name="vireon_export">تصدير</string><string name="vireon_save">حفظ</string><string name="vireon_new_project">مشروع جديد</string><string name="vireon_assistant">مساعد المونتير</string><string name="vireon_execute">تنفيذ</string><string name="vireon_type_command">اكتب أمرك بالعربية…</string>
 </resources>
-""", encoding="utf-8")
+''', encoding="utf-8")
 
-(ASSETS / "vireon_command_model_int8.json").write_text(r"""{
+(ASSETS / "vireon_command_model_int8.json").write_text(r'''{
   "model": "vireon-command-int8-v1",
   "type": "deterministic-int8-intent-classifier",
   "quantization": "int8",
   "offline": true,
   "supports": ["multi_intent", "arabic_normalization", "seconds", "percent", "speed_x", "ranges", "text_slots"]
 }
-""", encoding="utf-8")
-print("Vireon AI Arabic upgrade prepared and connected")
+''', encoding="utf-8")
+print("Vireon AI Arabic upgrade prepared and compile-safe")
