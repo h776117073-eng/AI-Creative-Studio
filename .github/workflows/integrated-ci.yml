@@ -78,4 +78,46 @@ jobs:
         run: npm run typecheck
 
   android:
-    uses: ./.github/workflows/android-apk.yml
+    name: Android APK + emulator product verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install Android SDK prerequisites
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses >/dev/null || true
+          yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" "platforms;android-36" "build-tools;36.0.0" "platform-tools" "emulator" >/dev/null
+      - name: Execute final Android validation runner
+        run: |
+          chmod +x tools/android/run_final_validation.sh
+          tools/android/run_final_validation.sh
+      - name: Upload final Android APK and UI evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: vireon-final-android-validation
+          path: |
+            android-build/AI-Creative-Studio-debug.apk
+            android-build/vireon-ar.png
+            android-build/vireon-en.png
+            android-build/vireon-ar.xml
+            android-build/settings.xml
+            android-build/en.xml
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload Android test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vireon-final-android-test-reports
+          path: |
+            android-build/clearcut/app/build/reports/tests/testQaUnitTest/**
+            android-build/clearcut/app/build/test-results/testQaUnitTest/**
+          if-no-files-found: ignore
+          retention-days: 14
