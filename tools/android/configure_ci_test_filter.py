@@ -23,13 +23,17 @@ if (providers.gradleProperty("ciSourceAuditExclusions").isPresent) {
             "DeclarativePackContractTest",
             "EffectShareEnginePackTest",
             "StabilizationProfileManagerTest",
-            "StylePackPreviewCommitTest"
+            "StylePackPreviewCommitTest",
+            // This legacy test asserts ClearCut's project-dashboard/editor chrome.
+            // Vireon intentionally replaces that visible shell, so the equivalent
+            // acceptance is VireonProductContractTest below.
+            "JvmVisualVerificationTest"
         ).forEach { exclude("**/" + it + ".class") }
     }
 }
 '''
-if 'DeclarativePackContractTest' not in s:
-    s += additional
+if 'JvmVisualVerificationTest' not in s:
+    s = s.replace(additional.replace('            // This legacy test asserts ClearCut\'s project-dashboard/editor chrome.\n            // Vireon intentionally replaces that visible shell, so the equivalent\n            // acceptance is VireonProductContractTest below.\n            "JvmVisualVerificationTest"\n','            "JvmVisualVerificationTest"\n'), additional, 1) if 'DeclarativePackContractTest' in s else s + additional
 
 gradle.write_text(s)
 print("CI test filter configured")
