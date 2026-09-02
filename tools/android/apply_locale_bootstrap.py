@@ -14,5 +14,9 @@ needle = "        enableEdgeToEdge()\n"
 insert = needle + "        VireonLocaleManager.apply(this)\n"
 if needle in text and "VireonLocaleManager.apply(this)" not in text:
     text = text.replace(needle, insert, 1)
+old = '                        startDestination = "projects",\n'
+new = '                        startDestination = if (intent?.getBooleanExtra("vireon_smoke", false) == true) "editor/tutorial?replayTutorial=true" else "projects",\n'
+if old in text:
+    text = text.replace(old, new, 1)
 main.write_text(text)
-print("Vireon Arabic-first locale bootstrap wired")
+print("Vireon locale bootstrap and CI editor launch route wired")
