@@ -1,0 +1,1 @@
+Vireon final Android validation marker — product build must pass native tests, APK validation, product smoke, and emulator Arabic/English UI smoke.
