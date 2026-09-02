@@ -1,0 +1,1 @@
+Final CI synchronization marker. Product logic is unchanged; this file exists to trigger the monitorable Android PR validation workflow after the workflow trigger was enabled on main.
