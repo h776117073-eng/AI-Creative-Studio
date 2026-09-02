@@ -1,0 +1,90 @@
+from pathlib import Path
+import re, sys
+
+ROOT = Path(sys.argv[1])
+UI = ROOT / "app/src/main/java/com/novacut/editor/ui/editor"
+agent = UI / "VireonArabicCommandAgent.kt"
+if not agent.exists():
+    raise SystemExit("VireonArabicCommandAgent.kt not found")
+text = agent.read_text(encoding='utf-8')
+
+# The planner remains tiny/offline/INT8. Execution is upgraded to concrete native editor operations.
+text = text.replace('''    private val executable = setOf(
+        "SPLIT", "DELETE_SILENCE", "DENOISE", "DUPLICATE", "SPEED", "CAMERA_MOTION",
+        "COLOR_CURVE", "COLOR_GRADE", "CINEMATIC_NIGHT", "CAPTIONS", "MOTION_TRACK",
+        "BACKGROUND_REMOVE", "AUDIO"
+    )''','''    private val executable = setOf(
+        "SPLIT", "TRIM", "DELETE_SILENCE", "DENOISE", "DUPLICATE", "SPEED", "CAMERA_MOTION",
+        "COLOR_CURVE", "COLOR_GRADE", "CINEMATIC_NIGHT", "MASK", "TRANSITION", "KEYFRAME",
+        "TEXT", "CAPTIONS", "MOTION_TRACK", "BACKGROUND_REMOVE", "AUDIO", "ROTATE", "FLIP", "UPSCALE"
+    )''')
+
+old = '''    suspend fun execute(context: Context, viewModel: EditorViewModel, text: String) {
+        val plan = plan(text)
+        for (op in plan.operations) when (op.optString("intent")) {
+            "SPLIT" -> viewModel.splitAtPlayhead()
+            "DELETE_SILENCE", "DENOISE" -> viewModel.analyzeAndReduceNoise()
+            "DUPLICATE" -> viewModel.duplicateSelectedClip()
+            "SPEED" -> viewModel.showSpeedCurveEditor()
+            "CAMERA_MOTION" -> viewModel.showTransformPanel()
+            "COLOR_CURVE", "COLOR_GRADE", "CINEMATIC_NIGHT" -> viewModel.showColorGrading()
+            "CAPTIONS" -> viewModel.showPanel(PanelId.CAPTION_EDITOR)
+            "MOTION_TRACK" -> viewModel.showPanel(PanelId.AI_TOOLS)
+            "BACKGROUND_REMOVE" -> viewModel.showAiToolsPanel()
+            "AUDIO" -> viewModel.showAudioMixer()
+        }
+    }'''
+new = '''    suspend fun execute(context: Context, viewModel: EditorViewModel, text: String) {
+        val plan = plan(text)
+        for (op in plan.operations) when (op.optString("intent")) {
+            "SPLIT" -> viewModel.splitAtPlayhead()
+            "TRIM" -> {
+                val id = viewModel.state.value.selectedClipId
+                if (id != null) {
+                    val seconds = op.optDouble("seconds", Double.NaN)
+                    if (!seconds.isNaN()) {
+                        val clip = viewModel.state.value.tracks.flatMap { it.clips }.firstOrNull { it.id == id }
+                        if (clip != null) {
+                            val end = (clip.trimStartMs + (seconds * 1000.0).toLong()).coerceIn(clip.trimStartMs + 1L, clip.trimEndMs)
+                            viewModel.trimClip(id, newTrimEndMs = end)
+                        }
+                    } else viewModel.beginTrim()
+                }
+            }
+            "DELETE_SILENCE" -> viewModel.showCutAssistant()
+            "DENOISE" -> viewModel.analyzeAndReduceNoise()
+            "DUPLICATE" -> viewModel.duplicateSelectedClip()
+            "SPEED" -> {
+                val id = viewModel.state.value.selectedClipId
+                val factor = op.optDouble("speed", Double.NaN).toFloat()
+                if (id != null && !factor.isNaN()) viewModel.setClipSpeed(id, factor.coerceIn(0.1f, 10f)) else viewModel.showSpeedCurveEditor()
+            }
+            "CAMERA_MOTION" -> viewModel.showTransformPanel()
+            "COLOR_CURVE", "COLOR_GRADE", "CINEMATIC_NIGHT" -> viewModel.showColorGrading()
+            "MASK" -> { viewModel.addMask(MaskType.ELLIPSE); viewModel.showMaskEditor() }
+            "TRANSITION" -> viewModel.showPanel(PanelId.TRANSITION_PICKER)
+            "KEYFRAME" -> { viewModel.addKeyframe(); viewModel.showTransformPanel() }
+            "TEXT" -> viewModel.addTextOverlay(op.optString("text", "Vireon"))
+            "CAPTIONS" -> viewModel.showPanel(PanelId.CAPTION_EDITOR)
+            "MOTION_TRACK" -> viewModel.showPanel(PanelId.AI_TOOLS)
+            "BACKGROUND_REMOVE" -> viewModel.showAiToolsPanel()
+            "AUDIO" -> viewModel.showAudioMixer()
+            "ROTATE", "FLIP", "UPSCALE" -> viewModel.showTransformPanel()
+        }
+    }'''
+if old not in text:
+    raise SystemExit("Expected agent execute body was not found")
+text = text.replace(old, new, 1)
+agent.write_text(text, encoding='utf-8')
+
+# Wire export/undo/redo controls to the native editor actions in the Vireon shell.
+screen = UI / "VireonEditorScreen.kt"
+s = screen.read_text(encoding='utf-8')
+s = s.replace('''        IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, if (isAr) "رجوع" else "Back") }
+        IconButton(onClick = onAssistant)''','''        IconButton(onClick = { viewModel.undo() }) { Icon(Icons.Default.Undo, if (isAr) "تراجع" else "Undo") }
+        IconButton(onClick = { viewModel.redo() }) { Icon(Icons.Default.Redo, if (isAr) "إعادة" else "Redo") }
+        IconButton(onClick = onAssistant)''',1)
+s = s.replace('''        Button(onClick = {}, shape = RoundedCornerShape(9.dp), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 7.dp)) {''','''        Button(onClick = { viewModel.showExportSheet() }, shape = RoundedCornerShape(9.dp), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 7.dp)) {''',1)
+s = s.replace('''    LaunchedEffect(language) { VireonLocaleManager.apply(context, language) }''','''    LaunchedEffect(language) { VireonLocaleManager.apply(context, language) }\n    LaunchedEffect(Unit) { VireonLocaleManager.apply(context, language) }''',1)
+screen.write_text(s,encoding='utf-8')
+print('Vireon agent hardened to concrete editor operations; undo/redo/export wired')
