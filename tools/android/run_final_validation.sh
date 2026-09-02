@@ -5,7 +5,7 @@ export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
 export ANDROID_SDK_ROOT="$ANDROID_HOME"
 SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
 
-# sdkmanager can close stdin after consuming packages; don't let yes(1)/SIGPIPE fail the build under pipefail.
+# sdkmanager may close stdin after consuming the package list; don't turn yes(1)'s SIGPIPE into a false CI failure.
 set +o pipefail
 yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses >/dev/null || true
 yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" "platforms;android-36" "build-tools;36.0.0" "platform-tools" "emulator" >/dev/null || true
@@ -65,26 +65,49 @@ adb install -r android-build/AI-Creative-Studio-debug.apk
 adb shell am force-stop com.aicreativestudio.mobile
 adb shell am start -n com.aicreativestudio.mobile/.MainActivity --ez vireon_smoke true
 sleep 10
+
+# Runtime stability gate: crash buffer and ANR/process death must remain empty after launch.
+CRASH_LOG="android-build/vireon-crash.log"
+adb logcat -d -b crash > "$CRASH_LOG" 2>&1 || true
+if grep -Eiq 'FATAL EXCEPTION|AndroidRuntime|ANR in|has died|Process: com\.aicreativestudio\.mobile' "$CRASH_LOG"; then
+  cat "$CRASH_LOG"
+  exit 1
+fi
+
 adb shell uiautomator dump /sdcard/vireon-ar.xml >/dev/null
 adb pull /sdcard/vireon-ar.xml android-build/vireon-ar.xml >/dev/null
 python3 - <<'PY'
 import re
-s=open('android-build/vireon-ar.xml',encoding='utf-8').read()
+from xml.etree import ElementTree as ET
+p='android-build/vireon-ar.xml'
+root=ET.parse(p).getroot()
+visible=[]
+for n in root.iter('node'):
+    for key in ('text','content-desc'):
+        value=(n.attrib.get(key) or '').strip()
+        if value: visible.append(value)
 required=['Vireon','الإعدادات','مساعد المونتاج الذكي','تصدير','الصوت','القص']
-missing=[x for x in required if x not in s]
+missing=[x for x in required if not any(x in v for v in visible)]
 if missing: raise SystemExit(f'Arabic UI markers missing: {missing}')
+# The visible shell is Arabic-first; allow only brand/resolution and numeric/system tokens in Latin.
+for value in visible:
+    if re.search(r'\b(?:Settings|Export|Audio|Cut|Media|Templates|Music|Text|Stickers|Effects|Transitions|Filters|Adjust|Tools|Save|New Project)\b', value, re.I):
+        raise SystemExit(f'English UI leakage in Arabic mode: {value}')
+print('Arabic shell UI passed')
 PY
 adb exec-out screencap -p > android-build/vireon-ar.png
+
+# Open settings and switch the application language through the real UI.
 python3 - <<'PY'
 import subprocess, xml.etree.ElementTree as ET, re, time
-xml='android-build/vireon-ar.xml'
-root=ET.parse(xml).getroot()
-def find(text):
-  for n in root.iter('node'):
-    if text in ' '.join(n.attrib.get(k,'') for k in ('text','content-desc','resource-id')):
-      v=[int(x) for x in re.findall(r'\d+',n.attrib.get('bounds',''))]
-      if len(v)==4:return (v[0]+v[2])//2,(v[1]+v[3])//2
-pt=find('الإعدادات')
+root=ET.parse('android-build/vireon-ar.xml').getroot()
+def point(text):
+    for n in root.iter('node'):
+        value=' '.join(n.attrib.get(k,'') for k in ('text','content-desc'))
+        if text in value:
+            v=[int(x) for x in re.findall(r'\d+',n.attrib.get('bounds',''))]
+            if len(v)==4:return (v[0]+v[2])//2,(v[1]+v[3])//2
+pt=point('الإعدادات')
 if not pt: raise SystemExit('Arabic settings control missing')
 subprocess.run(['adb','shell','input','tap',str(pt[0]),str(pt[1])],check=True)
 time.sleep(1)
@@ -92,22 +115,34 @@ subprocess.run(['adb','shell','uiautomator','dump','/sdcard/settings.xml'],check
 subprocess.run(['adb','pull','/sdcard/settings.xml','android-build/settings.xml'],check=True,stdout=subprocess.DEVNULL)
 r=ET.parse('android-build/settings.xml').getroot()
 for n in r.iter('node'):
-  if n.attrib.get('text')=='English':
-    v=[int(x) for x in re.findall(r'\d+',n.attrib.get('bounds',''))]
-    if len(v)==4:
-      subprocess.run(['adb','shell','input','tap',str((v[0]+v[2])//2),str((v[1]+v[3])//2)],check=True);break
+    if n.attrib.get('text')=='English':
+        v=[int(x) for x in re.findall(r'\d+',n.attrib.get('bounds',''))]
+        if len(v)==4:
+            subprocess.run(['adb','shell','input','tap',str((v[0]+v[2])//2),str((v[1]+v[3])//2)],check=True);break
 else: raise SystemExit('English selector missing')
 time.sleep(4)
 subprocess.run(['adb','shell','uiautomator','dump','/sdcard/en.xml'],check=True,stdout=subprocess.DEVNULL)
 subprocess.run(['adb','pull','/sdcard/en.xml','android-build/en.xml'],check=True,stdout=subprocess.DEVNULL)
-s=open('android-build/en.xml',encoding='utf-8').read()
-required=['Vireon','Settings','AI Editing Assistant','Export','Audio','Cut']
-missing=[x for x in required if x not in s]
+root=ET.parse('android-build/en.xml').getroot()
+visible=[]
+for n in root.iter('node'):
+    for key in ('text','content-desc'):
+        value=(n.attrib.get(key) or '').strip()
+        if value: visible.append(value)
+required=['Vireon','Settings','Editor assistant','Export','Audio','Cut']
+missing=[x for x in required if not any(x in v for v in visible)]
 if missing: raise SystemExit(f'English UI markers missing: {missing}')
-for x in ('الإعدادات','مساعد المونتاج الذكي','الصوت','القص','تصدير'):
-  if x in s: raise SystemExit(f'Arabic leakage after English switch: {x}')
-print('Arabic and English UI smoke passed')
+for value in visible:
+    if re.search(r'[\u0600-\u06ff]', value): raise SystemExit(f'Arabic leakage after English switch: {value}')
+print('English shell UI passed')
 PY
 adb exec-out screencap -p > android-build/vireon-en.png
 
-touch android-build/FINAL_VALIDATION_PASS
+# Final stability check after language recreation.
+adb logcat -d -b crash > "$CRASH_LOG" 2>&1 || true
+if grep -Eiq 'FATAL EXCEPTION|AndroidRuntime|ANR in|has died|Process: com\.aicreativestudio\.mobile' "$CRASH_LOG"; then
+  cat "$CRASH_LOG"
+  exit 1
+fi
+
+printf 'FINAL_VALIDATION_PASS\n' > android-build/FINAL_VALIDATION_PASS
