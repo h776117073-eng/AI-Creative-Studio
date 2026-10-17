@@ -34,3 +34,11 @@ The web app runs through Vite and the API on port `8787`.
 ## Optional AI provider
 
 Set `OPENAI_API_KEY` to enable the Responses API tool provider. Without it, local deterministic command parsing remains available for offline development and testing.
+
+## Rayan Studio — browser-side script video editor
+
+A separate Arabic-first page is available at `/rayan-studio.html` when the web app is served or deployed. It lets the user choose a local video, upload/edit a JavaScript processing script, run FFmpeg WebAssembly in the browser, preview the result, and download the output. The page links to the [Rayan X World privacy policy](https://mhommdkuyr.github.io/rayan-x-world/privacy.html).
+
+### Script contract
+
+The uploaded `.js` file should define `async function processVideo({ videoBytes, runFFmpeg, log, progress })` and return the `Uint8Array` result from `runFFmpeg({ args, inputName, outputName, videoBytes })`. The `args` array must end with `outputName`. The included example compresses the source to H.264/AAC MP4. Only run scripts you trust; scripts execute as code in a Web Worker and this is not a complete security sandbox. FFmpeg is downloaded from a CDN on first use; video files are processed in-browser and are not sent to the app server by the page itself.
