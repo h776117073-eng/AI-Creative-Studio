@@ -34,7 +34,7 @@ const workerLines=[
 'self.onmessage=async function(event){',
 'const code=event.data.code; const videoBytes=event.data.videoBytes;',
 'const log=function(m){self.postMessage({type:"log",message:String(m)})}; const progress=function(n){self.postMessage({type:"progress",value:Number(n)||0})};',
-'const runFFmpeg=function(request){return new Promise(function(resolve,reject){const id=Math.random().toString(36).slice(2);const handler=function(e){if(e.data&&e.data.id===id){self.removeEventListener("message",handler);if(e.data.error)reject(Error(e.data.error));else resolve(new Uint8Array(e.data.bytes))}};self.addEventListener("message",handler);self.postMessage({type:"ffmpeg",id:id,request:request},[request.videoBytes])})};',
+'const runFFmpeg=function(request){return new Promise(function(resolve,reject){const id=Math.random().toString(36).slice(2);const handler=function(e){if(e.data&&e.data.id===id){self.removeEventListener("message",handler);if(e.data.error)reject(Error(e.data.error));else resolve(new Uint8Array(e.data.bytes))}};self.addEventListener("message",handler);self.postMessage({type:"ffmpeg",id:id,request:request},[request.videoBytes.buffer])})};',
 'try{const api={videoBytes:new Uint8Array(videoBytes),runFFmpeg:runFFmpeg,log:log,progress:progress};const fn=new Function("api",code+"\\n;if(typeof processVideo!==\\"function\\")throw Error(\\"يجب تعريف async function processVideo(api)\\");return processVideo(api);");const output=await fn(api);const data=output instanceof Uint8Array?output:new Uint8Array(output);self.postMessage({type:"done",bytes:data.buffer},[data.buffer])}catch(err){self.postMessage({type:"error",message:err&&err.message?err.message:String(err)})}',
 '}'
 ];
