@@ -34,7 +34,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: prepared-arabic-dubbing-${{ github.ref }}
+  group: prepared-arabic-dubbing-corrected-v2-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
