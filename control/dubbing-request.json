@@ -3,5 +3,5 @@
   "episode_data_url": "https://drive.google.com/file/d/13Je0tv3X7YroOOQE0hARDAFBSxbYUUFO/view?usp=drivesdk",
   "rights_confirmed": "yes",
   "asr_model": "small",
-  "run_nonce": "retry-torchao-transformers-pinned-2026-10-26"
+  "run_nonce": "retry-compatible-tts-skip-pre-render-remux-2026-10-26"
 }
