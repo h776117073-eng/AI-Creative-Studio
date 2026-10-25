@@ -103,7 +103,7 @@ jobs:
           # NeuCodec 0.0.6 requires NumPy >=2.0.2. Install CPU-only PyTorch first
           # so the runner does not pull the large CUDA build from the default index.
           python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.7.1" "torchaudio==2.7.1"
-          python -m pip install "numpy>=2.0.2,<3" soundfile faster-whisper gdown "huggingface_hub>=0.36,<1.0" "transformers>=4.44.2,<5" llama-cpp-python "neucodec==0.0.6" "torchtune>=0.3.1" "local-attention>=1.11.1" "vector-quantize-pytorch==1.17.8"
+          python -m pip install "numpy==2.0.2" soundfile faster-whisper gdown "huggingface_hub==0.36.0" "transformers==4.49.0" llama-cpp-python "torch==2.7.1" "torchaudio==2.7.1" "neucodec==0.0.6" "torchao==0.12.0" "torchtune==0.3.1" "local-attention==1.11.2" "vector-quantize-pytorch==1.17.8"
 
       - name: Restore resumable voice and audio checkpoints
         uses: actions/cache/restore@v4
