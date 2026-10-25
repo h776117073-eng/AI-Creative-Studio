@@ -170,10 +170,8 @@ jobs:
           SOURCE_SHA256="$(sha256sum work/source/source_download.mkv | cut -d' ' -f1)"
           SOURCE_DURATION="$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 work/source/source_download.mkv)"
           TASK_ID="$(printf '%s' "$SOURCE_SHA256" | cut -c1-16)"
-          if ! ffmpeg -y -v error -i work/source/source_download.mkv -map 0:v:0 -map 0:a:0 -c:v copy -c:a aac -b:a 192k -movflags +faststart work/source/source.mp4; then
-            rm -f work/source/source.mp4
-            ffmpeg -y -v error -i work/source/source_download.mkv -map 0:v:0 -map 0:a:0 -c:v libx264 -preset veryfast -crf 24 -c:a aac -b:a 192k -movflags +faststart work/source/source.mp4
-          fi
+          # Keep the original MKV to avoid an unnecessary full-video remux/transcode before dubbing.
+          # The final render will mux the original video stream once with the new Arabic audio.
           ffmpeg -y -v error -i work/source/source_download.mkv -map 0:a:0 -vn -ac 1 -ar 16000 -c:a pcm_s16le work/source/source_audio.wav
           test -s work/source/source.mp4
           test -s work/source/source_audio.wav
@@ -181,7 +179,6 @@ jobs:
           echo "source_sha256=$SOURCE_SHA256" >> "$GITHUB_OUTPUT"
           echo "source_duration=$SOURCE_DURATION" >> "$GITHUB_OUTPUT"
           echo "task_id=$TASK_ID" >> "$GITHUB_OUTPUT"
-          rm -f work/source/source_download.mkv
 
       - name: Clone Audar-TTS code
         run: |
@@ -221,7 +218,7 @@ jobs:
           set -euo pipefail
           FINAL="output/Arabic_Dub_"$TASK_ID".mp4"
           # Keep the original mix quietly for ambiance/music; source dialogue may remain audible.
-          ffmpeg -y -v error -i work/source/source.mp4 -i work/dub/dub_ar.wav \
+          ffmpeg -y -v error -i work/source/source_download.mkv -i work/dub/dub_ar.wav \
             -filter_complex "[0:a]volume=0.04[amb];[1:a]volume=1.0[ar];[amb][ar]amix=inputs=2:duration=longest:normalize=0,alimiter=limit=0.95[aout]" \
             -map 0:v:0 -map "[aout]" -c:v copy -c:a aac -b:a 192k -t "$SOURCE_DURATION" -movflags +faststart "$FINAL"
           ffprobe -v error -show_entries format=duration,size,format_name -show_entries stream=codec_type,codec_name,width,height,sample_rate,channels -of json "$FINAL" | tee output/final_probe.json
