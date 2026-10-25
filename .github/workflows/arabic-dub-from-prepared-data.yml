@@ -130,7 +130,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p work/source output
-          gdown --fuzzy "$SOURCE_URL" --output work/source/source_download.mkv --continue
+          gdown "$SOURCE_URL" --output work/source/source_download.mkv --continue
           test -s work/source/source_download.mkv
           echo "Source retrieved; bytes=$(stat -c%s work/source/source_download.mkv)"
 
@@ -139,7 +139,7 @@ jobs:
           DATA_URL: ${{ steps.request.outputs.episode_data_url }}
         run: |
           set -euo pipefail
-          gdown --fuzzy "$DATA_URL" --output work/source/episode_data.zip --continue
+          gdown "$DATA_URL" --output work/source/episode_data.zip --continue
           test -s work/source/episode_data.zip
           mkdir -p work/input_data
           unzip -q -o work/source/episode_data.zip -d work/input_data
