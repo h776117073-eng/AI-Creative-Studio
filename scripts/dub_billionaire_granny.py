@@ -238,13 +238,15 @@ def capture_json(command: list[str], label: str) -> dict:
 
 
 def initialize_drive() -> None:
-    global DRIVE, OUTPUT_FOLDER_ID, CHECKPOINT_FOLDER_ID, DRIVE_SYNC_READY
+    global DRIVE, OUTPUT_FOLDER_ID, CHECKPOINT_FOLDER_ID, DRIVE_SYNC_READY, ASR_MODEL, TRANSLATION_BACKEND
     if not CREDENTIALS_PATH.is_file():
         raise RuntimeError(
             "The ADC credential file is missing inside the Colab VM. "
             "The workflow must upload it before executing this task."
         )
     config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    ASR_MODEL = str(config.get("asr_model", ASR_MODEL))
+    TRANSLATION_BACKEND = str(config.get("translation_backend", TRANSLATION_BACKEND))
     from google.auth import load_credentials_from_file
     from googleapiclient.discovery import build
     scopes = ["https://www.googleapis.com/auth/drive"]
