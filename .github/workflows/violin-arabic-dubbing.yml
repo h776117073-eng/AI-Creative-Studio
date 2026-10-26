@@ -136,15 +136,25 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install FFmpeg and Violin
+      - name: Install FFmpeg
+        timeout-minutes: 5
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y ffmpeg
-          python -m pip install --upgrade pip
-          python -m pip install "violin==0.1.2" gdown
+          ffmpeg -version | head -n 1
+          ffprobe -version | head -n 1
+
+      - name: Set up fast Python package installer
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install Violin and Drive downloader
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          uv pip install --system --no-cache --timeout 30 --retries 2 "violin==0.1.2" gdown
           command -v violin
-          violin --style list
+          timeout 90s violin --style list
 
       - name: Restore source and resumable segment checkpoints
         id: cache
