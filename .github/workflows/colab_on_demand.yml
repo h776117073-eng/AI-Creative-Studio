@@ -1,0 +1,141 @@
+name: Colab On Demand (headless)
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_code:
+        description: "Python code to execute remotely (script_path takes priority)"
+        required: false
+        type: string
+        default: |
+          import os, platform, subprocess
+          print("Google Colab smoke test")
+          print("Platform:", platform.platform())
+          print("Python:", platform.python_version())
+          print("CPU cores:", os.cpu_count())
+          r = subprocess.run(["nvidia-smi"], capture_output=True, text=True)
+          print(r.stdout or r.stderr or "nvidia-smi unavailable; runtime may be CPU-only")
+      script_path:
+        description: "Optional Python file in the repository, e.g. tasks/current_task.py"
+        required: false
+        type: string
+        default: ""
+      accelerator:
+        description: "Optional Colab accelerator (may consume paid compute units)"
+        required: true
+        type: choice
+        options: ["none", "T4", "L4", "A100", "H100"]
+        default: "none"
+      timeout_seconds:
+        description: "Maximum execution time"
+        required: true
+        type: number
+        default: 900
+
+  push:
+    branches: [main]
+    paths:
+      - "tasks/**"
+      - "scripts/colab_bridge.py"
+      - ".github/workflows/colab_on_demand.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: colab-on-demand-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  run-colab-task:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12 (required by official Google Colab CLI)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install official Google Colab CLI
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade google-colab-cli google-auth
+          colab --help
+          colab run --help
+
+      - name: Configure Google ADC credentials safely
+        env:
+          COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/gcloud" output
+          if [ -z "${COLAB_CREDENTIALS:-}" ]; then
+            printf '%s\n' "ERROR: GitHub Actions secret COLAB_CREDENTIALS is missing or empty." > output/colab_result.txt
+            echo "::error::COLAB_CREDENTIALS secret is missing or empty."
+            exit 1
+          fi
+          python - <<'PY'
+          import json, os, pathlib, sys
+          raw = os.environ.get("COLAB_CREDENTIALS", "")
+          target = pathlib.Path.home() / ".config/gcloud/application_default_credentials.json"
+          try:
+              parsed = json.loads(raw)
+              if not isinstance(parsed, dict):
+                  raise ValueError("JSON root must be an object")
+              credential_type = parsed.get("type")
+              allowed = {"authorized_user", "service_account", "external_account", "impersonated_service_account"}
+              if credential_type not in allowed:
+                  raise ValueError("expected a Google ADC credential type (authorized_user, service_account, external_account, or impersonated_service_account)")
+              target.write_text(raw, encoding="utf-8")
+              target.chmod(0o600)
+          except Exception as exc:
+              pathlib.Path("output/colab_result.txt").write_text(
+                  f"Credential setup failed: {type(exc).__name__}: {exc}\n",
+                  encoding="utf-8")
+              print("::error::COLAB_CREDENTIALS is not a supported Google ADC JSON file. Secret contents were not printed.")
+              sys.exit(1)
+          print(f"Google ADC JSON validated (type={credential_type}) and stored with permissions 0600. Secret content was not printed.")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
+              env_file.write(f"GOOGLE_APPLICATION_CREDENTIALS={target}\n")
+          PY
+
+      - name: Execute task on a remote Colab runtime
+        env:
+          TASK_CODE: ${{ inputs.task_code }}
+          SCRIPT_PATH: ${{ inputs.script_path }}
+          COLAB_GPU: ${{ inputs.accelerator || 'none' }}
+          COLAB_TIMEOUT_SECONDS: ${{ inputs.timeout_seconds || 900 }}
+        run: |
+          set -euo pipefail
+          python scripts/colab_bridge.py
+
+      - name: Print execution result
+        if: always()
+        run: |
+          if [ -f output/colab_result.txt ]; then
+            echo "========== Colab execution log =========="
+            cat output/colab_result.txt
+            echo "========== End Colab execution log =========="
+          else
+            echo "No execution log was created."
+          fi
+
+      - name: Upload logs and outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: colab-output-${{ github.run_id }}
+          path: output/**
+          if-no-files-found: warn
+          retention-days: 14
