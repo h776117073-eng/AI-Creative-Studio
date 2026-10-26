@@ -1,6 +1,29 @@
 name: Colab On Demand (headless)
 
 on:
+  workflow_call:
+    inputs:
+      task_code:
+        description: "Python code to execute remotely (script_path takes priority)"
+        required: false
+        type: string
+        default: ""
+      script_path:
+        description: "Optional Python file inside the repository"
+        required: false
+        type: string
+        default: ""
+      accelerator:
+        description: "Optional remote Colab accelerator"
+        required: false
+        type: string
+        default: "none"
+      timeout_seconds:
+        description: "Maximum execution time"
+        required: false
+        type: number
+        default: 900
+
   workflow_dispatch:
     inputs:
       task_code:
