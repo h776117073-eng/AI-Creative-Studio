@@ -62,7 +62,7 @@ jobs:
           cleanup() { colab --auth=adc stop -s "$SESSION" >> output/smoke.log 2>&1 || true; }
           trap cleanup EXIT
           colab --auth=adc stop -s "$SESSION" >/dev/null 2>&1 || true
-          COLAB_CLI_ASSIGN_RETRIES=4 COLAB_CLI_RETRY_BACKOFF=15 colab --auth=adc new -s "$SESSION" --gpu T4 --high-mem 2>&1 | tee -a output/smoke.log
+          COLAB_CLI_ASSIGN_RETRIES=2 COLAB_CLI_RETRY_BACKOFF=10 colab --auth=adc new -s "$SESSION" 2>&1 | tee -a output/smoke.log
           colab --auth=adc status -s "$SESSION" 2>&1 | tee -a output/smoke.log
           colab --auth=adc exec -s "$SESSION" --timeout 180 -f scripts/colab_smoke_access.py 2>&1 | tee -a output/smoke.log
 
