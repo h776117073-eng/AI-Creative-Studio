@@ -118,7 +118,7 @@ jobs:
           expected_name = "Billionaire Granny Takes Home Fainted Pregnant Woman - Original Quality.mkv"
           credentials_path = os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
           credentials, _ = load_credentials_from_file(
-              credentials_path, scopes=["https://www.googleapis.com/auth/drive"]
+              credentials_path, scopes=["https://www.googleapis.com/auth/drive.file"]
           )
           drive = build("drive", "v3", credentials=credentials, cache_discovery=False)
 
