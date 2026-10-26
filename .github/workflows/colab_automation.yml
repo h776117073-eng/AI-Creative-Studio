@@ -1,84 +1,28 @@
-name: Google Colab MCP Automation
+name: Google Colab Automation (headless compatibility)
 
 on:
   workflow_dispatch:
     inputs:
       python_code:
-        description: "Python code to execute in Google Colab"
+        description: "Python code to execute remotely"
         required: false
         type: string
         default: 'print("Hello from Google Colab")'
-      tool_name:
-        description: "Optional exact MCP tool name (leave blank for auto-detection)"
-        required: false
-        type: string
-        default: ""
       timeout_seconds:
-        description: "Maximum tool execution wait in seconds"
+        description: "Maximum execution wait in seconds"
         required: true
         type: number
         default: 900
-  schedule:
-    - cron: "17 3 * * 1"
 
 permissions:
   contents: read
 
-concurrency:
-  group: colab-mcp-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
-  run-colab:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-
-      - name: Install Python dependencies
-        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
-
-      - name: Configure Colab MCP credentials
-        env:
-          COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
-          API_KEY: ${{ secrets.API_KEY }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -z "${COLAB_CREDENTIALS}" ]]; then
-            echo "::error::Repository secret COLAB_CREDENTIALS is missing."
-            exit 1
-          fi
-          mkdir -p "$HOME/.config/colab-mcp"
-          printf '%s' "$COLAB_CREDENTIALS" > "$HOME/.config/colab-mcp/credentials.json"
-          chmod 600 "$HOME/.config/colab-mcp/credentials.json"
-          if [[ -z "${API_KEY}" ]]; then
-            echo "::warning::API_KEY secret is empty. This is only acceptable if your Colab MCP server configuration does not require it."
-          fi
-
-      - name: Run Colab MCP agent
-        env:
-          COLAB_MCP_COMMAND: ${{ vars.COLAB_MCP_COMMAND }}
-          API_KEY: ${{ secrets.API_KEY }}
-          COLAB_CODE: ${{ inputs.python_code || 'print("Scheduled Colab MCP connectivity check")' }}
-          COLAB_TOOL_NAME: ${{ inputs.tool_name }}
-          COLAB_TIMEOUT_SECONDS: ${{ inputs.timeout_seconds || 900 }}
-        run: python scripts/run_colab_agent.py
-
-      - name: Upload execution logs and outputs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: colab-mcp-output-${{ github.run_id }}
-          path: |
-            output/**
-            !output/**/.gitkeep
-          if-no-files-found: warn
-          retention-days: 14
+  delegate-to-colab-on-demand:
+    uses: ./.github/workflows/colab_on_demand.yml
+    with:
+      task_code: ${{ inputs.python_code }}
+      script_path: ""
+      accelerator: "none"
+      timeout_seconds: ${{ inputs.timeout_seconds }}
+    secrets: inherit
