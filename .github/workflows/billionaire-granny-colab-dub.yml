@@ -22,7 +22,7 @@ on:
         options: ["google", "argos"]
         default: "google"
       high_mem:
-        description: "Request a high-RAM Colab runtime when account eligibility permits"
+        description: "Require a high-RAM Colab runtime; do not fall back to standard RAM"
         required: true
         type: boolean
         default: true
@@ -51,7 +51,7 @@ jobs:
       - name: Check out pipeline
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.12
+      - name: Set up Python 3.12 and Node.js 20
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -61,14 +61,14 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Install official Google Colab CLI
+      - name: Install official Colab CLI and Drive API client
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          python -m pip install --upgrade google-colab-cli
+          python -m pip install --upgrade google-colab-cli google-api-python-client google-auth google-auth-httplib2
           colab --help
 
-      - name: Configure Google ADC credentials
+      - name: Configure ADC credentials without printing the secret
         env:
           COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
         shell: bash
@@ -77,7 +77,7 @@ jobs:
           mkdir -p "$HOME/.config/gcloud" output
           if [ -z "${COLAB_CREDENTIALS:-}" ]; then
             echo "::error::GitHub Actions secret COLAB_CREDENTIALS is missing or empty."
-            echo "The Colab runtime was not started." > output/colab_dub.log
+            echo "Credential setup was not possible." > output/colab_dub.log
             exit 1
           fi
           python - <<'PY'
@@ -88,8 +88,7 @@ jobs:
               if not isinstance(parsed, dict):
                   raise ValueError("JSON root must be an object")
               credential_type = parsed.get("type")
-              allowed = {"authorized_user", "service_account", "external_account", "impersonated_service_account"}
-              if credential_type not in allowed:
+              if credential_type not in {"authorized_user", "service_account", "external_account", "impersonated_service_account"}:
                   raise ValueError("Unsupported Google ADC credential type")
               target = pathlib.Path.home() / ".config/gcloud/application_default_credentials.json"
               target.write_text(raw, encoding="utf-8")
@@ -97,66 +96,155 @@ jobs:
           except Exception as exc:
               pathlib.Path("output/colab_dub.log").write_text(
                   f"Credential setup failed: {type(exc).__name__}: {exc}\n", encoding="utf-8")
-              print("::error::COLAB_CREDENTIALS is not supported Google ADC JSON; secret contents were not printed.")
+              print("::error::COLAB_CREDENTIALS is not supported Google ADC JSON; the secret was not printed.")
               sys.exit(1)
-          print(f"Google ADC credentials validated (type={credential_type}); secret content not printed.")
+          print(f"Google ADC credential JSON validated (type={credential_type}); secret content not printed.")
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
               env_file.write(f"GOOGLE_APPLICATION_CREDENTIALS={target}\n")
           PY
 
-      - name: Create Colab session, mount Drive, and run resumable dubbing
+      - name: Validate Drive API access and prepare persistent output folders
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ env.GOOGLE_APPLICATION_CREDENTIALS }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, pathlib
+          from google.auth import load_credentials_from_file
+          from googleapiclient.discovery import build
+
+          source_id = "1sMis6qi_j3AsBvAEL2mliPRIKf0s3-uI"
+          source_folder_id = "1Ux4dAzND0LeOOygUCldHf-QO3agMgcCy"
+          expected_name = "Billionaire Granny Takes Home Fainted Pregnant Woman - Original Quality.mkv"
+          credentials_path = os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
+          credentials, _ = load_credentials_from_file(
+              credentials_path, scopes=["https://www.googleapis.com/auth/drive"]
+          )
+          drive = build("drive", "v3", credentials=credentials, cache_discovery=False)
+
+          source = drive.files().get(
+              fileId=source_id,
+              fields="id,name,size,mimeType,modifiedTime,md5Checksum,parents,trashed",
+              supportsAllDrives=True,
+          ).execute(num_retries=4)
+          if source.get("name") != expected_name or source.get("trashed"):
+              raise SystemExit("Drive source ID did not resolve to the expected live video.")
+          if int(source.get("size") or 0) < 1_000_000_000:
+              raise SystemExit("Drive source size is too small; refusing to process a partial/wrong file.")
+          if source_folder_id not in source.get("parents", []):
+              raise SystemExit("The source video is no longer inside the expected Drive folder.")
+
+          parent = drive.files().get(
+              fileId=source_folder_id, fields="id,name,mimeType,capabilities", supportsAllDrives=True
+          ).execute(num_retries=4)
+          if parent.get("name") != "دبلجة" or parent.get("mimeType") != "application/vnd.google-apps.folder":
+              raise SystemExit("The expected Drive parent folder could not be verified.")
+
+          def find_or_create_folder(name, parent_id):
+              q = (
+                  f"name = '{name}' and '{parent_id}' in parents "
+                  "and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+              )
+              response = drive.files().list(
+                  q=q, pageSize=20, fields="files(id,name,parents)",
+                  supportsAllDrives=True, includeItemsFromAllDrives=True,
+              ).execute(num_retries=4)
+              matches = response.get("files", [])
+              if matches:
+                  return matches[0]["id"]
+              created = drive.files().create(
+                  body={"name": name, "mimeType": "application/vnd.google-apps.folder", "parents": [parent_id]},
+                  fields="id,name,parents", supportsAllDrives=True,
+              ).execute(num_retries=4)
+              return created["id"]
+
+          output_id = find_or_create_folder("Billionaire_Granny_Arabic_Dub", source_folder_id)
+          checkpoint_id = find_or_create_folder("checkpoints", output_id)
+          # Confirm that the Drive API credential can write in the chosen location.
+          output_meta = drive.files().get(fileId=output_id, fields="id,name,mimeType,parents", supportsAllDrives=True).execute()
+          checkpoint_meta = drive.files().get(fileId=checkpoint_id, fields="id,name,mimeType,parents", supportsAllDrives=True).execute()
+          if output_id not in checkpoint_meta.get("parents", []):
+              raise SystemExit("Checkpoint folder is not nested under the output folder.")
+          print(json.dumps({
+              "source_name": source["name"],
+              "source_size_bytes": int(source["size"]),
+              "source_modified_time": source.get("modifiedTime"),
+              "drive_parent_folder": parent["name"],
+              "output_folder": output_meta["name"],
+              "drive_api_access": "verified",
+          }, ensure_ascii=False))
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
+              env_file.write(f"DRIVE_SOURCE_FOLDER_ID={source_folder_id}\n")
+              env_file.write(f"DRIVE_OUTPUT_FOLDER_ID={output_id}\n")
+              env_file.write(f"DRIVE_CHECKPOINT_FOLDER_ID={checkpoint_id}\n")
+          PY
+
+      - name: Prepare remote task configuration
+        env:
+          ASR_MODEL_INPUT: ${{ inputs.asr_model || 'small' }}
+          TRANSLATION_BACKEND_INPUT: ${{ inputs.translation_backend || 'google' }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os
+          with open("output/dub_config.json", "w", encoding="utf-8") as f:
+              json.dump({
+                  "source_file_id": "1sMis6qi_j3AsBvAEL2mliPRIKf0s3-uI",
+                  "source_folder_id": os.environ["DRIVE_SOURCE_FOLDER_ID"],
+                  "output_folder_id": os.environ["DRIVE_OUTPUT_FOLDER_ID"],
+                  "checkpoint_folder_id": os.environ["DRIVE_CHECKPOINT_FOLDER_ID"],
+                  "asr_model": os.environ.get("ASR_MODEL_INPUT") or "small",
+                  "translation_backend": os.environ.get("TRANSLATION_BACKEND_INPUT") or "google",
+              }, f, ensure_ascii=False, indent=2)
+          print("Task config prepared; it contains Drive IDs and runtime options, not credentials.")
+          PY
+
+      - name: Create high-RAM Colab session and execute resumable dubbing
         timeout-minutes: 345
         env:
           HIGH_MEM: ${{ inputs.high_mem || 'true' }}
-          ASR_MODEL_INPUT: ${{ inputs.asr_model || 'small' }}
-          TRANSLATION_BACKEND_INPUT: ${{ inputs.translation_backend || 'google' }}
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ env.GOOGLE_APPLICATION_CREDENTIALS }}
         shell: bash
         run: |
           set -euo pipefail
           SESSION="billionaire-granny-dub"
           mkdir -p output
           : > output/colab_dub.log
-          colab stop -s "$SESSION" >/dev/null 2>&1 || true
+
           cleanup() {
             echo "Stopping Colab session $SESSION to release compute resources." | tee -a output/colab_dub.log
-            colab stop -s "$SESSION" >> output/colab_dub.log 2>&1 || true
+            colab --auth=adc stop -s "$SESSION" >> output/colab_dub.log 2>&1 || true
           }
           trap cleanup EXIT
 
-          create_session() {
-            if [ "$HIGH_MEM" = "true" ]; then
-              if colab new -s "$SESSION" --high-mem >> output/colab_dub.log 2>&1; then
-                echo "COLAB_RAM=high" | tee -a output/colab_dub.log
-                return 0
-              fi
-              colab stop -s "$SESSION" >> output/colab_dub.log 2>&1 || true
+          colab --auth=adc stop -s "$SESSION" >> output/colab_dub.log 2>&1 || true
+          if [ "$HIGH_MEM" = "true" ]; then
+            if ! colab --auth=adc new -s "$SESSION" --high-mem 2>&1 | tee -a output/colab_dub.log; then
+              echo "::error::Colab high-RAM session was unavailable. Standard-RAM fallback is deliberately disabled to avoid a RAM crash."
+              exit 1
             fi
-            if colab new -s "$SESSION" >> output/colab_dub.log 2>&1; then
-              echo "COLAB_RAM=standard; accelerator=CPU" | tee -a output/colab_dub.log
-              return 0
-            fi
-            return 1
-          }
-
-          if ! create_session; then
-            echo "::error::Unable to create a Colab runtime with this account's current eligibility/quota."
-            cat output/colab_dub.log
-            exit 1
+          else
+            colab --auth=adc new -s "$SESSION" 2>&1 | tee -a output/colab_dub.log
           fi
 
-          echo "Mounting Google Drive into Colab..." | tee -a output/colab_dub.log
-          colab drivemount -s "$SESSION" 2>&1 | tee -a output/colab_dub.log
-          colab status -s "$SESSION" 2>&1 | tee output/colab_runtime_status.txt
+          echo "Installing Google Drive API libraries inside the Colab runtime..." | tee -a output/colab_dub.log
+          colab --auth=adc install -s "$SESSION" google-api-python-client google-auth google-auth-httplib2 2>&1 | tee -a output/colab_dub.log
 
-          echo "Starting resumable Arabic dubbing; checkpoints and final output are stored under Drive folder دبلجة/Billionaire_Granny_Arabic_Dub." | tee -a output/colab_dub.log
-          echo "Pipeline defaults: ASR=small, translation=google; GGUF TTS runs on CPU to keep RAM stable." | tee -a output/colab_dub.log
-          colab exec -s "$SESSION" -f scripts/dub_billionaire_granny.py 2>&1 | tee -a output/colab_dub.log
+          echo "Preparing a private temporary credential directory on the ephemeral Colab VM..." | tee -a output/colab_dub.log
+          printf 'from pathlib import Path; Path("/content/.private").mkdir(parents=True, exist_ok=True)\n' | colab --auth=adc exec -s "$SESSION" 2>&1 | tee -a output/colab_dub.log
+
+          echo "Transferring the ADC file to the ephemeral Colab VM (its contents will not be printed)..." | tee -a output/colab_dub.log
+          colab --auth=adc upload -s "$SESSION" "$GOOGLE_APPLICATION_CREDENTIALS" /content/.private/google_adc.json 2>&1 | tee -a output/colab_dub.log
+          colab --auth=adc upload -s "$SESSION" output/dub_config.json /content/dub_config.json 2>&1 | tee -a output/colab_dub.log
+          colab --auth=adc status -s "$SESSION" 2>&1 | tee output/colab_runtime_status.txt
+
+          echo "Running Drive-API-backed, resumable multi-speaker Arabic dubbing. No interactive Drive mount is used." | tee -a output/colab_dub.log
+          colab --auth=adc exec -s "$SESSION" -f scripts/dub_billionaire_granny.py 2>&1 | tee -a output/colab_dub.log
 
       - name: Stop any remaining Colab session
         if: always()
         continue-on-error: true
-        run: |
-          colab stop -s billionaire-granny-dub || true
+        run: colab --auth=adc stop -s billionaire-granny-dub || true
 
       - name: Upload workflow diagnostics
         if: always()
@@ -166,5 +254,6 @@ jobs:
           path: |
             output/colab_dub.log
             output/colab_runtime_status.txt
+            output/dub_config.json
           if-no-files-found: warn
           retention-days: 14
