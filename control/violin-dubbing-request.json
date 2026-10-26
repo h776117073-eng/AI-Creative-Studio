@@ -3,5 +3,5 @@
   "rights_confirmed": "yes",
   "chunk_seconds": "600",
   "style": "storyteller",
-  "request_revision": "retry-after-secret-alias-fix"
+  "request_revision": "retry-python-setup-without-cache"
 }
