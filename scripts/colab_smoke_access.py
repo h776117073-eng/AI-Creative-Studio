@@ -15,6 +15,7 @@ probe.write_text("COLAB_FILE_STREAM_TEST_OK\n", encoding="utf-8")
 
 print(json.dumps({
     "status": "COLAB_RUNTIME_OK",
+    "test_marker": "contents-api-path-test-v2",
     "python": platform.python_version(),
     "platform": platform.platform(),
     "cpu_count": os.cpu_count(),
