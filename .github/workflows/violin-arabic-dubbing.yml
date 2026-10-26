@@ -196,6 +196,7 @@ jobs:
           TASK_ID: ${{ steps.prepare.outputs.task_id }}
           SOURCE_DURATION: ${{ steps.prepare.outputs.source_duration }}
           SOURCE_SHA256: ${{ steps.prepare.outputs.source_sha256 }}
+          CHUNK_COUNT: ${{ steps.dubbing.outputs.segment_count || '12' }}
         run: |
           set -euo pipefail
           FINAL="output/Arabic_Dub_${TASK_ID}.mp4"
