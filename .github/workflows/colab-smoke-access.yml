@@ -82,7 +82,7 @@ jobs:
           except requests.RequestException as exc:
               print("RAW_FILE_ENDPOINT=UNAVAILABLE:", type(exc).__name__)
 
-          api = s.url.rstrip("/") + "/api/contents/dub_smoke.txt"
+          api = s.url.rstrip("/") + "/api/contents/content/dub_smoke.txt"
           response = requests.get(api, params={**params, "content": "1"}, timeout=30)
           response.raise_for_status()
           data = response.json()
