@@ -181,10 +181,25 @@ def main() -> int:
             f.write(f"final_sha256={final_hash}\n")
         return 0
 
+    inputs_marker = input_dir / "segments.complete.json"
     existing_inputs = sorted(input_dir.glob("part_*.mkv"))
-    if not existing_inputs:
-        # Copy-mode segmentation keeps the source video frames intact. Each part
-        # is independently processed; cache checkpoints allow reruns to skip work.
+    marker_ok = False
+    if inputs_marker.is_file():
+        try:
+            marker = json.loads(inputs_marker.read_text(encoding="utf-8"))
+            marker_ok = (
+                marker.get("source_sha256") == args.source_sha256
+                and marker.get("chunk_seconds") == args.chunk_seconds
+                and marker.get("count") == len(existing_inputs)
+                and bool(existing_inputs)
+                and all(valid_video(p) for p in existing_inputs)
+            )
+        except Exception:
+            marker_ok = False
+    if not marker_ok:
+        # Do not trust a partial segment set left by a hard cancellation.
+        shutil.rmtree(input_dir, ignore_errors=True)
+        input_dir.mkdir(parents=True, exist_ok=True)
         run([
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
             "-i", str(source), "-map", "0:v:0", "-map", "0:a:0",
@@ -193,6 +208,14 @@ def main() -> int:
             "-segment_start_number", "0", str(input_dir / "part_%03d.mkv"),
         ], timeout=3600)
         existing_inputs = sorted(input_dir.glob("part_*.mkv"))
+        if not existing_inputs or not all(valid_video(p) for p in existing_inputs):
+            raise SystemExit("FFmpeg did not create a complete, readable set of input segments.")
+        atomic_json(inputs_marker, {
+            "source_sha256": args.source_sha256,
+            "chunk_seconds": args.chunk_seconds,
+            "count": len(existing_inputs),
+            "files": [p.name for p in existing_inputs],
+        })
     if not existing_inputs:
         raise SystemExit("FFmpeg did not create any input segments.")
     if not any(s.get("codec_type") == "audio" for s in probe(existing_inputs[0]).get("streams", [])):
