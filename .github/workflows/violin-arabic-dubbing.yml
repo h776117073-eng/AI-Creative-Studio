@@ -315,8 +315,13 @@ jobs:
         with:
           name: Violin-Arabic-Dub-Diagnostics-${{ steps.prepare.outputs.task_id || github.run_id }}
           path: |
-            output/
-            work/dub/
+            output/Arabic_Dub_*.mp4
+            output/Arabic_Dub_*.srt
+            output/source_probe.json
+            output/final_probe.json
+            output/source_SHA256SUMS.txt
+            output/SHA256SUMS.txt
+            work/dub/*/manifest.json
           if-no-files-found: warn
           retention-days: 7
           compression-level: 0
