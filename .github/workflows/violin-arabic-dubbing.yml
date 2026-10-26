@@ -106,6 +106,15 @@ jobs:
             echo "::error::No provider key was exposed to Actions. Add a valid Together AI API key as TOGETHER_API_KEY. Aliases VIOLIN, VIOLIN_API_KEY, and VIOLIN_KEY are also recognized, but the value must be a Together AI API key, not a Violin website key."
             exit 1
           fi
+          set +e
+          KEY_HTTP_STATUS="$(curl --silent --show-error --output /tmp/together-models.json --write-out '%{http_code}' --max-time 25 -H "Authorization: Bearer $TOGETHER_API_KEY" -H "Accept: application/json" https://api.together.xyz/v1/models)"
+          CURL_STATUS=$?
+          set -e
+          if [ "$CURL_STATUS" -ne 0 ] || [ "$KEY_HTTP_STATUS" != "200" ]; then
+            echo "::error::The configured secret is not accepted by Together AI (HTTP ${KEY_HTTP_STATUS:-unknown}). Check that the secret value is a valid Together AI API key; no key value is printed."
+            exit 1
+          fi
+          echo "Together AI accepted the configured provider key."
           if [ -n "${GOOGLE_DRIVE_CREDENTIALS:-}" ] && [ -n "${GOOGLE_DRIVE_FOLDER_ID:-}" ]; then
             python - <<'PY'
           import json, os
@@ -142,11 +151,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: |
-            work/source/source_download.mkv
-            work/source/source_download.complete
-            work/source/source_sha256.txt
             work/dub/
-            output/
           key: violin-arabic-${{ steps.request.outputs.file_id }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             violin-arabic-${{ steps.request.outputs.file_id }}-
@@ -301,11 +306,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: |
-            work/source/source_download.mkv
-            work/source/source_download.complete
-            work/source/source_sha256.txt
             work/dub/
-            output/
           key: violin-arabic-${{ steps.request.outputs.file_id }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Preserve diagnostics or output as an artifact when Drive upload fails
