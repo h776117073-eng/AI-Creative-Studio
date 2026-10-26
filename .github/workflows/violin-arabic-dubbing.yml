@@ -80,6 +80,31 @@ jobs:
           print(f"Request validated; Drive file ID suffix=…{file_id[-6:]}; style={style}; chunk_seconds={chunk}.")
           PY
 
+      - name: Verify required provider and Google Drive secrets
+        env:
+          TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY || secrets.VIOLIN_API_KEY || secrets.VIOLIN_KEY }}
+          GOOGLE_DRIVE_CREDENTIALS: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
+          GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TOGETHER_API_KEY:-}" ]; then
+            echo "::error::Violin is open-source and has no separate Violin API. Add a valid Together AI API key as TOGETHER_API_KEY, VIOLIN_API_KEY, or VIOLIN_KEY in repository Actions secrets."
+            exit 1
+          fi
+          if [ -z "${GOOGLE_DRIVE_CREDENTIALS:-}" ] || [ -z "${GOOGLE_DRIVE_FOLDER_ID:-}" ]; then
+            echo "::error::Google Drive upload is required for complete success. Add GOOGLE_DRIVE_CREDENTIALS (service-account JSON) and GOOGLE_DRIVE_FOLDER_ID before downloading the source."
+            exit 1
+          fi
+          python - <<'PY'
+          import json, os
+          creds = json.loads(os.environ["GOOGLE_DRIVE_CREDENTIALS"])
+          if creds.get("type") != "service_account":
+              raise SystemExit("GOOGLE_DRIVE_CREDENTIALS must be a Google service-account JSON document.")
+          if not os.environ["GOOGLE_DRIVE_FOLDER_ID"].strip():
+              raise SystemExit("GOOGLE_DRIVE_FOLDER_ID is empty.")
+          print("Provider key and Drive upload credentials are present; values not printed.")
+          PY
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -158,17 +183,6 @@ jobs:
             echo "source_size=$SOURCE_SIZE"
             echo "task_id=$TASK_ID"
           } >> "$GITHUB_OUTPUT"
-
-      - name: Verify Together AI key for Violin
-        env:
-          TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY || secrets.VIOLIN_API_KEY || secrets.VIOLIN_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${TOGETHER_API_KEY:-}" ]; then
-            echo "::error::Violin is open-source and has no separate Violin API. Add a valid Together AI API key as TOGETHER_API_KEY, VIOLIN_API_KEY, or VIOLIN_KEY in repository Actions secrets."
-            exit 1
-          fi
-          echo "Provider key is present (value intentionally not printed)."
 
       - name: Install and run resumable Violin Arabic dubbing
         id: dubbing
