@@ -1,6 +1,10 @@
 name: Violin Arabic Dubbing (resumable long video)
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - control/violin-dubbing-request.json
   workflow_dispatch:
     inputs:
       source_url:
@@ -46,6 +50,7 @@ jobs:
       - name: Validate request and resolve Drive file ID
         id: request
         env:
+          EVENT_NAME: ${{ github.event_name }}
           SOURCE_URL: ${{ inputs.source_url }}
           RIGHTS_CONFIRMED: ${{ inputs.rights_confirmed }}
           CHUNK_SECONDS: ${{ inputs.chunk_seconds }}
@@ -53,11 +58,21 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY'
-          import os, re
+          import json, os, re
           from urllib.parse import urlparse, parse_qs
-          if os.environ.get("RIGHTS_CONFIRMED") != "yes":
+          if os.environ.get("EVENT_NAME") == "push":
+              req = json.load(open("control/violin-dubbing-request.json", encoding="utf-8"))
+              raw = str(req.get("source_url", "")).strip()
+              rights = str(req.get("rights_confirmed", "no")).lower()
+              chunk = str(req.get("chunk_seconds", "600"))
+              style = str(req.get("style", "storyteller"))
+          else:
+              raw = os.environ.get("SOURCE_URL", "").strip()
+              rights = os.environ.get("RIGHTS_CONFIRMED", "no").lower()
+              chunk = os.environ.get("CHUNK_SECONDS", "600")
+              style = os.environ.get("DUB_STYLE", "storyteller")
+          if rights != "yes":
               raise SystemExit("Refusing to process until rights_confirmed is yes.")
-          raw = os.environ.get("SOURCE_URL", "").strip()
           parsed = urlparse(raw)
           if parsed.scheme != "https" or parsed.hostname not in {"drive.google.com", "drive.usercontent.google.com"}:
               raise SystemExit("source_url must be an HTTPS Google Drive link.")
@@ -67,16 +82,15 @@ jobs:
           file_id = match.group(1) if match else parse_qs(parsed.query).get("id", [""])[0]
           if not re.fullmatch(r"[A-Za-z0-9_-]{10,}", file_id or ""):
               raise SystemExit("Could not parse a valid Google Drive file ID from source_url.")
-          chunk = os.environ.get("CHUNK_SECONDS", "600")
           if chunk not in {"300", "600", "900"}:
               raise SystemExit("chunk_seconds must be 300, 600, or 900.")
-          style = os.environ.get("DUB_STYLE", "storyteller")
           if style not in {"standard", "storyteller", "casual", "kids", "academic", "news"}:
               raise SystemExit("Unknown Violin style.")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
               out.write(f"file_id={file_id}\n")
               out.write(f"chunk_seconds={chunk}\n")
               out.write(f"style={style}\n")
+              out.write(f"source_url={raw}\n")
           print(f"Request validated; Drive file ID suffix=…{file_id[-6:]}; style={style}; chunk_seconds={chunk}.")
           PY
 
@@ -137,7 +151,7 @@ jobs:
 
       - name: Download source video from Google Drive when not cached
         env:
-          SOURCE_URL: ${{ inputs.source_url }}
+          SOURCE_URL: ${{ steps.request.outputs.source_url }}
         run: |
           set -euo pipefail
           mkdir -p work/source output
