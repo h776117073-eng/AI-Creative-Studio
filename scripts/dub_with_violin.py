@@ -179,6 +179,9 @@ def main() -> int:
         print(f"FINAL_SHA256={final_hash}")
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
             f.write(f"final_sha256={final_hash}\n")
+            f.write(f"task_id={args.task_id}\n")
+            f.write(f"final_file={final_output}\n")
+            f.write(f"segment_count={int(task_meta.get('segment_count') or len(list(input_dir.glob('part_*.mkv'))) or 12)}\n")
         return 0
 
     inputs_marker = input_dir / "segments.complete.json"
