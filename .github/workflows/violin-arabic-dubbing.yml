@@ -1,0 +1,305 @@
+name: Violin Arabic Dubbing (resumable long video)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_url:
+        description: "Google Drive link to the source video"
+        required: true
+        type: string
+        default: "https://drive.google.com/file/d/1sMis6qi_j3AsBvAEL2mliPRIKf0s3-uI/view?usp=drivesdk"
+      rights_confirmed:
+        description: "Confirm you have permission to create and store this dubbed version"
+        required: true
+        type: choice
+        options: ["no", "yes"]
+        default: "no"
+      chunk_seconds:
+        description: "Segment size in seconds (600 = 10 minutes)"
+        required: true
+        type: choice
+        options: ["300", "600", "900"]
+        default: "600"
+      style:
+        description: "Delivery style"
+        required: true
+        type: choice
+        options: ["standard", "storyteller", "casual", "kids", "academic", "news"]
+        default: "storyteller"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: violin-arabic-dubbing-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  dub:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Checkout pipeline
+        uses: actions/checkout@v4
+
+      - name: Validate request and resolve Drive file ID
+        id: request
+        env:
+          SOURCE_URL: ${{ inputs.source_url }}
+          RIGHTS_CONFIRMED: ${{ inputs.rights_confirmed }}
+          CHUNK_SECONDS: ${{ inputs.chunk_seconds }}
+          DUB_STYLE: ${{ inputs.style }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, re
+          from urllib.parse import urlparse, parse_qs
+          if os.environ.get("RIGHTS_CONFIRMED") != "yes":
+              raise SystemExit("Refusing to process until rights_confirmed is yes.")
+          raw = os.environ.get("SOURCE_URL", "").strip()
+          parsed = urlparse(raw)
+          if parsed.scheme != "https" or parsed.hostname not in {"drive.google.com", "drive.usercontent.google.com"}:
+              raise SystemExit("source_url must be an HTTPS Google Drive link.")
+          match = re.search(r"/file/d/([A-Za-z0-9_-]+)", parsed.path)
+          if not match:
+              match = re.search(r"/d/([A-Za-z0-9_-]+)", parsed.path)
+          file_id = match.group(1) if match else parse_qs(parsed.query).get("id", [""])[0]
+          if not re.fullmatch(r"[A-Za-z0-9_-]{10,}", file_id or ""):
+              raise SystemExit("Could not parse a valid Google Drive file ID from source_url.")
+          chunk = os.environ.get("CHUNK_SECONDS", "600")
+          if chunk not in {"300", "600", "900"}:
+              raise SystemExit("chunk_seconds must be 300, 600, or 900.")
+          style = os.environ.get("DUB_STYLE", "storyteller")
+          if style not in {"standard", "storyteller", "casual", "kids", "academic", "news"}:
+              raise SystemExit("Unknown Violin style.")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"file_id={file_id}\n")
+              out.write(f"chunk_seconds={chunk}\n")
+              out.write(f"style={style}\n")
+          print(f"Request validated; Drive file ID suffix=…{file_id[-6:]}; style={style}; chunk_seconds={chunk}.")
+          PY
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install FFmpeg and Violin
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python -m pip install --upgrade pip
+          python -m pip install "violin==0.1.2" gdown
+          command -v violin
+          violin --style list
+
+      - name: Restore source and resumable segment checkpoints
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            work/source/source_download.mkv
+            work/source/source_download.complete
+            work/source/source_sha256.txt
+            work/dub/
+            output/
+          key: violin-arabic-${{ steps.request.outputs.file_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            violin-arabic-${{ steps.request.outputs.file_id }}-
+
+      - name: Download source video from Google Drive when not cached
+        env:
+          SOURCE_URL: ${{ inputs.source_url }}
+        run: |
+          set -euo pipefail
+          mkdir -p work/source output
+          if [ ! -s work/source/source_download.mkv ] || [ ! -f work/source/source_download.complete ]; then
+            rm -f work/source/source_download.mkv work/source/source_download.complete work/source/source_sha256.txt
+            gdown --fuzzy "$SOURCE_URL" --output work/source/source_download.mkv --continue
+            test -s work/source/source_download.mkv
+            ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 work/source/source_download.mkv >/dev/null
+            touch work/source/source_download.complete
+          else
+            echo "Reusing previously downloaded source from the restored checkpoint cache."
+          fi
+          echo "Source file present; bytes=$(stat -c%s work/source/source_download.mkv)"
+
+      - name: Probe source and calculate task identity
+        id: prepare
+        run: |
+          set -euo pipefail
+          ffprobe -v error -show_entries format=duration,size,format_name:stream=codec_type,codec_name,width,height,r_frame_rate,sample_rate,channels -of json work/source/source_download.mkv | tee output/source_probe.json
+          SOURCE_SHA256="$(sha256sum work/source/source_download.mkv | cut -d' ' -f1)"
+          SOURCE_DURATION="$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 work/source/source_download.mkv)"
+          SOURCE_SIZE="$(stat -c%s work/source/source_download.mkv)"
+          python - <<'PY'
+          import json
+          p = json.load(open("output/source_probe.json", encoding="utf-8"))
+          s = p.get("streams", [])
+          if not any(x.get("codec_type") == "video" for x in s):
+              raise SystemExit("The Drive file does not contain a video stream.")
+          if not any(x.get("codec_type") == "audio" for x in s):
+              raise SystemExit("The Drive file does not contain an audio stream.")
+          d = float((p.get("format") or {}).get("duration") or 0)
+          z = int((p.get("format") or {}).get("size") or 0)
+          if d < 1 or z < 1_000_000:
+              raise SystemExit(f"Invalid source: duration={d}, size={z}")
+          print(f"Source verified: duration={d:.2f}s, size={z} bytes")
+          PY
+          TASK_ID="$(printf '%s' "$SOURCE_SHA256" | cut -c1-16)"
+          printf '%s\n' "$SOURCE_SHA256" > work/source/source_sha256.txt
+          printf '%s  %s\n' "$SOURCE_SHA256" "work/source/source_download.mkv" > output/source_SHA256SUMS.txt
+          {
+            echo "source_sha256=$SOURCE_SHA256"
+            echo "source_duration=$SOURCE_DURATION"
+            echo "source_size=$SOURCE_SIZE"
+            echo "task_id=$TASK_ID"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify Together AI key for Violin
+        env:
+          TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY || secrets.VIOLIN_API_KEY || secrets.VIOLIN_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TOGETHER_API_KEY:-}" ]; then
+            echo "::error::Violin is open-source and has no separate Violin API. Add a valid Together AI API key as TOGETHER_API_KEY, VIOLIN_API_KEY, or VIOLIN_KEY in repository Actions secrets."
+            exit 1
+          fi
+          echo "Provider key is present (value intentionally not printed)."
+
+      - name: Install and run resumable Violin Arabic dubbing
+        id: dubbing
+        env:
+          TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY || secrets.VIOLIN_API_KEY || secrets.VIOLIN_KEY }}
+          SOURCE_SHA256: ${{ steps.prepare.outputs.source_sha256 }}
+          TASK_ID: ${{ steps.prepare.outputs.task_id }}
+          CHUNK_SECONDS: ${{ steps.request.outputs.chunk_seconds }}
+          DUB_STYLE: ${{ steps.request.outputs.style }}
+        run: |
+          set -euo pipefail
+          python scripts/dub_with_violin.py \
+            --input work/source/source_download.mkv \
+            --work-dir work/dub \
+            --output-dir output \
+            --task-id "$TASK_ID" \
+            --source-sha256 "$SOURCE_SHA256" \
+            --language Arabic \
+            --chunk-seconds "$CHUNK_SECONDS" \
+            --style "$DUB_STYLE"
+
+      - name: Verify final MP4 and compute checksum
+        id: render
+        env:
+          TASK_ID: ${{ steps.prepare.outputs.task_id }}
+          SOURCE_DURATION: ${{ steps.prepare.outputs.source_duration }}
+          SOURCE_SHA256: ${{ steps.prepare.outputs.source_sha256 }}
+        run: |
+          set -euo pipefail
+          FINAL="output/Arabic_Dub_${TASK_ID}.mp4"
+          test -s "$FINAL"
+          ffprobe -v error -show_entries format=duration,size,format_name -show_entries stream=codec_type,codec_name,width,height,sample_rate,channels -of json "$FINAL" | tee output/final_probe.json
+          python - <<'PY'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          final = Path("output/Arabic_Dub_" + os.environ["TASK_ID"] + ".mp4")
+          p = json.load(open("output/final_probe.json", encoding="utf-8"))
+          fmt, streams = p.get("format", {}), p.get("streams", [])
+          size = int(fmt.get("size") or 0)
+          duration = float(fmt.get("duration") or 0)
+          source_duration = float(os.environ["SOURCE_DURATION"])
+          if not final.is_file() or size < 1_000_000:
+              raise SystemExit(f"Final MP4 missing or too small: {size}")
+          if abs(duration - source_duration) > max(5.0, 2.0 * int(os.environ.get("CHUNK_COUNT", "12"))):
+              # Per-segment alignment can introduce a small cumulative timing difference.
+              raise SystemExit(f"Final duration differs materially from source: source={source_duration:.2f}s output={duration:.2f}s")
+          if not any(s.get("codec_type") == "video" for s in streams):
+              raise SystemExit("No video stream in final output.")
+          if not any(s.get("codec_type") == "audio" for s in streams):
+              raise SystemExit("No audio stream in final output.")
+          subprocess.run(["ffmpeg", "-v", "error", "-i", str(final), "-f", "null", "-"], check=True, timeout=1800)
+          h = hashlib.sha256()
+          with final.open("rb") as f:
+              for block in iter(lambda: f.read(4 * 1024 * 1024), b""):
+                  h.update(block)
+          digest = h.hexdigest()
+          Path("output/SHA256SUMS.txt").write_text(f"{digest}  {final.name}\n", encoding="utf-8")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"final_sha256={digest}\n")
+              out.write(f"final_size={size}\n")
+              out.write(f"final_duration={duration}\n")
+          manifest_path = Path("work/dub/" + os.environ["SOURCE_SHA256"][:16] + "/manifest.json")
+          if manifest_path.is_file():
+              manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+              manifest.update({"status": "VERIFIED_MP4", "final_sha256": digest, "final_size_bytes": size,
+                               "final_duration_seconds": duration, "full_ffmpeg_decode": "passed"})
+              manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+              f.write("## Violin Arabic dubbing — verified MP4\n\n")
+              f.write(f"- Task ID: {os.environ['TASK_ID']}\n- Source duration: {source_duration:.2f}s\n")
+              f.write(f"- Output duration: {duration:.2f}s\n- Output size: {size} bytes\n")
+              f.write(f"- SHA-256: {digest}\n- FFprobe + full FFmpeg decode: passed\n")
+              f.write("- Voice mode: single selected Arabic voice with original audio underneath at low volume\n")
+          print(json.dumps({"status": "VERIFIED_MP4", "duration": duration, "size_bytes": size, "sha256": digest}))
+          PY
+
+      - name: Upload verified MP4 to Google Drive
+        id: drive
+        if: success()
+        continue-on-error: true
+        env:
+          GOOGLE_DRIVE_CREDENTIALS: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
+          GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+          EXPECTED_OUTPUT_SHA256: ${{ steps.render.outputs.final_sha256 }}
+          TASK_ID: ${{ steps.prepare.outputs.task_id }}
+          SOURCE_SHA256: ${{ steps.prepare.outputs.source_sha256 }}
+        run: |
+          set -euo pipefail
+          python -m pip install google-api-python-client google-auth google-auth-httplib2
+          python scripts/upload_google_drive.py \
+            --file "output/Arabic_Dub_${TASK_ID}.mp4" \
+            --task-id "$TASK_ID" \
+            --source-sha256 "$SOURCE_SHA256" \
+            --filename "Arabic-Dub-Violin-$TASK_ID.mp4"
+
+      - name: Save resumable source and segment checkpoints
+        if: always() && steps.prepare.outputs.source_sha256 != ''
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            work/source/source_download.mkv
+            work/source/source_download.complete
+            work/source/source_sha256.txt
+            work/dub/
+            output/
+          key: violin-arabic-${{ steps.request.outputs.file_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Preserve diagnostics or output as an artifact when Drive upload fails
+        if: always() && steps.drive.outcome != 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Violin-Arabic-Dub-Diagnostics-${{ steps.prepare.outputs.task_id || github.run_id }}
+          path: |
+            output/
+            work/dub/
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
+
+      - name: Enforce definition of complete success
+        if: always()
+        env:
+          PREPARE_RESULT: ${{ steps.prepare.outcome }}
+          DUBBING_RESULT: ${{ steps.dubbing.outcome }}
+          RENDER_RESULT: ${{ steps.render.outcome }}
+          DRIVE_RESULT: ${{ steps.drive.outcome }}
+        run: |
+          set -euo pipefail
+          [ "$PREPARE_RESULT" = "success" ] || { echo "::error::Source preparation failed."; exit 1; }
+          [ "$DUBBING_RESULT" = "success" ] || { echo "::error::Violin dubbing failed."; exit 1; }
+          [ "$RENDER_RESULT" = "success" ] || { echo "::error::Final MP4 verification failed."; exit 1; }
+          [ "$DRIVE_RESULT" = "success" ] || { echo "::error::Drive upload was not confirmed; inspect logs/artifact and add GOOGLE_DRIVE_CREDENTIALS plus GOOGLE_DRIVE_FOLDER_ID secrets."; exit 1; }
+          echo "COMPLETE: Arabic MP4 was dubbed, decoded, checksum-verified, and uploaded to Drive."
