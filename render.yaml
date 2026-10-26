@@ -1,4 +1,5 @@
 services:
+  # Existing AI Creative Studio application — preserve its current deployment.
   - type: web
     name: ai-creative-studio-api
     runtime: docker
@@ -8,3 +9,26 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+
+  # Separate Python bridge service. Free instances may sleep when idle and
+  # therefore do not guarantee continuous 24/7 availability.
+  - type: web
+    name: ai-creative-studio-colab-bridge
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt && pip install uv
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: COLAB_CREDENTIALS
+        sync: false
+      - key: BRIDGE_API_TOKEN
+        generateValue: true
+      - key: COLAB_MCP_COMMAND
+        sync: false
+      - key: GITHUB_DISPATCH_TOKEN
+        sync: false
+      - key: GITHUB_REPOSITORY
+        value: h776117073-eng/AI-Creative-Studio
