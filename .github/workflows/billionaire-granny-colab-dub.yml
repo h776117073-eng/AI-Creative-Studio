@@ -1,0 +1,170 @@
+name: Billionaire Granny — Arabic multi-speaker dubbing on Colab
+
+on:
+  workflow_dispatch:
+    inputs:
+      rights_confirmed:
+        description: "Confirm authorization to create and store a full dubbed derivative"
+        required: true
+        type: choice
+        options: ["no", "yes"]
+        default: "yes"
+      asr_model:
+        description: "Speech recognition model"
+        required: true
+        type: choice
+        options: ["base", "small"]
+        default: "small"
+      translation_backend:
+        description: "Arabic translation backend"
+        required: true
+        type: choice
+        options: ["google", "argos"]
+        default: "google"
+      high_mem:
+        description: "Request a high-RAM Colab runtime when account eligibility permits"
+        required: true
+        type: boolean
+        default: true
+
+  push:
+    branches: [main]
+    paths:
+      - "scripts/dub_billionaire_granny.py"
+      - "scripts/dub_arabic_multispeaker.py"
+      - "scripts/dub_arabic_cpu.py"
+      - ".github/workflows/billionaire-granny-colab-dub.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: billionaire-granny-colab-dubbing
+  cancel-in-progress: false
+
+jobs:
+  dub-on-colab:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.rights_confirmed == 'yes' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Check out pipeline
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install official Google Colab CLI
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade google-colab-cli
+          colab --help
+
+      - name: Configure Google ADC credentials
+        env:
+          COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/gcloud" output
+          if [ -z "${COLAB_CREDENTIALS:-}" ]; then
+            echo "::error::GitHub Actions secret COLAB_CREDENTIALS is missing or empty."
+            echo "The Colab runtime was not started." > output/colab_dub.log
+            exit 1
+          fi
+          python - <<'PY'
+          import json, os, pathlib, sys
+          raw = os.environ.get("COLAB_CREDENTIALS", "")
+          try:
+              parsed = json.loads(raw)
+              if not isinstance(parsed, dict):
+                  raise ValueError("JSON root must be an object")
+              credential_type = parsed.get("type")
+              allowed = {"authorized_user", "service_account", "external_account", "impersonated_service_account"}
+              if credential_type not in allowed:
+                  raise ValueError("Unsupported Google ADC credential type")
+              target = pathlib.Path.home() / ".config/gcloud/application_default_credentials.json"
+              target.write_text(raw, encoding="utf-8")
+              target.chmod(0o600)
+          except Exception as exc:
+              pathlib.Path("output/colab_dub.log").write_text(
+                  f"Credential setup failed: {type(exc).__name__}: {exc}\n", encoding="utf-8")
+              print("::error::COLAB_CREDENTIALS is not supported Google ADC JSON; secret contents were not printed.")
+              sys.exit(1)
+          print(f"Google ADC credentials validated (type={credential_type}); secret content not printed.")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
+              env_file.write(f"GOOGLE_APPLICATION_CREDENTIALS={target}\n")
+          PY
+
+      - name: Create Colab session, mount Drive, and run resumable dubbing
+        timeout-minutes: 345
+        env:
+          HIGH_MEM: ${{ inputs.high_mem || 'true' }}
+          ASR_MODEL_INPUT: ${{ inputs.asr_model || 'small' }}
+          TRANSLATION_BACKEND_INPUT: ${{ inputs.translation_backend || 'google' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          SESSION="billionaire-granny-dub"
+          mkdir -p output
+          : > output/colab_dub.log
+          colab stop -s "$SESSION" >/dev/null 2>&1 || true
+          cleanup() {
+            echo "Stopping Colab session $SESSION to release compute resources." | tee -a output/colab_dub.log
+            colab stop -s "$SESSION" >> output/colab_dub.log 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          create_session() {
+            if [ "$HIGH_MEM" = "true" ]; then
+              if colab new -s "$SESSION" --high-mem >> output/colab_dub.log 2>&1; then
+                echo "COLAB_RAM=high" | tee -a output/colab_dub.log
+                return 0
+              fi
+              colab stop -s "$SESSION" >> output/colab_dub.log 2>&1 || true
+            fi
+            if colab new -s "$SESSION" >> output/colab_dub.log 2>&1; then
+              echo "COLAB_RAM=standard; accelerator=CPU" | tee -a output/colab_dub.log
+              return 0
+            fi
+            return 1
+          }
+
+          if ! create_session; then
+            echo "::error::Unable to create a Colab runtime with this account's current eligibility/quota."
+            cat output/colab_dub.log
+            exit 1
+          fi
+
+          echo "Mounting Google Drive into Colab..." | tee -a output/colab_dub.log
+          colab drivemount -s "$SESSION" 2>&1 | tee -a output/colab_dub.log
+          colab status -s "$SESSION" 2>&1 | tee output/colab_runtime_status.txt
+
+          echo "Starting resumable Arabic dubbing; checkpoints and final output are stored under Drive folder دبلجة/Billionaire_Granny_Arabic_Dub." | tee -a output/colab_dub.log
+          echo "Pipeline defaults: ASR=small, translation=google; GGUF TTS runs on CPU to keep RAM stable." | tee -a output/colab_dub.log
+          colab exec -s "$SESSION" -f scripts/dub_billionaire_granny.py 2>&1 | tee -a output/colab_dub.log
+
+      - name: Stop any remaining Colab session
+        if: always()
+        continue-on-error: true
+        run: |
+          colab stop -s billionaire-granny-dub || true
+
+      - name: Upload workflow diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: billionaire-granny-colab-dub-${{ github.run_id }}
+          path: |
+            output/colab_dub.log
+            output/colab_runtime_status.txt
+          if-no-files-found: warn
+          retention-days: 14
