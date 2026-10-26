@@ -70,3 +70,24 @@ Add a GitHub Actions repository secret named `COLAB_CREDENTIALS` containing a Go
 Each `colab run` creates a remote Colab runtime, runs the selected Python file, returns its output to the workflow log, and terminates that runtime. A run is successful only when the CLI exits with code 0; inspect the actual execution output before relying on task-level results.
 
 This automation intentionally uses Google's headless Colab CLI rather than the browser-connected Colab MCP server. The official [Colab MCP](https://github.com/googlecolab/colab-mcp) bridges a local agent to a notebook open in a browser on the same device; GitHub Actions runners do not have that interactive browser session. No Render service is needed for the workflow above.
+
+
+## Billionaire Granny — Drive-mounted Colab dubbing
+
+For the long, multi-speaker Arabic dubbing task, use the notebook below. It runs inside a normal Colab notebook after you authorize the standard Google Drive mount. This path is used because the existing `COLAB_CREDENTIALS` secret can authenticate Colab CLI but does not have the Drive API scopes required to read the source file through a headless GitHub runner.
+
+- **[Open the dubbing notebook in Google Colab](https://colab.research.google.com/github/h776117073-eng/AI-Creative-Studio/blob/main/notebooks/billionaire_granny_arabic_dubbing.ipynb)**
+- [Notebook source](notebooks/billionaire_granny_arabic_dubbing.ipynb)
+- [Resumable task runner](scripts/dub_billionaire_granny_mounted.py)
+- [Multi-speaker audio pipeline](scripts/dub_arabic_multispeaker.py)
+
+### Start the job
+
+1. Open the Colab notebook link above, select **Runtime → Change runtime type**, and choose **High-RAM** if the account offers it.
+2. Run the first cell and approve the standard Google Drive mount permission. The next cell checks that the exact source file exists and that at least 16 GiB total RAM, 10 GiB available RAM, and 16 GiB local disk are available. It stops before loading large models if these conditions are not met.
+3. Run the remaining cells. The runner performs disk-backed audio extraction, speaker diarization, Arabic translation, synthetic multi-voice TTS, expressive-tagging, timestamp fitting and final MP4 validation. Checkpoints and progress logs are saved under `My Drive/دبلجة/Billionaire_Granny_Arabic_Dub`.
+4. If Colab disconnects, reconnect, run the Drive mount cell again, then rerun the dubbing cell. It restores verified checkpoint batches from Drive before continuing.
+
+The final video is written as `Billionaire Granny Takes Home Fainted Pregnant Woman - Arabic Dub.mp4`, along with Arabic subtitles, `progress.json`, `progress.log`, and `quality_report.json`.
+
+**Scope note:** this pipeline creates an Arabic multi-speaker *audio dub* and aligns utterance timings. It does not implement face tracking and mouth animation, so its quality report explicitly marks visual lip-sync as not performed. It is not certified as Netflix-level without human language/voice review and a separate visual lip-sync pass.
