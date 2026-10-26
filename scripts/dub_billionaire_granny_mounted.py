@@ -33,7 +33,9 @@ WORK_DIR = LOCAL_ROOT / "work"
 DUB_DIR = WORK_DIR / "dub"
 SOURCE_LOCAL = Path("/content/Billionaire_Granny_source.mkv")
 AUDIO_LOCAL = WORK_DIR / "source_audio_16k_mono.wav"
+AUDIO_DRIVE = OUTPUT_DRIVE / "source_audio_16k_mono.wav"
 SOURCE_IDENTITY = WORK_DIR / "source_identity.json"
+IDENTITY_DRIVE = OUTPUT_DRIVE / "source_identity.json"
 LOCAL_PROGRESS = LOCAL_ROOT / "progress.json"
 LOCAL_LOG = LOCAL_ROOT / "progress.log"
 LOCAL_INDEX = WORK_DIR / "checkpoint_index.json"
@@ -50,7 +52,7 @@ TRANSLATION_BACKEND = os.getenv("TRANSLATION_BACKEND_INPUT", "google")
 STARTED_AT = datetime.now(timezone.utc).isoformat()
 STAGE = "starting"
 SOURCE_SHA256 = ""
-CHECKPOINT_INDEX: dict = {"schema": 1, "source_sha256": "", "next_batch": 1, "uploaded_files": {}, "batches": []}
+CHECKPOINT_INDEX: dict = {"schema": 1, "source_sha256": "", "next_batch": 1, "uploaded_files": {}, "uploaded_metadata": {}, "batches": []}
 
 
 def now_utc() -> str:
@@ -199,8 +201,10 @@ def load_checkpoint_index() -> None:
     if CHECKPOINT_INDEX.get("source_sha256") != SOURCE_SHA256:
         CHECKPOINT_INDEX = {
             "schema": 1, "source_sha256": SOURCE_SHA256,
-            "next_batch": 1, "uploaded_files": {}, "batches": [],
+            "next_batch": 1, "uploaded_files": {}, "uploaded_metadata": {}, "batches": [],
         }
+    CHECKPOINT_INDEX.setdefault("uploaded_metadata", {})
+    CHECKPOINT_INDEX.setdefault("uploaded_files", {})
     LOCAL_INDEX.parent.mkdir(parents=True, exist_ok=True)
     atomic_json(LOCAL_INDEX, CHECKPOINT_INDEX)
 
@@ -259,10 +263,16 @@ def sync_checkpoint(force: bool = False) -> None:
                 continue
             candidates.append((relative, wav, actual))
 
-    has_metadata = any((DUB_DIR / name).is_file() for name in metadata_names)
-    if not candidates and not force:
-        return
-    if not candidates and not has_metadata:
+    metadata_candidates: list[tuple[str, Path, str]] = []
+    uploaded_metadata = CHECKPOINT_INDEX.setdefault("uploaded_metadata", {})
+    for name in metadata_names:
+        current = DUB_DIR / name
+        if not current.is_file():
+            continue
+        current_hash = sha256_file(current, name)
+        if force or uploaded_metadata.get(name) != current_hash:
+            metadata_candidates.append((name, current, current_hash))
+    if not candidates and not metadata_candidates:
         return
 
     build_root = WORK_DIR / "checkpoint_build"
@@ -274,10 +284,10 @@ def sync_checkpoint(force: bool = False) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(wav, target)
         added.append(relative)
-    for name in metadata_names:
-        current = DUB_DIR / name
-        if current.is_file():
-            shutil.copy2(current, build_root / name)
+    for name, current, _checksum in metadata_candidates:
+        destination = build_root / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(current, destination)
     if LOCAL_PROGRESS.is_file():
         shutil.copy2(LOCAL_PROGRESS, build_root / "progress.json")
 
@@ -301,6 +311,8 @@ def sync_checkpoint(force: bool = False) -> None:
         })
         for relative, _wav, checksum in candidates:
             CHECKPOINT_INDEX["uploaded_files"][relative] = checksum
+        for name, _source, checksum in metadata_candidates:
+            CHECKPOINT_INDEX.setdefault("uploaded_metadata", {})[name] = checksum
         CHECKPOINT_INDEX["next_batch"] = batch + 1
         atomic_json(LOCAL_INDEX, CHECKPOINT_INDEX)
         atomic_json(DRIVE_INDEX, CHECKPOINT_INDEX)
@@ -392,13 +404,28 @@ def prepare_source_and_audio() -> tuple[Path, dict]:
         raise RuntimeError("Source contains no audio stream.")
 
     saved_identity = {}
-    if SOURCE_IDENTITY.is_file():
-        try:
-            saved_identity = json.loads(SOURCE_IDENTITY.read_text(encoding="utf-8"))
-        except Exception:
-            saved_identity = {}
-    if AUDIO_LOCAL.is_file() and saved_identity.get("source_sha256") == SOURCE_SHA256:
-        log("Reusing extracted source audio from the current Colab session.")
+    for identity_path in (SOURCE_IDENTITY, IDENTITY_DRIVE):
+        if identity_path.is_file():
+            try:
+                candidate = json.loads(identity_path.read_text(encoding="utf-8"))
+                if candidate.get("source_sha256") == SOURCE_SHA256:
+                    saved_identity = candidate
+                    break
+            except Exception:
+                continue
+
+    audio_is_valid = AUDIO_LOCAL.is_file() and saved_identity.get("source_sha256") == SOURCE_SHA256
+    if not audio_is_valid and AUDIO_DRIVE.is_file() and saved_identity.get("source_sha256") == SOURCE_SHA256:
+        expected_audio_hash = saved_identity.get("audio_sha256")
+        log("Restoring the verified extracted-audio checkpoint from Drive.")
+        copy_stream(AUDIO_DRIVE, AUDIO_LOCAL, "extracted audio checkpoint from Drive")
+        if expected_audio_hash and sha256_file(AUDIO_LOCAL, "restored source audio") != expected_audio_hash:
+            AUDIO_LOCAL.unlink(missing_ok=True)
+            raise RuntimeError("The restored Drive audio checkpoint failed its SHA-256 check.")
+        audio_is_valid = True
+
+    if audio_is_valid:
+        log("Reusing the extracted source audio checkpoint.")
     else:
         update_progress("extracting_audio", source_sha256=SOURCE_SHA256, duration_seconds=duration)
         temporary = AUDIO_LOCAL.with_suffix(".wav.part")
@@ -411,14 +438,22 @@ def prepare_source_and_audio() -> tuple[Path, dict]:
         if not temporary.is_file() or temporary.stat().st_size < 1000:
             raise RuntimeError("Audio extraction produced an empty WAV.")
         os.replace(temporary, AUDIO_LOCAL)
-        atomic_json(SOURCE_IDENTITY, {
-            "source_name": SOURCE_NAME,
-            "source_sha256": SOURCE_SHA256,
-            "source_size_bytes": source_size,
-            "source_mtime": source_stat.st_mtime,
-            "audio_sha256": sha256_file(AUDIO_LOCAL, "source audio"),
-            "updated_at_utc": now_utc(),
-        })
+
+    audio_hash = sha256_file(AUDIO_LOCAL, "source audio")
+    identity = {
+        "source_name": SOURCE_NAME,
+        "source_sha256": SOURCE_SHA256,
+        "source_size_bytes": source_size,
+        "source_mtime": source_stat.st_mtime,
+        "audio_sha256": audio_hash,
+        "audio_size_bytes": AUDIO_LOCAL.stat().st_size,
+        "updated_at_utc": now_utc(),
+    }
+    atomic_json(SOURCE_IDENTITY, identity)
+    if not AUDIO_DRIVE.is_file() or AUDIO_DRIVE.stat().st_size != AUDIO_LOCAL.stat().st_size or saved_identity.get("audio_sha256") != audio_hash:
+        log("Saving extracted audio to Drive so a new Colab session can resume without re-extracting it.")
+        copy_stream(AUDIO_LOCAL, AUDIO_DRIVE, "extracted source audio checkpoint to Drive")
+    atomic_json(IDENTITY_DRIVE, identity)
 
     audio_probe = capture_json([
         "ffprobe", "-v", "error", "-show_entries", "format=duration,size",
