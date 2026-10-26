@@ -173,7 +173,7 @@ jobs:
           # Keep the original MKV to avoid an unnecessary full-video remux/transcode before dubbing.
           # The final render will mux the original video stream once with the new Arabic audio.
           ffmpeg -y -v error -i work/source/source_download.mkv -map 0:a:0 -vn -ac 1 -ar 16000 -c:a pcm_s16le work/source/source_audio.wav
-          test -s work/source/source.mp4
+          test -s work/source/source_download.mkv
           test -s work/source/source_audio.wav
           echo "$SOURCE_SHA256" > output/source_sha256.txt
           echo "source_sha256=$SOURCE_SHA256" >> "$GITHUB_OUTPUT"
