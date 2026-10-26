@@ -1,0 +1,89 @@
+name: Colab MCP Bridge Runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      python_code:
+        description: "Python code to submit to the configured MCP server"
+        required: false
+        type: string
+        default: 'print("Colab MCP bridge smoke test")'
+      timeout_seconds:
+        description: "Execution timeout in seconds"
+        required: true
+        type: number
+        default: 300
+  repository_dispatch:
+    types: [colab_bridge_run]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: colab-bridge-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies and uv
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install uv
+
+      - name: Configure credentials without printing secrets
+        env:
+          COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$COLAB_CREDENTIALS" || { echo "::error::COLAB_CREDENTIALS secret is missing"; exit 1; }
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          raw = os.environ["COLAB_CREDENTIALS"]
+          data = json.loads(raw)
+          if not isinstance(data, dict):
+              raise SystemExit("COLAB_CREDENTIALS must be a JSON object")
+          p = Path.home() / ".config" / "colab-mcp" / "credentials.json"
+          p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+          p.write_text(json.dumps(data), encoding="utf-8")
+          p.chmod(0o600)
+          print("Credentials JSON parsed and installed; secret value was not printed.")
+          PY
+
+      - name: Confirm official MCP server command is configured
+        env:
+          COLAB_MCP_COMMAND: ${{ vars.COLAB_MCP_COMMAND }}
+        run: |
+          if [ -z "$COLAB_MCP_COMMAND" ]; then
+            echo "::error::Set repository variable COLAB_MCP_COMMAND to the documented official Colab MCP server invocation."
+            echo "A successful GitHub job cannot prove a live Colab browser session exists."
+            exit 1
+          fi
+          echo "MCP command variable is present."
+
+      - name: Execute smoke test through MCP
+        env:
+          COLAB_MCP_COMMAND: ${{ vars.COLAB_MCP_COMMAND }}
+          COLAB_CODE: ${{ github.event.client_payload.python_code || inputs.python_code || 'print("Colab MCP connectivity test")' }}
+          COLAB_TIMEOUT_SECONDS: ${{ inputs.timeout_seconds || 300 }}
+        run: python scripts/run_colab_agent.py
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: colab-bridge-output-${{ github.run_id }}
+          path: output/**
+          if-no-files-found: warn
+          retention-days: 7
