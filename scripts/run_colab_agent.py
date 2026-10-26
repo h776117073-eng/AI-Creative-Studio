@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shlex
 import sys
 import traceback
 from datetime import datetime, timezone
@@ -136,9 +137,21 @@ async def run() -> dict[str, Any]:
     env = os.environ.copy()
     env["API_KEY"] = os.getenv("API_KEY", "")
     env["GOOGLE_API_KEY"] = os.getenv("API_KEY", env.get("GOOGLE_API_KEY", ""))
+    command_text = os.getenv("COLAB_MCP_COMMAND", "").strip()
+    if not command_text:
+        raise RuntimeError(
+            "COLAB_MCP_COMMAND is not configured. The old npm package "
+            "@google/colab-mcp-server is not available; set this variable to "
+            "the invocation documented by the official googlecolab/colab-mcp "
+            "repository. A valid command still requires access to an authenticated "
+            "Colab browser/session."
+        )
+    command_parts = shlex.split(command_text)
+    if not command_parts:
+        raise RuntimeError("COLAB_MCP_COMMAND is empty")
     server = StdioServerParameters(
-        command="npx",
-        args=["--yes", "@google/colab-mcp-server"],
+        command=command_parts[0],
+        args=command_parts[1:],
         env=env,
     )
     code = os.getenv("COLAB_CODE", 'print("Hello from Google Colab")')
@@ -148,7 +161,7 @@ async def run() -> dict[str, Any]:
         "status": "running",
         "started_at": started,
         "finished_at": None,
-        "server_command": "npx --yes @google/colab-mcp-server",
+        "server_command": os.getenv("COLAB_MCP_COMMAND", "(not configured)"),
         "credentials_path": str(credentials),
         "tool_name": None,
         "discovered_tools": [],
