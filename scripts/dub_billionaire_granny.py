@@ -249,7 +249,7 @@ def initialize_drive() -> None:
     TRANSLATION_BACKEND = str(config.get("translation_backend", TRANSLATION_BACKEND))
     from google.auth import load_credentials_from_file
     from googleapiclient.discovery import build
-    scopes = ["https://www.googleapis.com/auth/drive"]
+    scopes = ["https://www.googleapis.com/auth/drive.file"]
     credentials, _project = load_credentials_from_file(str(CREDENTIALS_PATH), scopes=scopes)
     DRIVE = build("drive", "v3", credentials=credentials, cache_discovery=False)
     OUTPUT_FOLDER_ID = str(config["output_folder_id"])
