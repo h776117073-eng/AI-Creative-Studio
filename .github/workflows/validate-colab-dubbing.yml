@@ -1,0 +1,65 @@
+name: Validate Colab dubbing assets
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/dub_billionaire_granny_mounted.py"
+      - "scripts/dub_arabic_multispeaker.py"
+      - "notebooks/billionaire_granny_arabic_dubbing.ipynb"
+      - ".github/workflows/validate-colab-dubbing.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  syntax-and-notebook-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Compile dubbing Python scripts without running the model pipeline
+        run: |
+          set -euo pipefail
+          python -m py_compile scripts/dub_billionaire_granny_mounted.py scripts/dub_arabic_multispeaker.py
+          echo "Python syntax check passed."
+
+      - name: Validate Colab notebook JSON and cell syntax
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("notebooks/billionaire_granny_arabic_dubbing.ipynb")
+          notebook = json.loads(path.read_text(encoding="utf-8"))
+          if notebook.get("nbformat") != 4:
+              raise SystemExit("Expected a Jupyter notebook in nbformat 4.")
+          cells = notebook.get("cells", [])
+          code_cells = [cell for cell in cells if cell.get("cell_type") == "code"]
+          if len(code_cells) < 5:
+              raise SystemExit(f"Expected at least 5 code cells; found {len(code_cells)}.")
+          for index, cell in enumerate(code_cells):
+              source = "".join(cell.get("source", []))
+              compile(source, f"{path}:code-cell-{index + 1}", "exec")
+          all_source = "\n".join("".join(cell.get("source", [])) for cell in cells)
+          required = [
+              "drive.mount('/content/drive')",
+              "Billionaire Granny Takes Home Fainted Pregnant Woman - Original Quality.mkv",
+              "ram_total < 16",
+              "scripts/dub_billionaire_granny_mounted.py",
+              "Billionaire_Granny_Arabic_Dub",
+          ]
+          missing = [term for term in required if term not in all_source]
+          if missing:
+              raise SystemExit("Notebook is missing required safety/execution markers: " + ", ".join(missing))
+          print(f"Notebook JSON and {len(code_cells)} Python cells validated.")
+          print("Drive mount, exact source, RAM guard, task runner, and Drive output path verified.")
+          PY
