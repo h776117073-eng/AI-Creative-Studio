@@ -1,4 +1,4 @@
-name: Colab MCP Bridge Runner (headless compatibility)
+name: Colab CLI Runner (compatibility)
 
 on:
   workflow_dispatch:
