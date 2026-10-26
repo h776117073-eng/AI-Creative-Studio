@@ -117,9 +117,8 @@ jobs:
           source_folder_id = "1Ux4dAzND0LeOOygUCldHf-QO3agMgcCy"
           expected_name = "Billionaire Granny Takes Home Fainted Pregnant Woman - Original Quality.mkv"
           credentials_path = os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
-          credentials, _ = load_credentials_from_file(
-              credentials_path, scopes=["https://www.googleapis.com/auth/drive.file"]
-          )
+          # Do not request additional OAuth scopes here. Reuse the existing user-granted ADC scope set.
+          credentials, _ = load_credentials_from_file(credentials_path)
           drive = build("drive", "v3", credentials=credentials, cache_discovery=False)
 
           source = drive.files().get(
