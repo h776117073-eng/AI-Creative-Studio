@@ -240,6 +240,42 @@ jobs:
           echo "Running Drive-API-backed, resumable multi-speaker Arabic dubbing. No interactive Drive mount is used." | tee -a output/colab_dub.log
           colab --auth=adc exec -s "$SESSION" -f scripts/dub_billionaire_granny.py 2>&1 | tee -a output/colab_dub.log
 
+      - name: Retrieve verified Colab outputs back into GitHub Actions
+        if: always()
+        timeout-minutes: 45
+        shell: bash
+        run: |
+          set +e
+          mkdir -p output/colab_return
+          SESSION="billionaire-granny-dub"
+          download_one() {
+            remote="$1"
+            local="$2"
+            echo "Retrieving Colab output: $remote"
+            if colab --auth=adc download -s "$SESSION" "$remote" "$local" >> output/colab_dub.log 2>&1; then
+              if [ -f "$local" ]; then
+                echo "Retrieved $(basename "$local"): $(stat -c%s "$local") bytes"
+                return 0
+              fi
+            fi
+            echo "Not available from Colab VM: $remote"
+            return 1
+          }
+          download_one "/content/Billionaire_Granny_Arabic_Dub_final.mp4" "output/colab_return/Billionaire_Granny_Arabic_Dub_final.mp4" || true
+          download_one "/content/Billionaire_Granny_Arabic_Dub/quality_report.json" "output/colab_return/quality_report.json" || true
+          download_one "/content/Billionaire_Granny_Arabic_Dub/progress.json" "output/colab_return/progress.json" || true
+          download_one "/content/Billionaire_Granny_Arabic_Dub/progress.log" "output/colab_return/progress.log" || true
+          download_one "/content/Billionaire_Granny_Arabic_Dub/Arabic_Dub_Subtitles.srt" "output/colab_return/Arabic_Dub_Subtitles.srt" || true
+          if [ -f output/colab_return/quality_report.json ]; then
+            echo "========== Retrieved Colab quality report =========="
+            cat output/colab_return/quality_report.json
+          fi
+          if [ -f output/colab_return/progress.json ]; then
+            echo "========== Retrieved Colab progress =========="
+            cat output/colab_return/progress.json
+          fi
+          echo "Colab-to-GitHub transfer phase completed; missing files are reported above."
+
       - name: Stop any remaining Colab session
         if: always()
         continue-on-error: true
@@ -254,5 +290,7 @@ jobs:
             output/colab_dub.log
             output/colab_runtime_status.txt
             output/dub_config.json
+            output/colab_return/**
           if-no-files-found: warn
+          compression-level: 0
           retention-days: 14
