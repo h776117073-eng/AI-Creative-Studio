@@ -33,10 +33,11 @@ DEFAULT_SOURCE_URL = "https://drive.google.com/file/d/1sMis6qi_j3AsBvAEL2mliPRIK
 SOURCE_URL = os.getenv("SOURCE_URL", DEFAULT_SOURCE_URL).strip()
 METADATA_URL = os.getenv("METADATA_URL", "").strip()
 
-DRIVE_ROOT = Path("/content/drive/MyDrive")
-DRIVE_FOLDER = DRIVE_ROOT / "Netflix_Arabic_Dubs"
-BASE_CHECKPOINT_DIR = DRIVE_FOLDER / "Billionaire_Granny_CEO_Checkpoints"
-OUTPUT_FOLDER = DRIVE_FOLDER
+# All processing stays on the Colab VM. No Drive mount or Drive API is used.
+OUTPUT_FOLDER = Path("/content/dub-output")
+DRIVE_ROOT = OUTPUT_FOLDER  # legacy variable name; points only to local output workspace
+DRIVE_FOLDER = OUTPUT_FOLDER
+BASE_CHECKPOINT_DIR = OUTPUT_FOLDER / "Billionaire_Granny_CEO_Checkpoints"
 WORK_ROOT = Path("/content/billionaire_granny_dubbing")
 SOURCE_PATH = WORK_ROOT / SOURCE_NAME
 AUDIO_PATH = WORK_ROOT / "source_audio_24k_mono.wav"
@@ -168,9 +169,9 @@ def update_progress(stage: str, **extra) -> None:
     atomic_json(LOCAL_PROGRESS, row)
     log(f"STAGE={stage}")
     try:
-        copy_stream(LOCAL_PROGRESS, DRIVE_FOLDER / PROGRESS_NAME, "Drive progress update")
+        copy_stream(LOCAL_PROGRESS, DRIVE_FOLDER / PROGRESS_NAME, "Local progress update")
         if LOCAL_LOG.is_file():
-            copy_stream(LOCAL_LOG, DRIVE_FOLDER / "Billionaire_Granny_CEO_Progress.log", "Drive progress log update")
+            copy_stream(LOCAL_LOG, DRIVE_FOLDER / "Billionaire_Granny_CEO_Progress.log", "Local progress log update")
     except Exception as exc:
         log(f"WARNING: Drive progress sync failed ({type(exc).__name__}); local progress remains available.")
 
@@ -225,20 +226,16 @@ def probe_json(command: list[str], label: str) -> dict:
     return json.loads(result.stdout)
 
 
-def ensure_drive_writable() -> None:
-    if not DRIVE_ROOT.is_dir():
-        raise RuntimeError(
-            "Google Drive is not mounted at /content/drive/MyDrive. "
-            "The run stopped before downloading the video or installing TTS models."
-        )
-    DRIVE_FOLDER.mkdir(parents=True, exist_ok=True)
+def ensure_local_output_writable() -> None:
+    """Prepare local Colab output/checkpoint folders; never mount or access Drive."""
+    OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
     BASE_CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
-    marker = DRIVE_FOLDER / ".colab_dub_write_probe.tmp"
+    marker = OUTPUT_FOLDER / ".colab_local_write_probe.tmp"
     try:
         marker.write_text("ok", encoding="utf-8")
         marker.unlink()
     except Exception as exc:
-        raise RuntimeError(f"Google Drive mounted but the output folder is not writable: {type(exc).__name__}") from exc
+        raise RuntimeError(f"Colab local output directory is not writable: {type(exc).__name__}") from exc
 
 
 def download_metadata() -> tuple[dict, list[dict]]:
@@ -246,7 +243,7 @@ def download_metadata() -> tuple[dict, list[dict]]:
     update_progress("loading_prior_segment_metadata")
     local_metadata = Path(os.getenv(
         "METADATA_FILE",
-        str(DRIVE_FOLDER / "Billionaire_Granny_CEO_Dubbing_Metadata_864_Segments.json"),
+        str(OUTPUT_FOLDER / "Billionaire_Granny_CEO_Dubbing_Metadata_864_Segments.json"),
     ))
     if local_metadata.is_file():
         raw = local_metadata.read_bytes()
@@ -376,7 +373,7 @@ def save_translation_checkpoint(segments: list[dict], source_meta: dict) -> None
         "translation_complete": all(str(s.get("ar_text", "")).strip() for s in segments),
     }
     atomic_json(LOCAL_SEGMENTS, payload)
-    copy_stream(LOCAL_SEGMENTS, CHECKPOINT_DIR / "segments_ar.json", "Drive translation checkpoint")
+    copy_stream(LOCAL_SEGMENTS, CHECKPOINT_DIR / "segments_ar.json", "Local translation checkpoint")
 
 
 def translate_segments(segments: list[dict], source_meta: dict) -> list[dict]:
@@ -462,7 +459,7 @@ def translate_segments(segments: list[dict], source_meta: dict) -> list[dict]:
         seg["tts_pitch"] = pitch
 
     if errors:
-        log(f"Translation failure count: {len(errors)}; details are only written to the private Drive checkpoint.")
+        log(f"Translation failure count: {len(errors)}; details are only written to the private Local checkpoint.")
     if any(not str(seg.get("ar_text", "")).strip() for seg in segments):
         atomic_json(CHECKPOINT_DIR / "translation_errors.json", errors)
         save_translation_checkpoint(segments, source_meta)
@@ -564,7 +561,7 @@ def checkpoint_new_clips(new_indices: list[int], manifest: dict, batch_no: int) 
         tar.add(manifest_path, arcname=manifest_path.name)
     copy_stream(archive_path, CHECKPOINT_DIR / archive_path.name, archive_path.name)
     archive_path.unlink(missing_ok=True)
-    log(f"Drive TTS checkpoint saved: {batch_no}; new clips={len(new_indices)}.")
+    log(f"Local TTS checkpoint saved: {batch_no}; new clips={len(new_indices)}.")
 
 
 async def _synth_one(index: int, segment: dict, semaphore: asyncio.Semaphore,
@@ -884,39 +881,39 @@ def render_and_verify(source: Path, source_info: dict, metadata: dict,
     })
     # Copy video and small sidecars to the mounted Drive only after local checks pass.
     update_progress("uploading_final_outputs_to_drive", final_size_bytes=LOCAL_FINAL.stat().st_size)
-    drive_final = DRIVE_FOLDER / FINAL_NAME
-    copy_stream(LOCAL_FINAL, drive_final, "Final MP4 upload to Google Drive")
-    drive_sha = sha256_file(drive_final, "final MP4 on Drive")
-    if drive_sha != final_sha:
-        raise RuntimeError("SHA-256 mismatch for the uploaded Drive MP4.")
-    copy_stream(LOCAL_SRT, DRIVE_FOLDER / SRT_NAME, "Arabic subtitles to Drive")
-    copy_stream(LOCAL_SEGMENTS, DRIVE_FOLDER / SEGMENTS_NAME, "Dubbing metadata to Drive")
-    copy_stream(LOCAL_REPORT, DRIVE_FOLDER / REPORT_NAME, "Quality report to Drive")
-    atomic_json(DRIVE_FOLDER / "Billionaire_Granny_CEO_Run_Manifest.json", {
+    local_final_copy = OUTPUT_FOLDER / FINAL_NAME
+    copy_stream(LOCAL_FINAL, local_final_copy, "Final MP4 into local transfer folder")
+    local_copy_sha = sha256_file(local_final_copy, "final MP4 local transfer copy")
+    if local_copy_sha != final_sha:
+        raise RuntimeError("SHA-256 mismatch for the local transfer MP4.")
+    copy_stream(LOCAL_SRT, OUTPUT_FOLDER / SRT_NAME, "Arabic subtitles into local transfer folder")
+    copy_stream(LOCAL_SEGMENTS, OUTPUT_FOLDER / SEGMENTS_NAME, "Dubbing metadata into local transfer folder")
+    copy_stream(LOCAL_REPORT, OUTPUT_FOLDER / REPORT_NAME, "Quality report into local transfer folder")
+    atomic_json(OUTPUT_FOLDER / "Billionaire_Granny_CEO_Run_Manifest.json", {
         "status": "AUDIO_DUB_FINAL_VERIFIED",
         "source_sha256": SOURCE_SHA256,
-        "final_sha256": drive_sha,
-        "final_size_bytes": drive_final.stat().st_size,
-        "final_path": str(drive_final),
-        "subtitle_path": str(DRIVE_FOLDER / SRT_NAME),
-        "report_path": str(DRIVE_FOLDER / REPORT_NAME),
+        "final_sha256": local_copy_sha,
+        "final_size_bytes": local_final_copy.stat().st_size,
+        "final_path": str(local_final_copy),
+        "subtitle_path": str(OUTPUT_FOLDER / SRT_NAME),
+        "report_path": str(OUTPUT_FOLDER / REPORT_NAME),
         "completed_at_utc": now_utc(),
     })
-    report["drive_file"] = str(drive_final)
-    report["drive_sha256"] = drive_sha
-    report["drive_copy_checksum"] = "passed"
+    report["local_output_file"] = str(local_final_copy)
+    report["local_output_sha256"] = local_copy_sha
+    report["output_copy_checksum"] = "passed"
     atomic_json(LOCAL_REPORT, report)
-    copy_stream(LOCAL_REPORT, DRIVE_FOLDER / REPORT_NAME, "Final quality report update to Drive")
+    copy_stream(LOCAL_REPORT, OUTPUT_FOLDER / REPORT_NAME, "Final quality report update in local output folder")
     update_progress("audio_dub_final_verified",
-                    final_path=str(drive_final),
-                    final_size_bytes=drive_final.stat().st_size,
-                    final_sha256=drive_sha,
+                    final_path=str(local_final_copy),
+                    final_size_bytes=local_final_copy.stat().st_size,
+                    final_sha256=local_copy_sha,
                     final_duration_seconds=round(final_duration, 3))
     log(json.dumps({
         "status": report["status"],
-        "final_path": str(drive_final),
+        "final_path": str(local_final_copy),
         "final_size_bytes": report["final_size_bytes"],
-        "final_sha256": drive_sha,
+        "final_sha256": local_copy_sha,
         "source_duration_seconds": report["source_duration_seconds"],
         "final_duration_seconds": report["final_duration_seconds"],
         "speaker_count": report["speaker_count"],
@@ -955,7 +952,7 @@ def main() -> int:
         LOCAL_OUTPUT.mkdir(parents=True, exist_ok=True)
         WORK_ROOT.mkdir(parents=True, exist_ok=True)
         CLIPS_DIR.mkdir(parents=True, exist_ok=True)
-        ensure_drive_writable()
+        ensure_local_output_writable()
         total_ram, available_ram = mem_info_gib()
         disk = shutil.disk_usage("/content")
         log(f"Colab resources: total RAM={total_ram:.1f} GiB; available RAM={available_ram:.1f} GiB; local disk free={disk.free / (1024**3):.1f} GiB.")
@@ -1005,10 +1002,10 @@ def main() -> int:
         try:
             atomic_json(LOCAL_PROGRESS, error)
             log(f"ERROR: {type(exc).__name__}: {exc}")
-            if DRIVE_ROOT.is_dir():
-                atomic_json(DRIVE_FOLDER / PROGRESS_NAME, error)
+            if OUTPUT_FOLDER.is_dir():
+                atomic_json(OUTPUT_FOLDER / PROGRESS_NAME, error)
                 if LOCAL_LOG.is_file():
-                    copy_stream(LOCAL_LOG, DRIVE_FOLDER / "Billionaire_Granny_CEO_Progress.log", "Drive progress log update after failure")
+                    copy_stream(LOCAL_LOG, OUTPUT_FOLDER / "Billionaire_Granny_CEO_Progress.log", "Local progress log update after failure")
                 if CHECKPOINT_DIR and CHECKPOINT_DIR.is_dir():
                     atomic_json(CHECKPOINT_DIR / "last_error.json", error)
         except Exception:
