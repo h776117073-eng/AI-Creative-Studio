@@ -241,12 +241,24 @@ def ensure_drive_writable() -> None:
 
 def download_metadata() -> tuple[dict, list[dict]]:
     global METADATA_SHA256
-    if not METADATA_URL:
-        raise RuntimeError("METADATA_URL is empty; the previous 864-segment transcript is required.")
-    update_progress("downloading_prior_segment_metadata")
-    response = requests.get(METADATA_URL, timeout=90)
-    response.raise_for_status()
-    raw = response.content
+    update_progress("loading_prior_segment_metadata")
+    local_metadata = Path(os.getenv(
+        "METADATA_FILE",
+        str(DRIVE_FOLDER / "Billionaire_Granny_CEO_Dubbing_Metadata_864_Segments.json"),
+    ))
+    if local_metadata.is_file():
+        raw = local_metadata.read_bytes()
+        log(f"Using the existing Drive transcript metadata file: {local_metadata.name} ({len(raw):,} bytes).")
+    elif METADATA_URL:
+        # The URL is a short-lived, read-only Drive connector URL; never print it.
+        log("Fetching the existing transcript metadata from its temporary private download URL.")
+        response = requests.get(METADATA_URL, timeout=90)
+        response.raise_for_status()
+        raw = response.content
+    else:
+        raise FileNotFoundError(
+            f"Transcript metadata not found at {local_metadata} and METADATA_URL is not configured."
+        )
     if len(raw) < 10_000 or len(raw) > 10_000_000:
         raise RuntimeError(f"Metadata size is unexpected: {len(raw):,} bytes.")
     METADATA_SHA256 = hashlib.sha256(raw).hexdigest()
