@@ -56,10 +56,10 @@ jobs:
           all_source = "\n".join("".join(cell.get("source", [])) for cell in cells)
           required = [
               "drive.mount('/content/drive')",
-              "Billionaire Granny Takes Home Fainted Pregnant Woman - Original Quality.mkv",
+              "1sMis6qi_j3AsBvAEL2mliPRIKf0s3-uI",
               "ram_total < 10",
-              "scripts/dub_billionaire_granny_mounted.py",
-              "Billionaire_Granny_CEO_Checkpoints",
+              "scripts/dub_billionaire_granny_edge_tts.py",
+              "Billionaire_Granny_CEO_Dubbing_Metadata_864_Segments.json",
           ]
           missing = [term for term in required if term not in all_source]
           if missing:
