@@ -2,6 +2,10 @@ name: Colab Arabic dub → GitHub artifact (no Drive mount)
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/dub_billionaire_granny_edge_tts.py"
 
 permissions:
   contents: read
@@ -82,12 +86,47 @@ jobs:
           colab --auth=adc upload -s "$SESSION" scripts/dub_billionaire_granny_edge_tts.py /content/dub_billionaire_granny_edge_tts.py >> output/colab_dub.log 2>&1
           colab --auth=adc upload -s "$SESSION" scripts/colab_run_edge_tts.py /content/colab_run_edge_tts.py >> output/colab_dub.log 2>&1
           colab --auth=adc upload -s "$SESSION" scripts/colab_prepare_transfer.py /content/colab_prepare_transfer.py >> output/colab_dub.log 2>&1
+          colab --auth=adc upload -s "$SESSION" scripts/colab_supervise_edge_tts.py /content/colab_supervise_edge_tts.py >> output/colab_dub.log 2>&1
 
-          echo "Starting the full Arabic multi-speaker TTS pipeline from the shared source URL." | tee -a output/colab_dub.log
+          echo "Starting the full Arabic multi-speaker TTS pipeline in a detached Colab process; status is polled every five minutes." | tee -a output/colab_dub.log
           set +e
-          colab --auth=adc exec -s "$SESSION" --timeout 18000 -f scripts/colab_run_edge_tts.py 2>&1 | tee -a output/colab_dub.log
-          DUB_EXIT=${PIPESTATUS[0]}
+          colab --auth=adc exec -s "$SESSION" --timeout 120 -f scripts/colab_start_edge_tts.py 2>&1 | tee -a output/colab_dub.log
+          START_EXIT=${PIPESTATUS[0]}
           set -e
+          DUB_EXIT=124
+          DUB_FINISHED=0
+          if [ "$START_EXIT" -ne 0 ]; then
+            echo "::error::Could not start the detached Colab dubbing process."
+            DUB_EXIT="$START_EXIT"
+          else
+            for attempt in $(seq 1 64); do
+              set +e
+              POLL_OUTPUT=$(colab --auth=adc exec -s "$SESSION" --timeout 120 -f scripts/colab_poll_edge_tts.py 2>&1)
+              POLL_EXIT=$?
+              set -e
+              printf '%s\n' "$POLL_OUTPUT" | tee -a output/colab_dub.log
+              if grep -q 'COLAB_STATE=COMPLETED' <<<"$POLL_OUTPUT"; then
+                DUB_EXIT=$(printf '%s\n' "$POLL_OUTPUT" | sed -n 's/.*COLAB_EXIT_CODE=\([0-9][0-9]*\).*/\1/p' | tail -n 1)
+                [ -n "$DUB_EXIT" ] || DUB_EXIT=1
+                DUB_FINISHED=1
+                break
+              fi
+              if grep -q 'COLAB_STATE=EXIT_UNKNOWN' <<<"$POLL_OUTPUT"; then
+                DUB_EXIT=1
+                DUB_FINISHED=1
+                break
+              fi
+              if [ "$attempt" -lt 64 ]; then sleep 300; fi
+            done
+          fi
+
+          if [ "$DUB_FINISHED" -eq 0 ]; then
+            echo "::warning::Colab dubbing exceeded the safe polling window; stop the process and export resumable checkpoints."
+            set +e
+            colab --auth=adc exec -s "$SESSION" --timeout 120 -f scripts/colab_stop_runner.py 2>&1 | tee -a output/colab_dub.log
+            set -e
+            DUB_EXIT=124
+          fi
           printf '%s\n' "$DUB_EXIT" > output/dub_exit_code.txt
           echo "DUBBING_EXIT_CODE=$DUB_EXIT" | tee -a output/colab_dub.log
 
