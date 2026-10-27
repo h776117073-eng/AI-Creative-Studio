@@ -56,6 +56,9 @@ jobs:
           SESSION="billionaire-granny-40539268312"
           : > output/colab_monitor.log
           echo "Inspecting existing Colab session only; this workflow will not start or stop it." | tee -a output/colab_monitor.log
+          echo "Listing server-side Colab assignments (works even without this runner's local session metadata)." | tee -a output/colab_monitor.log
+          colab --auth=adc sessions 2>&1 | tee -a output/colab_monitor.log
+          echo "SESSIONS_EXIT=${PIPESTATUS[0]}" >> output/colab_monitor.log
           colab --auth=adc status -s "$SESSION" 2>&1 | tee -a output/colab_monitor.log
           echo "STATUS_EXIT=${PIPESTATUS[0]}" >> output/colab_monitor.log
           mkdir -p output/colab_state
