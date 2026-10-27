@@ -70,11 +70,16 @@ jobs:
           import requests
           from colab_cli.common import state
           s = state.get_session("dubbing-smoke-test")
+          from urllib.parse import urlparse
           params = {"authuser": "0", "colab-runtime-proxy-token": s.token}
+          parsed = urlparse(s.url)
+          port_host = parsed.hostname.replace("8080-", "8765-", 1)
+          port_url = f"{parsed.scheme}://{port_host}/dub_smoke.txt"
           candidates = [
               ("raw_files_route", s.url.rstrip("/") + "/files/dub_smoke.txt", {}),
               ("contents_download_route", s.url.rstrip("/") + "/api/contents/content/dub_smoke.txt", {"download": "1"}),
               ("contents_json_route", s.url.rstrip("/") + "/api/contents/content/dub_smoke.txt", {"content": "1"}),
+              ("port_forward_http", port_url, {}),
           ]
           success = False
           for label, url, extra in candidates:
