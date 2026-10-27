@@ -1,0 +1,228 @@
+name: Colab Arabic dub → GitHub artifact (no Drive mount)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/dub_billionaire_granny_edge_tts.py"
+      - "scripts/colab_run_edge_tts.py"
+      - "scripts/colab_prepare_transfer.py"
+      - ".github/workflows/colab-dub-to-github-artifact.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: billionaire-granny-link-only-dub
+  cancel-in-progress: false
+
+jobs:
+  dub-on-colab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python for official Colab CLI
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install official Google Colab CLI
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade google-colab-cli
+          colab --help
+
+      - name: Configure Colab CLI credentials securely
+        env:
+          COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/gcloud" output/transfer
+          if [ -z "${COLAB_CREDENTIALS:-}" ]; then
+            echo "::error::COLAB_CREDENTIALS is missing."
+            printf '%s\n' "COLAB_CREDENTIALS secret is missing." > output/colab_dub.log
+            exit 1
+          fi
+          python - <<'PY'
+          import json, os, pathlib
+          raw = os.environ["COLAB_CREDENTIALS"]
+          data = json.loads(raw)
+          allowed = {"authorized_user", "service_account", "external_account", "impersonated_service_account"}
+          if data.get("type") not in allowed:
+              raise SystemExit("COLAB_CREDENTIALS is not supported Google ADC JSON; secret contents were not printed.")
+          path = pathlib.Path.home() / ".config/gcloud/application_default_credentials.json"
+          path.write_text(raw, encoding="utf-8")
+          path.chmod(0o600)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write(f"GOOGLE_APPLICATION_CREDENTIALS={path}\n")
+          print("Colab CLI ADC configured; secret contents were not printed.")
+          PY
+
+      - name: Run dubbing on Colab and export chunked files to GitHub Actions
+        timeout-minutes: 345
+        shell: bash
+        run: |
+          set -uo pipefail
+          SESSION="billionaire-granny-${GITHUB_RUN_ID}"
+          mkdir -p output/transfer
+          : > output/colab_dub.log
+          DUB_EXIT=1
+
+          echo "Stopping a stale same-name session if one exists." | tee -a output/colab_dub.log
+          colab --auth=adc stop -s "$SESSION" >> output/colab_dub.log 2>&1 || true
+
+          echo "Allocating a standard Colab runtime (the runner enforces RAM/disk guardrails)." | tee -a output/colab_dub.log
+          if ! COLAB_CLI_ASSIGN_RETRIES=3 COLAB_CLI_RETRY_BACKOFF=15 colab --auth=adc new -s "$SESSION" >> output/colab_dub.log 2>&1; then
+            echo "::error::Colab runtime assignment failed before dubbing started."
+            tail -n 80 output/colab_dub.log
+            exit 1
+          fi
+          colab --auth=adc status -s "$SESSION" >> output/colab_dub.log 2>&1 || true
+
+          echo "Uploading runner scripts only; no Drive mount and no Drive API token are sent to Colab." | tee -a output/colab_dub.log
+          colab --auth=adc upload -s "$SESSION" scripts/dub_billionaire_granny_edge_tts.py /content/dub_billionaire_granny_edge_tts.py >> output/colab_dub.log 2>&1
+          colab --auth=adc upload -s "$SESSION" scripts/colab_run_edge_tts.py /content/colab_run_edge_tts.py >> output/colab_dub.log 2>&1
+          colab --auth=adc upload -s "$SESSION" scripts/colab_prepare_transfer.py /content/colab_prepare_transfer.py >> output/colab_dub.log 2>&1
+
+          echo "Starting the full Arabic multi-speaker TTS pipeline from the shared source URL." | tee -a output/colab_dub.log
+          set +e
+          colab --auth=adc exec -s "$SESSION" --timeout 18000 -f scripts/colab_run_edge_tts.py 2>&1 | tee -a output/colab_dub.log
+          DUB_EXIT=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$DUB_EXIT" > output/dub_exit_code.txt
+          echo "DUBBING_EXIT_CODE=$DUB_EXIT" | tee -a output/colab_dub.log
+
+          echo "Preparing a small-manifest / 128 MiB chunk transfer. This step also exports resumable checkpoints if dubbing failed." | tee -a output/colab_dub.log
+          set +e
+          colab --auth=adc exec -s "$SESSION" --timeout 900 -f scripts/colab_prepare_transfer.py 2>&1 | tee -a output/colab_dub.log
+          EXPORT_EXIT=${PIPESTATUS[0]}
+          set -e
+          echo "TRANSFER_EXPORT_EXIT=$EXPORT_EXIT" | tee -a output/colab_dub.log
+
+          if colab --auth=adc download -s "$SESSION" /content/dub-transfer/transfer_manifest.json output/transfer/transfer_manifest.json >> output/colab_dub.log 2>&1; then
+            python - <<'PY'
+            import json, pathlib
+            manifest_path = pathlib.Path("output/transfer/transfer_manifest.json")
+            m = json.loads(manifest_path.read_text(encoding="utf-8"))
+            files = []
+            if m.get("final_video"):
+                files.extend(m["final_video"].get("parts", []))
+            for item in m.get("sidecars", []):
+                files.append({
+                    "remote_path": item["remote_path"],
+                    "name": item.get("transfer_name") or item["remote_path"].rsplit("/",1)[-1],
+                    "size_bytes": item["size_bytes"],
+                    "sha256": item["sha256"],
+                })
+            for big in m.get("large_files", []):
+                files.extend(big.get("parts", []))
+            with open("output/transfer/download_list.tsv","w",encoding="utf-8") as f:
+                for item in files:
+                    local = pathlib.Path("output/transfer/files") / item["name"]
+                    local.parent.mkdir(parents=True,exist_ok=True)
+                    f.write(item["remote_path"]+"\t"+str(local)+"\n")
+            print(json.dumps({
+                "status": m.get("status"),
+                "final_video_bytes": (m.get("final_video") or {}).get("size_bytes"),
+                "video_parts": len((m.get("final_video") or {}).get("parts",[])),
+                "sidecars": len(m.get("sidecars",[])),
+                "additional_large_files": len(m.get("large_files",[])),
+                "files_to_download": len(files),
+            },ensure_ascii=False))
+            PY
+            while IFS=$'\t' read -r REMOTE_PATH LOCAL_PATH; do
+              [ -n "$REMOTE_PATH" ] || continue
+              mkdir -p "$(dirname "$LOCAL_PATH")"
+              echo "Fetching Colab output: $(basename "$LOCAL_PATH")" | tee -a output/colab_dub.log
+              if ! colab --auth=adc download -s "$SESSION" "$REMOTE_PATH" "$LOCAL_PATH" >> output/colab_dub.log 2>&1; then
+                echo "::error::Failed to retrieve $REMOTE_PATH from Colab."
+                printf '%s\n' "TRANSFER_FAILED: $REMOTE_PATH" >> output/colab_dub.log
+                break
+              fi
+            done < output/transfer/download_list.tsv
+          else
+            echo "::error::Colab did not return a transfer manifest; only workflow logs are available."
+          fi
+
+          python - <<'PY'
+          import hashlib, json, pathlib
+          base = pathlib.Path("output/transfer")
+          manifest_path = base / "transfer_manifest.json"
+          if not manifest_path.is_file():
+              print("No transfer manifest was retrieved.")
+              raise SystemExit(1)
+          m = json.loads(manifest_path.read_text(encoding="utf-8"))
+          failed = []
+          expected = []
+          if m.get("final_video"):
+              expected += m["final_video"].get("parts", [])
+          for side in m.get("sidecars", []):
+              expected.append({
+                  "name": side.get("transfer_name") or side["remote_path"].rsplit("/",1)[-1],
+                  "size_bytes": side["size_bytes"],
+                  "sha256": side["sha256"],
+              })
+          for big in m.get("large_files", []):
+              expected += big.get("parts", [])
+          for item in expected:
+              path = base / "files" / item["name"]
+              if not path.is_file():
+                  failed.append({"name":item["name"],"error":"missing"})
+                  continue
+              h=hashlib.sha256()
+              with path.open("rb") as stream:
+                  for block in iter(lambda: stream.read(8*1024*1024),b""):
+                      h.update(block)
+              if path.stat().st_size != int(item["size_bytes"]) or h.hexdigest()!=item["sha256"]:
+                  failed.append({"name":item["name"],"error":"size/hash mismatch"})
+          check = {
+              "manifest_status": m.get("status"),
+              "expected_files": len(expected),
+              "failed_files": failed,
+              "final_video": m.get("final_video",{}).get("name") if m.get("final_video") else None,
+              "final_size_bytes": m.get("final_video",{}).get("size_bytes") if m.get("final_video") else None,
+              "final_sha256": m.get("final_video",{}).get("sha256") if m.get("final_video") else None,
+          }
+          (base / "transfer_validation.json").write_text(json.dumps(check,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+          print(json.dumps(check,ensure_ascii=False,indent=2))
+          if failed:
+              raise SystemExit(1)
+          PY
+          VALIDATION_EXIT=$?
+          echo "TRANSFER_VALIDATION_EXIT=$VALIDATION_EXIT" | tee -a output/colab_dub.log
+
+          if [ "$DUB_EXIT" -ne 0 ]; then
+            echo "::error::Dubbing did not complete successfully; partial logs/checkpoints are preserved as an artifact when available."
+            exit "$DUB_EXIT"
+          fi
+          if [ "$EXPORT_EXIT" -ne 0 ] || [ "$VALIDATION_EXIT" -ne 0 ]; then
+            echo "::error::Dubbing may have finished, but export/transfer validation failed."
+            exit 1
+          fi
+          echo "COLAB_DUB_AND_TRANSFER=SUCCESS" | tee -a output/colab_dub.log
+
+      - name: Stop Colab runtime to release compute
+        if: always()
+        continue-on-error: true
+        run: |
+          SESSION="billionaire-granny-${GITHUB_RUN_ID}"
+          colab --auth=adc stop -s "$SESSION" || true
+
+      - name: Upload Colab result chunks and reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: billionaire-granny-arabic-dub-${{ github.run_id }}
+          path: |
+            output/transfer/**
+            output/colab_dub.log
+            output/dub_exit_code.txt
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 7
