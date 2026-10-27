@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Memory-bounded Arabic dubbing for Billionaire Granny using a prior time-coded transcript.
 
-Runs inside a real Google Colab runtime after the Drive mount succeeds.
+Runs inside a real Google Colab runtime with no Google Drive mount or authenticated Drive API.
 The source video is downloaded to local Colab disk; translations, resumable TTS
 checkpoints, subtitles, progress, final MP4 and its quality report are saved to
-the mounted Drive. No full video/audio track is loaded into RAM.
+local output folder; no full video/audio track is loaded into RAM.
 """
 from __future__ import annotations
 
@@ -173,7 +173,7 @@ def update_progress(stage: str, **extra) -> None:
         if LOCAL_LOG.is_file():
             copy_stream(LOCAL_LOG, DRIVE_FOLDER / "Billionaire_Granny_CEO_Progress.log", "Local progress log update")
     except Exception as exc:
-        log(f"WARNING: Drive progress sync failed ({type(exc).__name__}); local progress remains available.")
+        log(f"WARNING: local output copy failed ({type(exc).__name__}); local progress remains available.")
 
 
 def run_stream(command: list[str], *, cwd: Path | None = None, env: dict | None = None,
@@ -247,9 +247,9 @@ def download_metadata() -> tuple[dict, list[dict]]:
     ))
     if local_metadata.is_file():
         raw = local_metadata.read_bytes()
-        log(f"Using the existing Drive transcript metadata file: {local_metadata.name} ({len(raw):,} bytes).")
+        log(f"Using the existing local transcript metadata file: {local_metadata.name} ({len(raw):,} bytes).")
     elif METADATA_URL:
-        # The URL is a short-lived, read-only Drive connector URL; never print it.
+        # The URL is a read-only shared download link; never print it.
         log("Fetching the existing transcript metadata from its temporary private download URL.")
         response = requests.get(METADATA_URL, timeout=90)
         response.raise_for_status()
@@ -293,7 +293,7 @@ def ensure_gdown() -> None:
         return
     except Exception:
         pass
-    run_stream([sys.executable, "-m", "pip", "install", "--no-cache-dir", "gdown"], label="Install Google Drive downloader")
+    run_stream([sys.executable, "-m", "pip", "install", "--no-cache-dir", "gdown"], label="Install public-link file downloader")
 
 
 def obtain_source() -> tuple[Path, dict]:
@@ -333,7 +333,7 @@ def obtain_source() -> tuple[Path, dict]:
         run_stream([
             sys.executable, "-m", "gdown", "--fuzzy", "--continue", "--retries", "3",
             SOURCE_URL, "--output", str(part),
-        ], label="Download or resume the shared 2.48 GB Drive video to local Colab disk")
+        ], label="Download or resume the shared 2.48 GB video to local Colab disk")
         if not part.is_file() or part.stat().st_size < 1_000_000_000:
             raise RuntimeError("The Google Drive download is incomplete; the partial file was preserved for resumption.")
         part_info = inspect_candidate(part)
@@ -393,7 +393,7 @@ def translate_segments(segments: list[dict], source_meta: dict) -> list[dict]:
                             segments[i]["emotion"] = row.get("emotion", "")
                             segments[i]["tts_rate"] = row.get("tts_rate", "+0%")
                             segments[i]["tts_pitch"] = row.get("tts_pitch", "+0Hz")
-                    log(f"Restored {sum(bool(s.get('ar_text')) for s in segments)}/{len(segments)} translated segments from Drive.")
+                    log(f"Restored {sum(bool(s.get('ar_text')) for s in segments)}/{len(segments)} translated segments from local checkpoints.")
         except Exception as exc:
             log(f"Existing translation checkpoint could not be read ({type(exc).__name__}); translating missing segments.")
 
@@ -465,7 +465,7 @@ def translate_segments(segments: list[dict], source_meta: dict) -> list[dict]:
         save_translation_checkpoint(segments, source_meta)
         raise RuntimeError(
             f"{sum(not str(s.get('ar_text', '').strip()) for s in segments)} source segments could not be translated. "
-            "The translated segments already saved to Drive can be reused on the next run."
+            "The translated segments already saved in the local checkpoint folder can be reused on a resumed run."
         )
 
     alphabetic = arabic_chars = 0
@@ -879,7 +879,7 @@ def render_and_verify(source: Path, source_info: dict, metadata: dict,
         "status": "AUDIO_DUB_FINAL_VERIFIED",
         "completed_at_utc": now_utc(),
     })
-    # Copy video and small sidecars to the mounted Drive only after local checks pass.
+    # Copy video and small sidecars to the transfer output folder only after local checks pass.
     update_progress("uploading_final_outputs_to_drive", final_size_bytes=LOCAL_FINAL.stat().st_size)
     local_final_copy = OUTPUT_FOLDER / FINAL_NAME
     copy_stream(LOCAL_FINAL, local_final_copy, "Final MP4 into local transfer folder")
@@ -921,7 +921,7 @@ def render_and_verify(source: Path, source_info: dict, metadata: dict,
         "arabic_text_coverage": report["arabic_text_coverage"],
         "ffprobe_stream_check": report["ffprobe_stream_check"],
         "full_ffmpeg_decode": report["full_ffmpeg_decode"],
-        "drive_copy_checksum": report["drive_copy_checksum"],
+        "output_copy_checksum": report["output_copy_checksum"],
         "visual_lip_sync": report["visual_lip_sync"],
     }, ensure_ascii=False, indent=2))
     return report
