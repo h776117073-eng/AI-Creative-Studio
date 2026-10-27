@@ -527,12 +527,12 @@ def checkpoint_new_clips(new_indices: list[int], manifest: dict, batch_no: int) 
 
 
 async def _synth_one(index: int, segment: dict, semaphore: asyncio.Semaphore,
-                     manifest: dict, manifest_lock: asyncio.Lock) -> tuple[int, bool]:
+                     manifest: dict, manifest_lock: asyncio.Lock) -> tuple[int, bool, bool]:
     import edge_tts
 
     arabic_text = str(segment.get("ar_text", "")).strip()
     if not arabic_text:
-        return index, False
+        return index, False, False
     voice = choose_voice(segment)
     rate = str(segment.get("tts_rate", "+0%"))
     pitch = str(segment.get("tts_pitch", "+0Hz"))
@@ -540,7 +540,7 @@ async def _synth_one(index: int, segment: dict, semaphore: asyncio.Semaphore,
     clip = CLIPS_DIR / f"clip_{index + 1:05d}.mp3"
     old = manifest.get("clips", {}).get(str(index))
     if clip.is_file() and clip.stat().st_size > 200 and old and old.get("fingerprint") == fingerprint:
-        return index, True
+        return index, True, False
 
     async with semaphore:
         for attempt in range(4):
@@ -561,13 +561,13 @@ async def _synth_one(index: int, segment: dict, semaphore: asyncio.Semaphore,
                             "pitch": pitch,
                             "bytes": clip.stat().st_size,
                         }
-                    return index, True
+                    return index, True, True
             except Exception as exc:
                 error_type = type(exc).__name__
                 log(f"TTS retry {attempt + 1}/4 for segment {index + 1}: {error_type}.")
             await asyncio.sleep(min(1.5 * (attempt + 1), 6))
             temp.unlink(missing_ok=True)
-    return index, False
+    return index, False, False
 
 
 async def synthesize_all(segments: list[dict], manifest: dict) -> dict:
@@ -579,18 +579,11 @@ async def synthesize_all(segments: list[dict], manifest: dict) -> dict:
     batch_no = 1 + sum(1 for _ in CHECKPOINT_DIR.glob("tts_checkpoint_*.tar.gz"))
     ok_count = 0
     for finished, coro in enumerate(asyncio.as_completed(tasks), 1):
-        index, succeeded = await coro
+        index, succeeded, created_new = await coro
         if succeeded:
             ok_count += 1
-            if manifest.get("clips", {}).get(str(index), {}).get("fingerprint") is not None:
-                local_clip = CLIPS_DIR / f"clip_{index + 1:05d}.mp3"
-                # A restored checkpoint can be present before synthesis. Only archive newly created files
-                # that have not yet been persisted by an earlier checkpoint.
-                if index not in new_indices and not any(
-                    rec.get("sha256") == manifest.get("clips", {}).get(str(index), {}).get("sha256")
-                    for rec in []
-                ):
-                    new_indices.append(index)
+            if created_new and index not in new_indices:
+                new_indices.append(index)
         if finished % 25 == 0 or finished == len(tasks):
             checkpoint_new_clips(new_indices, manifest, batch_no)
             new_indices.clear()
@@ -648,8 +641,8 @@ def render_dub_track(segments: list[dict], duration: float) -> Path:
     if not AUDIO_PATH.is_file():
         run_stream([
             "ffmpeg", "-y", "-v", "error", "-i", str(SOURCE_PATH),
-            "-map", "0:a:0", "-vn", "-af", "pan=mono|c0=0.5*c0+0.5*c1",
-            "-ar", str(SAMPLE_RATE), "-ac", "1", "-c:a", "pcm_s16le", str(AUDIO_PATH),
+            "-map", "0:a:0", "-vn", "-ar", str(SAMPLE_RATE),
+            "-ac", "1", "-c:a", "pcm_s16le", str(AUDIO_PATH),
         ], label="Extract low-memory 24 kHz mono original ambience track")
     bg_info = sf.info(str(AUDIO_PATH))
     total_samples = int(round(float(duration) * SAMPLE_RATE))
