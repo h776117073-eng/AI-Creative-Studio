@@ -7,7 +7,7 @@ on:
     paths:
       - "dub_billionaire_granny_edge_tts.py"
       - "scripts/dub_billionaire_granny_headless.py"
-      - "scripts/dub_billionaire_granny_edge_tts.py"
+              "dub_billionaire_granny_edge_tts.py",
       - "scripts/dub_arabic_multispeaker.py"
       - "scripts/colab_smoke_access.py"
       - "scripts/colab_drive_mount_probe.py"
@@ -33,7 +33,7 @@ jobs:
       - name: Compile dubbing Python scripts without running the model pipeline
         run: |
           set -euo pipefail
-          python -m py_compile scripts/dub_billionaire_granny_mounted.py scripts/dub_billionaire_granny_headless.py scripts/dub_billionaire_granny_edge_tts.py scripts/dub_arabic_multispeaker.py scripts/colab_smoke_access.py scripts/colab_drive_mount_probe.py
+              "dub_billionaire_granny_edge_tts.py",
           echo "Python syntax check passed."
 
       - name: Validate Colab notebook JSON and cell syntax
@@ -58,7 +58,7 @@ jobs:
               "drive.mount('/content/drive')",
               "1sMis6qi_j3AsBvAEL2mliPRIKf0s3-uI",
               "ram_total < 10",
-              "scripts/dub_billionaire_granny_edge_tts.py",
+              "dub_billionaire_granny_edge_tts.py",
               "Billionaire_Granny_CEO_Dubbing_Metadata_864_Segments.json",
           ]
           missing = [term for term in required if term not in all_source]
