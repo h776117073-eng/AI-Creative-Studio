@@ -8,6 +8,9 @@ on:
       - "scripts/dub_billionaire_granny_mounted.py"
       - "scripts/dub_billionaire_granny_headless.py"
       - "scripts/dub_billionaire_granny_edge_tts.py"
+      - "scripts/colab_run_edge_tts.py"
+      - "scripts/colab_prepare_transfer.py"
+      - ".github/workflows/colab-dub-to-github-artifact.yml"
       - "scripts/dub_arabic_multispeaker.py"
       - "scripts/colab_smoke_access.py"
       - "scripts/colab_drive_mount_probe.py"
@@ -37,6 +40,8 @@ jobs:
             scripts/dub_billionaire_granny_mounted.py \
             scripts/dub_billionaire_granny_headless.py \
             scripts/dub_billionaire_granny_edge_tts.py \
+            scripts/colab_run_edge_tts.py \
+            scripts/colab_prepare_transfer.py \
             scripts/dub_arabic_multispeaker.py \
             scripts/colab_smoke_access.py \
             scripts/colab_drive_mount_probe.py
