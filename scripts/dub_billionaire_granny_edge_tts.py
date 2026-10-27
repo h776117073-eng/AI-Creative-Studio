@@ -169,6 +169,8 @@ def update_progress(stage: str, **extra) -> None:
     log(f"STAGE={stage}")
     try:
         copy_stream(LOCAL_PROGRESS, DRIVE_FOLDER / PROGRESS_NAME, "Drive progress update")
+        if LOCAL_LOG.is_file():
+            copy_stream(LOCAL_LOG, DRIVE_FOLDER / "Billionaire_Granny_CEO_Progress.log", "Drive progress log update")
     except Exception as exc:
         log(f"WARNING: Drive progress sync failed ({type(exc).__name__}); local progress remains available.")
 
@@ -1005,6 +1007,8 @@ def main() -> int:
             log(f"ERROR: {type(exc).__name__}: {exc}")
             if DRIVE_ROOT.is_dir():
                 atomic_json(DRIVE_FOLDER / PROGRESS_NAME, error)
+                if LOCAL_LOG.is_file():
+                    copy_stream(LOCAL_LOG, DRIVE_FOLDER / "Billionaire_Granny_CEO_Progress.log", "Drive progress log update after failure")
                 if CHECKPOINT_DIR and CHECKPOINT_DIR.is_dir():
                     atomic_json(CHECKPOINT_DIR / "last_error.json", error)
         except Exception:
