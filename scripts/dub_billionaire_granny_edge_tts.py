@@ -997,7 +997,7 @@ def main() -> int:
             "updated_at_utc": now_utc(),
             "source_sha256": SOURCE_SHA256 or None,
             "metadata_sha256": METADATA_SHA256 or None,
-            "resume_note": "The translated text and completed TTS checkpoint archives are copied to Drive in the checkpoint folder whenever the stage reaches a checkpoint. Rerun the workflow to restore completed work.",
+            "resume_note": "The translated text and completed TTS checkpoint archives are retained in the local Colab output folder for transfer or resumption while this Colab VM survives.",
         }
         try:
             atomic_json(LOCAL_PROGRESS, error)
