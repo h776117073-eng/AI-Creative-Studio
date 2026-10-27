@@ -1,0 +1,99 @@
+name: Monitor current Colab dubbing session
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/colab-monitor-current-dub.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-current-colab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install official Colab CLI
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade google-colab-cli
+
+      - name: Configure ADC without printing credentials
+        env:
+          COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/gcloud" output
+          if [ -z "${COLAB_CREDENTIALS:-}" ]; then
+            echo "::error::COLAB_CREDENTIALS is missing."
+            exit 1
+          fi
+          python - <<'PY'
+          import json, os, pathlib
+          raw = os.environ["COLAB_CREDENTIALS"]
+          obj = json.loads(raw)
+          if obj.get("type") not in {"authorized_user","service_account","external_account","impersonated_service_account"}:
+              raise SystemExit("Unsupported Google ADC JSON; secret contents were not printed.")
+          p = pathlib.Path.home()/".config/gcloud/application_default_credentials.json"
+          p.write_text(raw,encoding="utf-8")
+          p.chmod(0o600)
+          with open(os.environ["GITHUB_ENV"],"a",encoding="utf-8") as f:
+              f.write(f"GOOGLE_APPLICATION_CREDENTIALS={p}\n")
+          print("ADC configured.")
+          PY
+
+      - name: Inspect the existing run-specific Colab session
+        shell: bash
+        run: |
+          set +e
+          SESSION="billionaire-granny-40539268312"
+          : > output/colab_monitor.log
+          echo "Inspecting existing Colab session only; this workflow will not start or stop it." | tee -a output/colab_monitor.log
+          colab --auth=adc status -s "$SESSION" 2>&1 | tee -a output/colab_monitor.log
+          echo "STATUS_EXIT=${PIPESTATUS[0]}" >> output/colab_monitor.log
+          mkdir -p output/colab_state
+          for spec in \
+            "/content/dub-output/Billionaire_Granny_CEO_Progress.json|progress.json" \
+            "/content/dub-output/Billionaire_Granny_CEO_Quality_Report.json|quality_report.json" \
+            "/content/dub-output/Billionaire_Granny_CEO_Progress.log|progress.log" \
+            "/content/billionaire_granny_dubbing/output/progress.json|local_progress.json" \
+            "/content/billionaire_granny_dubbing/output/progress.log|local_progress.log"; do
+            remote="${spec%%|*}"
+            local="${spec#*|}"
+            echo "Attempting read-only download: $remote" | tee -a output/colab_monitor.log
+            colab --auth=adc download -s "$SESSION" "$remote" "output/colab_state/$local" >> output/colab_monitor.log 2>&1
+            rc=$?
+            echo "DOWNLOAD $remote exit=$rc" | tee -a output/colab_monitor.log
+          done
+          python - <<'PY'
+          import json, pathlib
+          root=pathlib.Path("output/colab_state")
+          report={}
+          for name in ("progress.json","local_progress.json","quality_report.json"):
+              p=root/name
+              if p.is_file():
+                  try:
+                      d=json.loads(p.read_text(encoding="utf-8"))
+                      report[name]={k:d.get(k) for k in ("status","stage","updated_at_utc","started_at_utc","segments_total","segments_done","speaker_count","segment_count","final_size_bytes","final_sha256","ffprobe_stream_check","full_ffmpeg_decode") if k in d}
+                  except Exception as e:
+                      report[name]={"read_error":type(e).__name__}
+          (root/"summary.json").write_text(json.dumps(report,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+          print(json.dumps(report,ensure_ascii=False,indent=2))
+          PY
+          exit 0
+
+      - name: Upload monitoring snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: colab-dub-monitor-${{ github.run_id }}
+          path: output/
+          if-no-files-found: warn
+          retention-days: 7
