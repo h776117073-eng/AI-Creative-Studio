@@ -2,12 +2,6 @@ name: Colab Arabic dub → GitHub artifact (no Drive mount)
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - "scripts/dub_billionaire_granny_edge_tts.py"
-      - "scripts/colab_run_edge_tts.py"
-      - "scripts/colab_prepare_transfer.py"
 
 permissions:
   contents: read
