@@ -6,6 +6,11 @@ on:
     paths:
       - ".github/workflows/colab-monitor-current-dub.yml"
   workflow_dispatch:
+    inputs:
+      session_id:
+        description: 'Existing Colab session name to inspect (read-only)'
+        required: false
+        default: billionaire-granny-40594291275
 
 permissions:
   contents: read
@@ -53,7 +58,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          SESSION="billionaire-granny-40539268312"
+          SESSION="${{ github.event.inputs.session_id || 'billionaire-granny-40594291275' }}"
           : > output/colab_monitor.log
           echo "Inspecting existing Colab session only; this workflow will not start or stop it." | tee -a output/colab_monitor.log
           echo "Listing server-side Colab assignments (works even without this runner's local session metadata)." | tee -a output/colab_monitor.log
