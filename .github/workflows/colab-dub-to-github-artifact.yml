@@ -8,7 +8,6 @@ on:
       - "scripts/dub_billionaire_granny_edge_tts.py"
       - "scripts/colab_run_edge_tts.py"
       - "scripts/colab_prepare_transfer.py"
-      - ".github/workflows/colab-dub-to-github-artifact.yml"
 
 permissions:
   contents: read
@@ -150,6 +149,7 @@ jobs:
             echo "::error::Colab did not return a transfer manifest; only workflow logs are available."
           fi
 
+          set +e
           python - <<'PY'
           import hashlib, json, pathlib
           base = pathlib.Path("output/transfer")
@@ -191,10 +191,16 @@ jobs:
           }
           (base / "transfer_validation.json").write_text(json.dumps(check,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
           print(json.dumps(check,ensure_ascii=False,indent=2))
+          if m.get("status") != "FINAL_VERIFIED":
+              failed.append({"name":"final_video","error":"transfer manifest is not FINAL_VERIFIED"})
+          check["failed_files"] = failed
+          (base / "transfer_validation.json").write_text(json.dumps(check,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+          print(json.dumps(check,ensure_ascii=False,indent=2))
           if failed:
               raise SystemExit(1)
           PY
           VALIDATION_EXIT=$?
+          set -e
           echo "TRANSFER_VALIDATION_EXIT=$VALIDATION_EXIT" | tee -a output/colab_dub.log
 
           if [ "$DUB_EXIT" -ne 0 ]; then
