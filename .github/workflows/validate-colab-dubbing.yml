@@ -5,9 +5,9 @@ on:
   push:
     branches: [main]
     paths:
-      - "dub_billionaire_granny_edge_tts.py"
+      - "scripts/dub_billionaire_granny_mounted.py"
       - "scripts/dub_billionaire_granny_headless.py"
-              "dub_billionaire_granny_edge_tts.py",
+      - "scripts/dub_billionaire_granny_edge_tts.py"
       - "scripts/dub_arabic_multispeaker.py"
       - "scripts/colab_smoke_access.py"
       - "scripts/colab_drive_mount_probe.py"
@@ -33,7 +33,13 @@ jobs:
       - name: Compile dubbing Python scripts without running the model pipeline
         run: |
           set -euo pipefail
-              "dub_billionaire_granny_edge_tts.py",
+          python -m py_compile \
+            scripts/dub_billionaire_granny_mounted.py \
+            scripts/dub_billionaire_granny_headless.py \
+            scripts/dub_billionaire_granny_edge_tts.py \
+            scripts/dub_arabic_multispeaker.py \
+            scripts/colab_smoke_access.py \
+            scripts/colab_drive_mount_probe.py
           echo "Python syntax check passed."
 
       - name: Validate Colab notebook JSON and cell syntax
@@ -65,5 +71,5 @@ jobs:
           if missing:
               raise SystemExit("Notebook is missing required safety/execution markers: " + ", ".join(missing))
           print(f"Notebook JSON and {len(code_cells)} Python cells validated.")
-          print("Drive mount, exact source, RAM guard, task runner, and Drive output path verified.")
+          print("Drive mount, source ID, RAM guard, task runner, and transcript metadata path verified.")
           PY
