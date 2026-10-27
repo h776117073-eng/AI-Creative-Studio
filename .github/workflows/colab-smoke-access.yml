@@ -71,24 +71,32 @@ jobs:
           from colab_cli.common import state
           s = state.get_session("dubbing-smoke-test")
           params = {"authuser": "0", "colab-runtime-proxy-token": s.token}
-          url = s.url.rstrip("/") + "/files/dub_smoke.txt"
-          try:
-              response = requests.get(url, params=params, timeout=30)
-              print(f"RAW_FILE_ENDPOINT_STATUS={response.status_code}")
-              if response.status_code == 200 and "COLAB_FILE_STREAM_TEST_OK" in response.text:
-                  print("RAW_FILE_ENDPOINT=PASS")
-                  raise SystemExit(0)
-              print("RAW_FILE_ENDPOINT=UNAVAILABLE; testing Contents API fallback.")
-          except requests.RequestException as exc:
-              print("RAW_FILE_ENDPOINT=UNAVAILABLE:", type(exc).__name__)
-
-          api = s.url.rstrip("/") + "/api/contents/content/dub_smoke.txt"
-          response = requests.get(api, params={**params, "content": "1"}, timeout=30)
-          response.raise_for_status()
-          data = response.json()
-          if data.get("content") != "COLAB_FILE_STREAM_TEST_OK\n":
-              raise SystemExit("Contents API fallback did not return the probe file content.")
-          print("CONTENTS_API_FALLBACK=PASS")
+          candidates = [
+              ("raw_files_route", s.url.rstrip("/") + "/files/dub_smoke.txt", {}),
+              ("contents_download_route", s.url.rstrip("/") + "/api/contents/content/dub_smoke.txt", {"download": "1"}),
+              ("contents_json_route", s.url.rstrip("/") + "/api/contents/content/dub_smoke.txt", {"content": "1"}),
+          ]
+          success = False
+          for label, url, extra in candidates:
+              try:
+                  response = requests.get(url, params={**params, **extra}, timeout=30)
+                  print(f"{label}: status={response.status_code}; content_type={response.headers.get('Content-Type')}; bytes={len(response.content)}")
+                  if response.status_code == 200 and b"COLAB_FILE_STREAM_TEST_OK" in response.content:
+                      if "json" not in response.headers.get("Content-Type", "").lower():
+                          print(f"{label}=RAW_BINARY_PASS")
+                          success = True
+                      else:
+                          try:
+                              data = response.json()
+                              if data.get("content") == "COLAB_FILE_STREAM_TEST_OK\n":
+                                  print(f"{label}=JSON_BASE64_PASS")
+                                  success = True
+                          except Exception:
+                              pass
+              except requests.RequestException as exc:
+                  print(f"{label}: error={type(exc).__name__}")
+          if not success:
+              raise SystemExit("No Colab file-transfer endpoint passed.")
           PY
 
       - name: Upload smoke diagnostics
