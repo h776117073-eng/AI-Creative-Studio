@@ -585,7 +585,7 @@ async def _synth_one(index: int, segment: dict, semaphore: asyncio.Semaphore,
             temp = clip.with_suffix(".mp3.part")
             try:
                 communicator = edge_tts.Communicate(arabic_text, voice, rate=rate, pitch=pitch)
-                await communicator.save(str(temp))
+                await asyncio.wait_for(communicator.save(str(temp)), timeout=45)
                 if temp.is_file() and temp.stat().st_size > 200:
                     os.replace(temp, clip)
                     clip_hash = sha256_file(clip, clip.name)
