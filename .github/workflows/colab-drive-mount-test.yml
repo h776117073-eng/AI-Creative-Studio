@@ -1,0 +1,79 @@
+name: Colab Drive mount authorization test
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/colab-drive-mount-test.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test-drive-mount:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Google Colab CLI
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade google-colab-cli google-auth requests
+
+      - name: Configure ADC without printing the secret
+        env:
+          COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/gcloud" output
+          if [ -z "${COLAB_CREDENTIALS:-}" ]; then
+            echo "::error::COLAB_CREDENTIALS is missing."
+            exit 1
+          fi
+          python - <<'PY'
+          import json, os, pathlib
+          raw = os.environ["COLAB_CREDENTIALS"]
+          data = json.loads(raw)
+          if data.get("type") not in {"authorized_user", "service_account", "external_account", "impersonated_service_account"}:
+              raise SystemExit("Unsupported Google ADC credential type.")
+          path = pathlib.Path.home()/".config/gcloud/application_default_credentials.json"
+          path.write_text(raw, encoding="utf-8")
+          path.chmod(0o600)
+          with open(os.environ["GITHUB_ENV"], "a") as f:
+              f.write(f"GOOGLE_APPLICATION_CREDENTIALS={path}\n")
+          print("ADC configured; secret content was not printed.")
+          PY
+
+      - name: Create Colab session and attempt the official Drive mount flow
+        run: |
+          set -euo pipefail
+          SESSION="drive-mount-smoke"
+          cleanup() { colab --auth=adc stop -s "$SESSION" >> output/drive-mount.log 2>&1 || true; }
+          trap cleanup EXIT
+          colab --auth=adc stop -s "$SESSION" >/dev/null 2>&1 || true
+          COLAB_CLI_ASSIGN_RETRIES=2 COLAB_CLI_RETRY_BACKOFF=10 colab --auth=adc new -s "$SESSION" 2>&1 | tee -a output/drive-mount.log
+          echo "Attempting Colab's Drive credential propagation/mount flow." | tee -a output/drive-mount.log
+          colab --auth=adc drivemount -s "$SESSION" /content/drive 2>&1 | tee -a output/drive-mount.log || true
+          colab --auth=adc exec -s "$SESSION" --timeout 120 -f scripts/colab_drive_mount_probe.py 2>&1 | tee -a output/drive-mount.log
+
+      - name: Print mount result
+        if: always()
+        run: |
+          if [ -f output/drive-mount.log ]; then
+            cat output/drive-mount.log
+          fi
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: colab-drive-mount-${{ github.run_id }}
+          path: output/drive-mount.log
+          if-no-files-found: warn
+          retention-days: 3
