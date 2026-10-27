@@ -6,7 +6,11 @@ on:
     branches: [main]
     paths:
       - "scripts/dub_billionaire_granny_mounted.py"
+      - "scripts/dub_billionaire_granny_headless.py"
+      - "scripts/dub_billionaire_granny_edge_tts.py"
       - "scripts/dub_arabic_multispeaker.py"
+      - "scripts/colab_smoke_access.py"
+      - "scripts/colab_drive_mount_probe.py"
       - "notebooks/billionaire_granny_arabic_dubbing.ipynb"
       - ".github/workflows/validate-colab-dubbing.yml"
 
@@ -29,7 +33,7 @@ jobs:
       - name: Compile dubbing Python scripts without running the model pipeline
         run: |
           set -euo pipefail
-          python -m py_compile scripts/dub_billionaire_granny_mounted.py scripts/dub_arabic_multispeaker.py
+          python -m py_compile scripts/dub_billionaire_granny_mounted.py scripts/dub_billionaire_granny_headless.py scripts/dub_billionaire_granny_edge_tts.py scripts/dub_arabic_multispeaker.py scripts/colab_smoke_access.py scripts/colab_drive_mount_probe.py
           echo "Python syntax check passed."
 
       - name: Validate Colab notebook JSON and cell syntax
