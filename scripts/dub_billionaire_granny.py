@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Drive-API-backed, resumable multi-speaker Arabic dubbing on a remote Colab VM.
 
+GitHub Actions integration: retrieve verified output files after the Colab run for artifact inspection.
+
 The runner transfers a short-lived ADC credential file to the ephemeral VM.
 Google Drive is accessed via Drive API (no interactive drive.mount prompt).
 Source video and output audio are streamed to disk in bounded chunks. Completed
