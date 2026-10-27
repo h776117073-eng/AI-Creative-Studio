@@ -5,7 +5,7 @@ on:
   push:
     branches: [main]
     paths:
-      - "scripts/dub_billionaire_granny_edge_tts.py"
+      - "dub_billionaire_granny_edge_tts.py"
       - "scripts/dub_billionaire_granny_headless.py"
       - "scripts/dub_billionaire_granny_edge_tts.py"
       - "scripts/dub_arabic_multispeaker.py"
