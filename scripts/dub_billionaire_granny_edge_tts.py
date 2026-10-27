@@ -301,26 +301,53 @@ def obtain_source() -> tuple[Path, dict]:
     global SOURCE_SHA256
     update_progress("downloading_source_video")
     WORK_ROOT.mkdir(parents=True, exist_ok=True)
-    if not SOURCE_PATH.is_file() or SOURCE_PATH.stat().st_size < 1_000_000_000:
+
+    def inspect_candidate(candidate: Path) -> dict | None:
+        if not candidate.is_file() or candidate.stat().st_size < 1_000_000_000:
+            return None
+        check = subprocess.run([
+            "ffprobe", "-v", "error", "-show_entries",
+            "format=duration,size,format_name:stream=codec_type,codec_name,width,height",
+            "-of", "json", str(candidate),
+        ], capture_output=True, text=True, errors="replace")
+        if check.returncode:
+            return None
+        try:
+            details = json.loads(check.stdout)
+            media_streams = details.get("streams", [])
+            duration_value = float((details.get("format") or {}).get("duration") or 0)
+            if duration_value < 7000:
+                return None
+            if not any(s.get("codec_type") == "video" for s in media_streams):
+                return None
+            if not any(s.get("codec_type") == "audio" for s in media_streams):
+                return None
+            return details
+        except Exception:
+            return None
+
+    # Keep resumable .part files so gdown can continue after a network/Colab interruption.
+    source_info = inspect_candidate(SOURCE_PATH)
+    if source_info is None:
         ensure_gdown()
         part = SOURCE_PATH.with_suffix(".mkv.part")
-        part.unlink(missing_ok=True)
         run_stream([
-            sys.executable, "-m", "gdown", "--fuzzy", "--continue",
+            sys.executable, "-m", "gdown", "--fuzzy", "--continue", "--retries", "3",
             SOURCE_URL, "--output", str(part),
-        ], label="Download the shared Drive source video to local Colab disk")
+        ], label="Download or resume the shared 2.48 GB Drive video to local Colab disk")
         if not part.is_file() or part.stat().st_size < 1_000_000_000:
-            raise RuntimeError("The Google Drive download appears incomplete or smaller than expected.")
+            raise RuntimeError("The Google Drive download is incomplete; the partial file was preserved for resumption.")
+        part_info = inspect_candidate(part)
+        if part_info is None:
+            raise RuntimeError("The downloaded source failed duration/stream validation; the .part file was preserved for resumption.")
         os.replace(part, SOURCE_PATH)
+        source_info = part_info
+
     source_size = SOURCE_PATH.stat().st_size
-    if source_size < 1_000_000_000:
-        raise RuntimeError(f"Unexpected source file size: {source_size:,} bytes.")
+    if source_info is None:
+        raise RuntimeError("The source video could not be validated.")
     SOURCE_SHA256 = sha256_file(SOURCE_PATH, "source video")
-    info = probe_json([
-        "ffprobe", "-v", "error", "-show_entries",
-        "format=duration,size,format_name:stream=codec_type,codec_name,width,height",
-        "-of", "json", str(SOURCE_PATH),
-    ], "Validate the downloaded source")
+    info = source_info
     streams = info.get("streams", [])
     duration = float((info.get("format") or {}).get("duration") or 0)
     if duration < 7000 or not any(s.get("codec_type") == "video" for s in streams) or not any(s.get("codec_type") == "audio" for s in streams):
@@ -584,7 +611,7 @@ async def _synth_one(index: int, segment: dict, semaphore: asyncio.Semaphore,
 
 async def synthesize_all(segments: list[dict], manifest: dict) -> dict:
     update_progress("synthesizing_arabic_voice_segments", segments=len(segments))
-    semaphore = asyncio.Semaphore(12)
+    # Conservative concurrency reduces throttling and keeps memory use predictable.\n    semaphore = asyncio.Semaphore(6)
     manifest_lock = asyncio.Lock()
     tasks = [_synth_one(i, seg, semaphore, manifest, manifest_lock) for i, seg in enumerate(segments)]
     new_indices = []
