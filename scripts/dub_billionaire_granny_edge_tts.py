@@ -250,10 +250,52 @@ def download_metadata() -> tuple[dict, list[dict]]:
         log(f"Using the existing local transcript metadata file: {local_metadata.name} ({len(raw):,} bytes).")
     elif METADATA_URL:
         # The URL is a read-only shared download link; never print it.
-        log("Fetching the existing transcript metadata from its temporary private download URL.")
-        response = requests.get(METADATA_URL, timeout=90)
-        response.raise_for_status()
-        raw = response.content
+        # Bound total transfer time as well as per-socket inactivity. A slow or
+        # expired link must fail clearly rather than stall the Colab VM for hours.
+        log("Fetching prior transcript metadata with a 180-second hard deadline.")
+        raw_parts = []
+        total_bytes = 0
+        deadline = time.monotonic() + 180
+        last_progress = time.monotonic()
+        last_error = None
+        for attempt in range(1, 4):
+            raw_parts = []
+            total_bytes = 0
+            try:
+                with requests.get(
+                    METADATA_URL,
+                    timeout=(10, 20),
+                    stream=True,
+                    allow_redirects=True,
+                ) as response:
+                    response.raise_for_status()
+                    for block in response.iter_content(chunk_size=256 * 1024):
+                        if time.monotonic() > deadline:
+                            raise TimeoutError("Metadata download exceeded its 180-second hard deadline.")
+                        if not block:
+                            continue
+                        total_bytes += len(block)
+                        if total_bytes > 10_000_000:
+                            raise RuntimeError("Metadata download exceeded the 10 MB safety limit.")
+                        raw_parts.append(block)
+                        if time.monotonic() - last_progress >= 10:
+                            log(f"Metadata download progress: {total_bytes:,} bytes (attempt {attempt}/3).")
+                            last_progress = time.monotonic()
+                raw = b"".join(raw_parts)
+                if not raw:
+                    raise RuntimeError("Metadata URL returned an empty response.")
+                log(f"Downloaded {len(raw):,} bytes of transcript metadata.")
+                break
+            except Exception as exc:
+                last_error = exc
+                log(f"Metadata download attempt {attempt}/3 failed: {type(exc).__name__}: {exc}")
+                if attempt < 3:
+                    time.sleep(3 * attempt)
+        else:
+            raise RuntimeError(
+                "Could not download prior transcript metadata after 3 bounded attempts. "
+                "Check the METADATA_URL secret/shared link; no source video processing was started."
+            ) from last_error
     else:
         raise FileNotFoundError(
             f"Transcript metadata not found at {local_metadata} and METADATA_URL is not configured."
