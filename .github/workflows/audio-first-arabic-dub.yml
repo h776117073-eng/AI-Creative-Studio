@@ -6,6 +6,7 @@ on:
     branches: [main]
     paths:
       - "scripts/audio_first_dub.py"
+      - "scripts/colab_prepare_transfer.py"
       - ".github/workflows/audio-first-arabic-dub.yml"
 
 permissions:
