@@ -100,13 +100,17 @@ def main():
             report = json.loads(report_path.read_text(encoding="utf-8"))
         except Exception:
             report = {}
+    checks = report.get("checks") or {}
+    report_size_matches = report.get("final_size_bytes") == final_path.stat().st_size if final_path.is_file() else False
+    report_hash_matches = report.get("final_sha256") == sha256_path(final_path) if final_path.is_file() else False
     final_verified = (
         final_path.is_file()
-        and final_path.stat().st_size > 1_000_000_000
+        and final_path.stat().st_size > 100_000_000
         and report.get("status") == "AUDIO_DUB_FINAL_VERIFIED"
-        and report.get("ffprobe_stream_check") == "passed"
-        and report.get("full_ffmpeg_decode") == "passed"
-        and report.get("output_copy_checksum") == "passed"
+        and report_size_matches
+        and report_hash_matches
+        and (report.get("ffprobe_stream_check") == "passed" or checks.get("ffprobe_stream_check") == "passed")
+        and (report.get("full_ffmpeg_decode") == "passed" or checks.get("full_ffmpeg_decode") == "passed")
     )
 
     if final_verified:
@@ -136,8 +140,8 @@ def main():
     manifest = {
         "schema": 1,
         "status": status,
-        "source_file_id": "1sMis6qi_j3AsBvAEL2mliPRIKf0s3-uI",
-        "source_url": "https://drive.google.com/file/d/1sMis6qi_j3AsBvAEL2mliPRIKf0s3-uI/view?usp=drivesdk",
+        "source_file_id": "youtube:XuuU73TYTLY",
+        "source_url": "https://youtu.be/XuuU73TYTLY",
         "created_at_utc": utc_now(),
         "chunk_size_bytes": CHUNK_SIZE,
         "final_video": final_record,
