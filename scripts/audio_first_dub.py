@@ -245,12 +245,21 @@ async def make_tts(text, voice, output, rate):
 
 def translate(source_text, source_language):
     from deep_translator import GoogleTranslator
-    src=source_language if source_language else 'auto'; last=None
-    for attempt in range(3):
-        try: return GoogleTranslator(source=src,target='ar').translate(source_text) or ''
-        except Exception as e: last=e; time.sleep(attempt+1)
-    try: return GoogleTranslator(source='auto',target='ar').translate(source_text) or ''
-    except Exception as e: raise RuntimeError(f'Arabic translation failed: {type(e).__name__}: {e}') from last
+    raw=str(source_language or 'auto').strip().lower()
+    # Whisper uses ISO tags such as "zh"; GoogleTranslator expects regional codes for Chinese.
+    lang_map={'zh':'zh-CN','zh-cn':'zh-CN','zh-hans':'zh-CN','zh-tw':'zh-TW','zh-hant':'zh-TW','pt':'pt','auto':'auto'}
+    src=lang_map.get(raw, raw)
+    last=None
+    # Try the detected source language quickly; if the service rejects that code, fall back to auto.
+    for candidate in dict.fromkeys([src, 'auto']):
+        for attempt in range(2):
+            try:
+                result=GoogleTranslator(source=candidate,target='ar').translate(source_text)
+                if result and result.strip(): return result.strip()
+            except Exception as exc:
+                last=exc
+                if attempt == 0: time.sleep(0.5)
+    raise RuntimeError(f'Arabic translation failed for detected language {raw!r}: {type(last).__name__}: {last}')
 
 def dub_chunks(chunks, segments, speaker_info):
     from pydub import AudioSegment
@@ -284,9 +293,12 @@ def dub_chunks(chunks, segments, speaker_info):
                 fixed=tmp/f'seg_{j:05d}_fit.wav'
                 run(['ffmpeg','-y','-v','error','-i',str(mp3),'-filter:a',f'atempo={tempo:.4f}','-ar',str(canvas.frame_rate),'-ac',str(canvas.channels),str(fixed)],f'Fit Arabic clip {ci}:{j}')
                 clip=AudioSegment.from_file(str(fixed)).set_frame_rate(canvas.frame_rate).set_channels(canvas.channels)
+            # Do not let an overlong TTS phrase extend a 10-minute chunk and shift every later chunk.
+            slot_ms=max(1,int(duration_slot*1000))
+            if len(clip)>slot_ms: clip=clip[:slot_ms]
             if int(start*1000)<len(canvas): canvas=canvas.overlay(clip+3,position=int(start*1000))
-            s['arabic_word_timings']=[{'text':w['text'],'start':round(start+float(w['offset_seconds'])/tempo,3),'end':round(start+(float(w['offset_seconds'])+float(w['duration_seconds']))/tempo,3)} for w in words]
-            s['tts_duration_seconds']=round(actual,3); s['applied_atempo']=round(tempo,3)
+            s['arabic_word_timings']=[{'text':w['text'],'start':round(start+min(duration_slot,float(w['offset_seconds'])/tempo),3),'end':round(start+min(duration_slot,(float(w['offset_seconds'])+float(w['duration_seconds']))/tempo),3)} for w in words]
+            s['tts_duration_seconds']=round(actual,3); s['rendered_duration_seconds']=round(len(clip)/1000,3); s['applied_atempo']=round(tempo,3)
             if j%10==0: atomic_json(data_path,data)
         canvas.export(str(destination),format='ipod',bitrate='256k')
         atomic_json(data_path,data); shutil.rmtree(tmp,ignore_errors=True)
