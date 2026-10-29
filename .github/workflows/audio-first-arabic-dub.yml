@@ -1,0 +1,233 @@
+name: Audio-first Arabic dubbing on Colab T4
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/audio_first_dub.py"
+      - "scripts/colab_audio_first_start.py"
+      - ".github/workflows/audio-first-arabic-dub.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audio-first-arabic-dub
+  cancel-in-progress: false
+
+jobs:
+  audio-first-dubbing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Colab CLI
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade google-colab-cli
+          colab --help
+
+      - name: Configure Colab credentials
+        env:
+          COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/gcloud" output/transfer
+          if [ -z "${COLAB_CREDENTIALS:-}" ]; then
+            echo "::error::COLAB_CREDENTIALS is missing."
+            echo "COLAB_CREDENTIALS secret is missing." > output/colab_dub.log
+            exit 1
+          fi
+          python - <<'PY'
+          import json, os, pathlib
+          raw = os.environ["COLAB_CREDENTIALS"]
+          obj = json.loads(raw)
+          allowed = {"authorized_user", "service_account", "external_account", "impersonated_service_account"}
+          if obj.get("type") not in allowed:
+              raise SystemExit("Unsupported Google ADC JSON type; secret content was not printed.")
+          p = pathlib.Path.home()/".config/gcloud/application_default_credentials.json"
+          p.write_text(raw, encoding="utf-8")
+          p.chmod(0o600)
+          with open(os.environ["GITHUB_ENV"],"a",encoding="utf-8") as f:
+              f.write(f"GOOGLE_APPLICATION_CREDENTIALS={p}\n")
+          print("Colab CLI credentials configured without exposing secret values.")
+          PY
+
+      - name: Run audio-first dubbing and export checkpoints
+        timeout-minutes: 340
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p output/transfer
+          : > output/colab_dub.log
+          SESSION="audio-first-arabic-${GITHUB_RUN_ID}"
+          DUB_EXIT=1
+          EXPORT_EXIT=1
+
+          echo "Requesting Colab T4 GPU explicitly." | tee -a output/colab_dub.log
+          colab --auth=adc stop -s "$SESSION" >> output/colab_dub.log 2>&1 || true
+          if ! COLAB_CLI_ASSIGN_RETRIES=3 COLAB_CLI_RETRY_BACKOFF=15 colab --auth=adc new -s "$SESSION" --gpu T4 >> output/colab_dub.log 2>&1; then
+            echo "::error::Could not allocate a Colab T4 runtime. No CPU fallback will be used."
+            tail -n 80 output/colab_dub.log
+            exit 1
+          fi
+          colab --auth=adc status -s "$SESSION" 2>&1 | tee -a output/colab_dub.log
+
+          for pair in \
+            "scripts/audio_first_dub.py:/content/audio_first_dub.py" \
+            "scripts/colab_audio_first_start.py:/content/colab_audio_first_start.py" \
+            "scripts/colab_audio_first_supervisor.py:/content/colab_audio_first_supervisor.py" \
+            "scripts/colab_audio_first_poll.py:/content/colab_audio_first_poll.py" \
+            "scripts/colab_audio_first_stop_request.py:/content/colab_audio_first_stop_request.py" \
+            "scripts/colab_prepare_transfer.py:/content/colab_prepare_transfer.py"; do
+            LOCAL="${pair%%:*}"
+            REMOTE="${pair#*:}"
+            colab --auth=adc upload -s "$SESSION" "$LOCAL" "$REMOTE" >> output/colab_dub.log 2>&1 || exit 1
+          done
+
+          echo "Install models/dependencies and start the detached audio pipeline." | tee -a output/colab_dub.log
+          if ! colab --auth=adc exec -s "$SESSION" --timeout 1800 -f scripts/colab_audio_first_start.py 2>&1 | tee -a output/colab_dub.log; then
+            echo "::error::Audio-first pipeline failed to bootstrap/start."
+            DUB_EXIT=1
+          else
+            DUB_EXIT=124
+            DONE=0
+            # Poll for up to 250 minutes. Poll output is bounded; no log file is ever copied into itself.
+            for attempt in $(seq 1 50); do
+              POLL="$(colab --auth=adc exec -s "$SESSION" --timeout 120 -f scripts/colab_audio_first_poll.py 2>&1)"
+              printf '%s\n' "$POLL" | tee -a output/colab_dub.log
+              if grep -q 'COLAB_AUDIO_STATE=COMPLETED' <<<"$POLL"; then
+                DUB_EXIT="$(sed -n 's/.*COLAB_AUDIO_EXIT_CODE=\([0-9][0-9]*\).*/\1/p' <<<"$POLL" | tail -n 1)"
+                [ -n "$DUB_EXIT" ] || DUB_EXIT=1
+                DONE=1
+                break
+              fi
+              sleep 300
+            done
+
+            if [ "$DONE" -eq 0 ]; then
+              echo "Processing has not exited within the main window; requesting a safe stop at the next checkpoint boundary." | tee -a output/colab_dub.log
+              colab --auth=adc exec -s "$SESSION" --timeout 120 -f scripts/colab_audio_first_stop_request.py 2>&1 | tee -a output/colab_dub.log || true
+              for attempt in $(seq 1 30); do
+                POLL="$(colab --auth=adc exec -s "$SESSION" --timeout 120 -f scripts/colab_audio_first_poll.py 2>&1)"
+                printf '%s\n' "$POLL" | tee -a output/colab_dub.log
+                if grep -q 'COLAB_AUDIO_STATE=COMPLETED' <<<"$POLL"; then
+                  DUB_EXIT="$(sed -n 's/.*COLAB_AUDIO_EXIT_CODE=\([0-9][0-9]*\).*/\1/p' <<<"$POLL" | tail -n 1)"
+                  [ -n "$DUB_EXIT" ] || DUB_EXIT=1
+                  DONE=1
+                  break
+                fi
+                sleep 60
+              done
+            fi
+          fi
+
+          printf '%s\n' "$DUB_EXIT" > output/dub_exit_code.txt
+          echo "AUDIO_FIRST_EXIT_CODE=$DUB_EXIT" | tee -a output/colab_dub.log
+          echo "Preparing manifest and exporting final output or partial checkpoints." | tee -a output/colab_dub.log
+          set +e
+          colab --auth=adc exec -s "$SESSION" --timeout 1800 -f scripts/colab_prepare_transfer.py 2>&1 | tee -a output/colab_dub.log
+          EXPORT_EXIT=${PIPESTATUS[0]}
+          set -e
+          echo "TRANSFER_EXPORT_EXIT=$EXPORT_EXIT" | tee -a output/colab_dub.log
+
+          if colab --auth=adc download -s "$SESSION" /content/dub-transfer/transfer_manifest.json output/transfer/transfer_manifest.json >> output/colab_dub.log 2>&1; then
+            python - <<'PY'
+          import json, pathlib
+          m=json.loads(pathlib.Path("output/transfer/transfer_manifest.json").read_text(encoding="utf-8"))
+          files=[]
+          if m.get("final_video"): files.extend(m["final_video"].get("parts",[]))
+          for item in m.get("sidecars",[]):
+              files.append({"remote_path":item["remote_path"],"name":item.get("transfer_name") or item["remote_path"].rsplit("/",1)[-1],"size_bytes":item["size_bytes"],"sha256":item["sha256"]})
+          for item in m.get("large_files",[]): files.extend(item.get("parts",[]))
+          base=pathlib.Path("output/transfer/files")
+          with open("output/transfer/download_list.tsv","w",encoding="utf-8") as f:
+              for item in files:
+                  p=base/item["name"]; p.parent.mkdir(parents=True,exist_ok=True)
+                  f.write(item["remote_path"]+"\t"+str(p)+"\n")
+          print(json.dumps({"transfer_status":m.get("status"),"video_parts":len((m.get("final_video") or {}).get("parts",[])),"sidecars":len(m.get("sidecars",[])),"large_files":len(m.get("large_files",[])),"downloads":len(files)},ensure_ascii=False))
+          PY
+            while IFS=$'\t' read -r REMOTE_PATH LOCAL_PATH; do
+              [ -n "$REMOTE_PATH" ] || continue
+              mkdir -p "$(dirname "$LOCAL_PATH")"
+              echo "Downloading checkpoint/output: $(basename "$LOCAL_PATH")" | tee -a output/colab_dub.log
+              if ! colab --auth=adc download -s "$SESSION" "$REMOTE_PATH" "$LOCAL_PATH" >> output/colab_dub.log 2>&1; then
+                echo "::error::Could not retrieve $REMOTE_PATH from Colab."
+                printf '%s\n' "TRANSFER_FAILED: $REMOTE_PATH" >> output/colab_dub.log
+                break
+              fi
+            done < output/transfer/download_list.tsv
+
+            python - <<'PY'
+          import hashlib,json,pathlib
+          b=pathlib.Path("output/transfer"); mp=b/"transfer_manifest.json"; m=json.loads(mp.read_text(encoding="utf-8"))
+          expected=[]
+          if m.get("final_video"): expected.extend(m["final_video"].get("parts",[]))
+          for side in m.get("sidecars",[]):
+              expected.append({"name":side.get("transfer_name") or side["remote_path"].rsplit("/",1)[-1],"size_bytes":side["size_bytes"],"sha256":side["sha256"]})
+          for big in m.get("large_files",[]): expected.extend(big.get("parts",[]))
+          failed=[]
+          for item in expected:
+              p=b/"files"/item["name"]
+              if not p.is_file(): failed.append({"name":item["name"],"reason":"missing"}); continue
+              h=hashlib.sha256()
+              with p.open("rb") as f:
+                  for chunk in iter(lambda:f.read(8*1024*1024),b""): h.update(chunk)
+              if p.stat().st_size!=int(item["size_bytes"]) or h.hexdigest()!=item["sha256"]: failed.append({"name":item["name"],"reason":"size/hash mismatch"})
+          if m.get("status")=="FINAL_VERIFIED" and not failed:
+              final=m["final_video"]; out=pathlib.Path("output/Billionaire_Granny_CEO_Full_Arabic_Dub.mp4")
+              with out.open("wb") as w:
+                  for part in final["parts"]:
+                      with (b/"files"/part["name"]).open("rb") as r:
+                          for chunk in iter(lambda:r.read(8*1024*1024),b""): w.write(chunk)
+              h=hashlib.sha256()
+              with out.open("rb") as f:
+                  for chunk in iter(lambda:f.read(8*1024*1024),b""): h.update(chunk)
+              if out.stat().st_size!=final["size_bytes"] or h.hexdigest()!=final["sha256"]: failed.append({"name":out.name,"reason":"reconstructed final size/hash mismatch"})
+          validation={"manifest_status":m.get("status"),"expected_files":len(expected),"failed_files":failed,"final_reconstructed":pathlib.Path("output/Billionaire_Granny_CEO_Full_Arabic_Dub.mp4").is_file()}
+          (b/"transfer_validation.json").write_text(json.dumps(validation,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+          print(json.dumps(validation,ensure_ascii=False,indent=2))
+          if failed: raise SystemExit(1)
+          if m.get("status")!="FINAL_VERIFIED": raise SystemExit(2)
+          PY
+            VALIDATION_EXIT=$?
+          else
+            echo "::error::Transfer manifest could not be downloaded; no final file can be verified."
+            VALIDATION_EXIT=1
+          fi
+          set -e
+          echo "TRANSFER_VALIDATION_EXIT=$VALIDATION_EXIT" | tee -a output/colab_dub.log
+          if [ "$DUB_EXIT" -ne 0 ] || [ "$EXPORT_EXIT" -ne 0 ] || [ "$VALIDATION_EXIT" -ne 0 ]; then
+            echo "::error::Audio-first run did not produce a verified final artifact. Available checkpoints/logs are still uploaded."
+            exit 1
+          fi
+          echo "AUDIO_FIRST_DUB_AND_TRANSFER=SUCCESS" | tee -a output/colab_dub.log
+
+      - name: Stop Colab runtime
+        if: always()
+        continue-on-error: true
+        run: |
+          SESSION="audio-first-arabic-${GITHUB_RUN_ID}"
+          colab --auth=adc stop -s "$SESSION" || true
+
+      - name: Upload final video, reports, translations and checkpoints
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: audio-first-arabic-dub-${{ github.run_id }}
+          path: |
+            output/Billionaire_Granny_CEO_Full_Arabic_Dub.mp4
+            output/transfer/**
+            output/colab_dub.log
+            output/dub_exit_code.txt
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14
