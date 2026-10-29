@@ -108,7 +108,7 @@ def atomic_json(path: Path, payload) -> None:
     os.replace(tmp, path)
 
 
-def copy_stream(src: Path, dst: Path, label: str) -> None:
+def copy_stream(src: Path, dst: Path, label: str, *, report_progress: bool = True) -> None:
     """Stream copies in fixed-size blocks; do not materialize large files in RAM."""
     dst.parent.mkdir(parents=True, exist_ok=True)
     temp = dst.with_name(dst.name + ".part")
@@ -121,7 +121,7 @@ def copy_stream(src: Path, dst: Path, label: str) -> None:
                 break
             writer.write(block)
             moved += len(block)
-            if moved >= total or moved % (512 * 1024 * 1024) < len(block):
+            if report_progress and (moved >= total or moved % (512 * 1024 * 1024) < len(block)):
                 log(f"{label}: {moved / max(total, 1) * 100:.1f}% ({moved:,}/{total:,} bytes)")
         writer.flush()
         os.fsync(writer.fileno())
@@ -171,7 +171,7 @@ def update_progress(stage: str, **extra) -> None:
     try:
         copy_stream(LOCAL_PROGRESS, DRIVE_FOLDER / PROGRESS_NAME, "Local progress update")
         if LOCAL_LOG.is_file():
-            copy_stream(LOCAL_LOG, DRIVE_FOLDER / "Billionaire_Granny_CEO_Progress.log", "Local progress log update")
+            copy_stream(LOCAL_LOG, DRIVE_FOLDER / "Billionaire_Granny_CEO_Progress.log", "Local progress log update", report_progress=False)
     except Exception as exc:
         log(f"WARNING: local output copy failed ({type(exc).__name__}); local progress remains available.")
 
