@@ -118,10 +118,16 @@ def main():
         for item in sorted(OUT.iterdir()):
             if item.is_file() and item.name != FINAL_NAME:
                 include_files.append(item)
-        # The successful final video is split into pieces so the Colab CLI never has to
-        # materialize a 2.5 GB base64 response in one request.
+        # Split every large output, not only the MP4. The full-length Arabic audio
+        # track may itself exceed a single Colab CLI transfer request.
         final_record = chunk_file(final_path, FINAL_NAME, is_final=True)
-        sidecars = [copy_sidecar(item, item.name) for item in include_files]
+        sidecars = []
+        large_files = []
+        for item in include_files:
+            if item.stat().st_size > CHUNK_SIZE:
+                large_files.append(chunk_file(item, item.name, is_final=False))
+            else:
+                sidecars.append(copy_sidecar(item, item.name))
         status = "FINAL_VERIFIED"
     else:
         final_record = None
@@ -146,7 +152,7 @@ def main():
         "chunk_size_bytes": CHUNK_SIZE,
         "final_video": final_record,
         "sidecars": sidecars,
-        "large_files": large_files if not final_verified else [],
+        "large_files": large_files,
         "expected_full_dub_status": "AUDIO_DUB_FINAL_VERIFIED",
         "no_drive_mount_used": True,
     }
