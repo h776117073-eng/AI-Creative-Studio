@@ -1,0 +1,126 @@
+name: Arabic Episode Repair — Colab T4
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "automation/episode_repair_20261031/runner.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arabic-episode-repair-20261031
+  cancel-in-progress: false
+
+jobs:
+  repair-on-colab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout repair runner
+        uses: actions/checkout@v4
+
+      - name: Set up Python for Colab CLI
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install official Google Colab CLI
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade google-colab-cli google-auth
+          colab version
+          colab new --help
+          colab exec --help
+
+      - name: Configure Google ADC securely
+        env:
+          COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/gcloud" output
+          if [ -z "${COLAB_CREDENTIALS:-}" ]; then
+            echo "::error::COLAB_CREDENTIALS secret is missing."
+            exit 1
+          fi
+          python - <<'PY'
+          import json, os, pathlib, sys
+          raw = os.environ["COLAB_CREDENTIALS"]
+          try:
+              obj = json.loads(raw)
+              if obj.get("type") not in {"authorized_user","service_account","external_account","impersonated_service_account"}:
+                  raise ValueError("Unsupported Google ADC credential type")
+          except Exception as exc:
+              print(f"Invalid ADC credentials: {type(exc).__name__}")
+              sys.exit(1)
+          p = pathlib.Path.home()/".config/gcloud/application_default_credentials.json"
+          p.write_text(raw, encoding="utf-8")
+          p.chmod(0o600)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
+              f.write(f"GOOGLE_APPLICATION_CREDENTIALS={p}\n")
+          print(f"ADC configured (type={obj.get('type')}); secret content withheld.")
+          PY
+
+      - name: Open a NEW Colab T4 session
+        id: colab
+        shell: bash
+        run: |
+          set -euo pipefail
+          SESSION="arabic-episode-repair-${GITHUB_RUN_ID}"
+          echo "SESSION=$SESSION" >> "$GITHUB_ENV"
+          : > output/colab_session.log
+          colab --auth=adc new -s "$SESSION" --gpu T4 2>&1 | tee -a output/colab_session.log
+          colab --auth=adc status -s "$SESSION" 2>&1 | tee output/colab_runtime_status.txt
+          echo "A new T4 session was requested. The remote runner will independently verify CUDA and the exact GPU model."
+
+      - name: Transfer credentials and execute the repair runner
+        timeout-minutes: 330
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output/colab_return
+          colab --auth=adc exec -s "$SESSION" --timeout 300 -f <(printf '%s\n' 'from pathlib import Path; Path("/content/.private").mkdir(parents=True, exist_ok=True); print("PRIVATE_DIR_READY")') 2>&1 | tee -a output/colab_session.log
+          colab --auth=adc upload -s "$SESSION" "$GOOGLE_APPLICATION_CREDENTIALS" /content/.private/google_adc.json 2>&1 | tee -a output/colab_session.log
+          colab --auth=adc exec -s "$SESSION" --timeout 14400 -f automation/episode_repair_20261031/runner.py 2>&1 | tee output/colab_execution.log
+
+      - name: Retrieve audit and QA files from Colab
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          mkdir -p output/colab_return
+          for pair in \
+            "/content/episode_repair_20261031/asset_audit.json|output/colab_return/asset_audit.json" \
+            "/content/episode_repair_20261031/timeline_plan.json|output/colab_return/timeline_plan.json" \
+            "/content/episode_repair_20261031/qa_report.json|output/colab_return/qa_report.json" \
+            "/content/episode_repair_20261031/contact_sheet.jpg|output/colab_return/contact_sheet.jpg" \
+            "/content/episode_repair_20261031/progress.json|output/colab_return/progress.json"; do
+            remote="${pair%%|*}"
+            local="${pair#*|}"
+            colab --auth=adc download -s "$SESSION" "$remote" "$local" >> output/colab_session.log 2>&1
+          done
+          colab --auth=adc status -s "$SESSION" >> output/colab_session.log 2>&1
+          echo "Collected available diagnostic outputs."
+
+      - name: Stop the Colab session after a successful run
+        if: success()
+        continue-on-error: true
+        run: colab --auth=adc stop -s "$SESSION" || true
+
+      - name: Preserve Colab session on failure for checkpoint-based recovery
+        if: failure()
+        run: echo "Colab session $SESSION is intentionally left available for inspection/resume."
+
+      - name: Upload logs and QA artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arabic-episode-repair-${{ github.run_id }}
+          path: output/**
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14
