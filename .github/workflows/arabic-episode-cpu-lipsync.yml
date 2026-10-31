@@ -39,8 +39,8 @@ jobs:
       TIMING_REPORTS_ID: "1mVJpaVrR0Y9ikfeX_lynBCVwDBoUemxV"
       VOICE_ARCHIVE_ID: "1kW388RgJNpoVCFEE8HRU18x4sX250bBf"
       OUTPUT_FOLDER_ID: "189EzPY0ZgR2fa6hHL2jw2gmHwW_OLLGH"
-      CHUNK_SECONDS: ${{ inputs.chunk_seconds }}
-      MAX_PARALLEL: ${{ inputs.max_parallel }}
+      CHUNK_SECONDS: ${{ inputs.chunk_seconds || '300' }}
+      MAX_PARALLEL: ${{ inputs.max_parallel || '20' }}
     steps:
       - name: Checkout automation
         uses: actions/checkout@v4
