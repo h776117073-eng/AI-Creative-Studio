@@ -1,0 +1,76 @@
+name: Arabic Episode CPU Lip-Sync — Drive Preflight
+
+on:
+  workflow_dispatch:
+    inputs:
+      chunk_seconds:
+        description: "Target chunk length in seconds (used by the next processing stage)"
+        required: true
+        default: "300"
+        type: string
+      max_parallel:
+        description: "Target matrix concurrency after all preflight gates pass"
+        required: true
+        default: "20"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arabic-episode-cpu-lipsync
+  cancel-in-progress: false
+
+jobs:
+  drive-and-runner-preflight:
+    name: Validate Actions CPU runner and private Drive access
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GOOGLE_DRIVE_CREDENTIALS_JSON: \${{ secrets.GOOGLE_DRIVE_CREDENTIALS_JSON }}
+      COLAB_CREDENTIALS: \${{ secrets.COLAB_CREDENTIALS }}
+      EPISODE_SOURCE_ID: "13AL8R54GE-S41TsIbXGX1rhIa-Y0HZm-"
+      CURRENT_DUB_ID: "15MkBM0m9YduRz4pim2Stp_9ruW5XbqKw"
+      TIMING_REPORTS_ID: "1mVJpaVrR0Y9ikfeX_lynBCVwDBoUemxV"
+      VOICE_ARCHIVE_ID: "1kW388RgJNpoVCFEE8HRU18x4sX250bBf"
+      OUTPUT_FOLDER_ID: "189EzPY0ZgR2fa6hHL2jw2gmHwW_OLLGH"
+      CHUNK_SECONDS: \${{ inputs.chunk_seconds }}
+      MAX_PARALLEL: \${{ inputs.max_parallel }}
+    steps:
+      - name: Checkout automation
+        uses: actions/checkout@v4
+
+      - name: Inspect standard runner resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "CPU_COUNT=$(nproc)"
+          grep MemTotal /proc/meminfo
+          df -h /
+          if command -v nvidia-smi >/dev/null 2>&1; then nvidia-smi || true; else echo "GPU=none (expected)"; fi
+          if [[ "$CHUNK_SECONDS" != "300" ]]; then
+            echo "::notice::Chunk duration set to $CHUNK_SECONDS seconds."
+          fi
+          if ! [[ "$MAX_PARALLEL" =~ ^[0-9]+$ ]] || (( MAX_PARALLEL < 1 || MAX_PARALLEL > 20 )); then
+            echo "::error::max_parallel must be an integer from 1 through 20."
+            exit 1
+          fi
+
+      - name: Install FFmpeg and Drive API dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+          python -m pip install --disable-pip-version-check --no-cache-dir \
+            google-auth google-api-python-client google-auth-httplib2
+
+      - name: Verify Drive credentials, all input files, ZIPs and output-folder write access
+        shell: bash
+        run: |
+          set -euo pipefail
+          python automation/github_actions_lipsync_20261031/preflight.py
+
+      - name: Record successful preflight marker
+        if: success()
+        run: echo "The CPU-only Actions preflight and Drive write test passed. No Colab session or media rendering was started."
