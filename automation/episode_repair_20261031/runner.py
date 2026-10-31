@@ -91,29 +91,54 @@ def sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def drive_api():
-    global DRIVE
-    if not ADC_PATH.is_file():
-        raise RuntimeError("Google ADC file is missing on the Colab runtime.")
-    from google.auth import load_credentials_from_file
-    from googleapiclient.discovery import build
-    # The GitHub-stored ADC token is used for Colab session control, but the first
-    # attempt showed it lacked Drive scopes. Explicitly request Drive scope during
-    # refresh; if the user's refresh token was not consented for Drive, fail clearly
-    # so the credential can be re-authorized rather than silently guessing.
-    drive_scope = "https://www.googleapis.com/auth/drive"
-    credentials, _ = load_credentials_from_file(str(ADC_PATH), scopes=[drive_scope])
-    log("ADC credential class=" + type(credentials).__name__ +
-        " scopes=" + str(getattr(credentials, "scopes", None)))
-    try:
-        from google.auth.transport.requests import Request
-        credentials.refresh(Request())
-    except Exception as exc:
-        raise RuntimeError("COLAB_CREDENTIALS could not refresh with Google Drive scope. " +
-                           type(exc).__name__ + ": " + str(exc)) from exc
-    log("Google Drive OAuth scope refresh succeeded.")
-    DRIVE = build("drive", "v3", credentials=credentials, cache_discovery=False)
-    return DRIVE
+def load_transfer_manifest() -> dict:
+    from datetime import datetime, timezone
+    path = ROOT / "transfer_manifest.json"
+    if not path.is_file():
+        raise RuntimeError("Temporary transfer manifest is missing from this Colab session.")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    expiry = data.get("expires_at_utc")
+    if expiry:
+        expires = datetime.strptime(expiry, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+        if expires <= time.time():
+            raise RuntimeError("Temporary transfer URLs expired before the download began.")
+    if data.get("transfer_policy") != "private_signed_download_only":
+        raise RuntimeError("Unexpected transfer policy; refusing to use these URLs.")
+    return data
+
+
+def download_signed_url(url: str, dest: Path, expected_sha256: str | None = None) -> Path:
+    import requests
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_suffix(dest.suffix + ".part")
+    offset = part.stat().st_size if part.exists() else 0
+    headers = {"Range": "bytes=" + str(offset) + "-"} if offset else {}
+    response = requests.get(url, headers=headers, stream=True, timeout=(30, 180))
+    if offset and response.status_code != 206:
+        response.close()
+        part.unlink(missing_ok=True)
+        offset = 0
+        response = requests.get(url, stream=True, timeout=(30, 180))
+    response.raise_for_status()
+    mode = "ab" if offset else "wb"
+    total = response.headers.get("Content-Length")
+    total = (int(total) + offset) if total and total.isdigit() else None
+    done = offset
+    with part.open(mode) as f:
+        for chunk in response.iter_content(chunk_size=8 * 1024 * 1024):
+            if chunk:
+                f.write(chunk)
+                done += len(chunk)
+                if done - offset >= 128 * 1024 * 1024 and (done - offset) % (128 * 1024 * 1024) < 8 * 1024 * 1024:
+                    log("Transfer " + dest.name + ": " + str(done) + "/" + str(total or "unknown"))
+    response.close()
+    if total and done != total:
+        raise RuntimeError("Incomplete transfer for " + dest.name + ": " + str(done) + "/" + str(total))
+    os.replace(part, dest)
+    if expected_sha256 and sha256(dest) != expected_sha256:
+        raise RuntimeError("SHA256 mismatch after private transfer: " + dest.name)
+    log("TRANSFER VERIFIED " + dest.name + " bytes=" + str(dest.stat().st_size))
+    return dest
 
 
 def drive_meta(file_id: str) -> dict:
@@ -180,11 +205,9 @@ def upload_drive_file(path: Path, name: str, parent_id: str, mime: str) -> dict:
     return response
 
 
-def sync_json(path: Path, folder_id: str, mime: str = "application/json") -> None:
-    try:
-        upload_drive_file(path, path.name, folder_id, mime)
-    except Exception as e:
-        log("WARNING: could not sync " + path.name + ": " + repr(e))
+def sync_json(path: Path, folder_id: str | None, mime: str = "application/json") -> None:
+    # Drive writes are performed later by the connected Drive connector.
+    return
 
 
 def update_progress(stage: str, **fields) -> None:
@@ -455,39 +478,36 @@ def main() -> None:
 
     update_progress("starting")
     ensure_tools()
-    drive_api()
-    parent = drive_meta(FOLDER_ID)
-    if parent.get("name") != "دبلجة الحلقة الجديدة":
-        raise RuntimeError("Audio folder ID/name verification failed.")
-    OUTPUT_FOLDER_ID = create_folder(FOLDER_ID, OUTPUT_FOLDER_NAME)
-    CHECKPOINT_FOLDER_ID = create_folder(OUTPUT_FOLDER_ID, CHECKPOINT_FOLDER_NAME)
-    log("Drive output folder ready: " + OUTPUT_FOLDER_ID)
+    transfer = load_transfer_manifest()
+    files = transfer.get("files", {})
+    required = ["source", "current_dub", "reports", "voice_archive", "individual_voices"]
+    missing_manifest = [k for k in required if k not in files]
+    if missing_manifest:
+        raise RuntimeError("Transfer manifest is missing: " + ", ".join(missing_manifest))
+    if files["source"].get("name") != "🔴 FULL - 女孩相亲认错人，将错就错与千亿霸总当天领证！ - Original Quality.mkv":
+        raise RuntimeError("Transfer manifest does not identify the expected Chinese source episode.")
+    if files["current_dub"].get("name") != "الحلقة_مدبلجة_بالعربية.mkv":
+        raise RuntimeError("Transfer manifest does not identify the existing Arabic dub.")
+    if len(files["individual_voices"]) != 5 or not files["voice_archive"].get("url"):
+        raise RuntimeError("Manifest must contain the five individual WAVs and the 06-10 voice archive.")
 
-    update_progress("verifying_drive_identities")
-    source_meta = drive_meta(SOURCE_ID)
-    dubbed_meta = drive_meta(DUBBED_ID)
-    if source_meta.get("name") != "🔴 FULL - 女孩相亲认错人，将错就错与千亿霸总当天领证！ - Original Quality.mkv":
-        raise RuntimeError("Source ID did not resolve to the expected Chinese episode.")
-    if dubbed_meta.get("name") != "الحلقة_مدبلجة_بالعربية.mkv":
-        raise RuntimeError("Dubbed video ID did not resolve to the expected current Arabic dub.")
-    if source_meta.get("mimeType") != "video/matroska" or dubbed_meta.get("mimeType") != "video/matroska":
-        raise RuntimeError("Unexpected source/dubbed video MIME type.")
-    sd = float(source_meta.get("videoMediaMetadata", {}).get("durationMillis", 0)) / 1000
-    dd = float(dubbed_meta.get("videoMediaMetadata", {}).get("durationMillis", 0)) / 1000
-    if abs(sd - dd) > 1.0 or abs(sd - 6154.0) > 3.0:
-        raise RuntimeError("Source/dub duration mismatch: " + str(sd) + " vs " + str(dd))
-
-    update_progress("downloading_assets", source_duration=sd, dubbed_duration=dd)
-    reports_zip = download_drive(REPORTS_ID, ASSET_DIR / "reports.zip")
-    voices_zip = download_drive(VOICE_ARCHIVE_ID, ASSET_DIR / "voices_06_10.zip")
-    source_video = download_drive(SOURCE_ID, ASSET_DIR / "source_chinese.mkv", source_meta)
-    dubbed_video = download_drive(DUBBED_ID, ASSET_DIR / "current_dub.mkv", dubbed_meta)
+    update_progress("downloading_assets")
+    reports_zip = download_signed_url(files["reports"]["url"], ASSET_DIR / "reports.zip",
+                                      files["reports"].get("sha256"))
+    voices_zip = download_signed_url(files["voice_archive"]["url"], ASSET_DIR / "voices_06_10.zip",
+                                     files["voice_archive"].get("sha256"))
+    source_video = download_signed_url(files["source"]["url"], ASSET_DIR / "source_chinese.mkv",
+                                       files["source"].get("sha256"))
+    dubbed_video = download_signed_url(files["current_dub"]["url"], ASSET_DIR / "current_dub.mkv",
+                                       files["current_dub"].get("sha256"))
     individual_paths = {}
-    for name, fid in INDIVIDUAL_VOICES.items():
-        meta = drive_meta(fid)
-        if meta.get("name") != name:
-            raise RuntimeError("Voice file ID/name mismatch for " + name)
-        individual_paths[name] = download_drive(fid, VOICE_DIR / name, meta)
+    for name, asset in files["individual_voices"].items():
+        if asset.get("name") != name:
+            raise RuntimeError("Voice manifest name mismatch for " + name)
+        individual_paths[name] = download_signed_url(asset["url"], VOICE_DIR / name,
+                                                       asset.get("sha256"))
+    update_progress("assets_downloaded", individual_voice_files=len(individual_paths),
+                    report_archive_bytes=reports_zip.stat().st_size)
 
     with zipfile.ZipFile(reports_zip) as z:
         z.extractall(ASSET_DIR / "reports")
@@ -520,6 +540,10 @@ def main() -> None:
         raise RuntimeError("The downloaded current dubbed video SHA256 does not match its render manifest.")
     source_probe = probe(source_video)
     dubbed_probe = probe(dubbed_video)
+    sd = float(source_probe.get("format", {}).get("duration") or 0)
+    dd = float(dubbed_probe.get("format", {}).get("duration") or 0)
+    if abs(sd - dd) > 1.0 or abs(sd - 6154.0) > 3.0:
+        raise RuntimeError("Source/dub duration mismatch: " + str(sd) + " vs " + str(dd))
 
     groups = mapped_groups(mapping.get("assignments", []))
     rendered_keys = {(x.get("speaker_script_id"), int(x.get("utterance_index") or 0))
@@ -534,9 +558,9 @@ def main() -> None:
 
     audit = {
         "status": "assets_verified",
-        "source": {"id": SOURCE_ID, "name": source_meta["name"], "bytes": source_video.stat().st_size,
+        "source": {"name": files["source"]["name"], "bytes": source_video.stat().st_size,
                    "duration_seconds": sd, "sha256": source_hash, "probe": source_probe.get("format", {})},
-        "current_dub": {"id": DUBBED_ID, "name": dubbed_meta["name"], "bytes": dubbed_video.stat().st_size,
+        "current_dub": {"name": files["current_dub"]["name"], "bytes": dubbed_video.stat().st_size,
                         "duration_seconds": dd, "sha256": dubbed_hash, "probe": dubbed_probe.get("format", {})},
         "report_counts": {k: manifest.get(k) for k in
                           ["matched_line_count", "source_assignments_count", "unmatched_assignments",
@@ -681,22 +705,11 @@ def main() -> None:
     }
     atomic_json(QA_PATH, qa)
 
-    # Create output folder/checkpoint record first; upload final using resumable Drive API.
-    update_progress("uploading_final", final_bytes=FINAL_PATH.stat().st_size)
-    uploaded = upload_drive_file(FINAL_PATH, FINAL_PATH.name, OUTPUT_FOLDER_ID, "video/x-matroska")
-    remote_meta = DRIVE.files().get(
-        fileId=uploaded["id"], fields="id,name,size,md5Checksum,webViewLink",
-        supportsAllDrives=True,
-    ).execute(num_retries=4)
-    if int(remote_meta.get("size") or 0) != FINAL_PATH.stat().st_size:
-        raise RuntimeError("Uploaded final MKV size does not match local output.")
-    atomic_json(QA_PATH, {**qa, "drive_file_id": uploaded["id"],
-                          "drive_web_view_link": remote_meta.get("webViewLink"),
-                          "drive_md5": remote_meta.get("md5Checksum")})
-    sync_json(QA_PATH, OUTPUT_FOLDER_ID)
-    sync_json(ROOT / "contact_sheet.jpg", OUTPUT_FOLDER_ID, "image/jpeg")
-    update_progress("completed", final_file_id=uploaded["id"], final_sha256=final_hash)
-    log("FINAL_RENDER_COMPLETE " + str(remote_meta.get("webViewLink")))
+    # Return the final MKV and QA bundle through a GitHub Actions artifact.
+    # The connected Drive tool uploads the verified artifact in a separate step.
+    update_progress("completed_render_to_artifact", final_filename=FINAL_PATH.name,
+                    final_bytes=FINAL_PATH.stat().st_size, final_sha256=final_hash)
+    log("FINAL_RENDER_READY_FOR_GITHUB_ARTIFACT " + FINAL_PATH.name)
 
 
 if __name__ == "__main__":
@@ -706,8 +719,5 @@ if __name__ == "__main__":
         log("TASK_FAILED " + type(exc).__name__ + ": " + str(exc))
         atomic_json(QA_PATH, {"status": "failed_or_blocked", "error_type": type(exc).__name__,
                               "error": str(exc), "elapsed_seconds": round(time.time() - STARTED, 1)})
-        if CHECKPOINT_FOLDER_ID:
-            sync_json(QA_PATH, CHECKPOINT_FOLDER_ID)
-            sync_json(PROGRESS_PATH, CHECKPOINT_FOLDER_ID)
         log(traceback.format_exc()[-6000:])
         raise
