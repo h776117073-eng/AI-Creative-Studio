@@ -105,3 +105,4 @@ jobs:
           path: output/
           if-no-files-found: warn
           retention-days: 7
+# Read-only diagnostic refresh: inspect the existing Colab session and checkpoints; do not allocate or stop a runtime.
