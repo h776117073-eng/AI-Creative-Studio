@@ -86,6 +86,21 @@ jobs:
           colab --auth=adc exec -s "$SESSION" --timeout 300 -f <(printf '%s\n' 'from pathlib import Path; Path("/content/.private").mkdir(parents=True, exist_ok=True); print("PRIVATE_DIR_READY")') 2>&1 | tee -a output/colab_session.log
           colab --auth=adc upload -s "$SESSION" "$GOOGLE_APPLICATION_CREDENTIALS" /content/.private/google_adc.json 2>&1 | tee -a output/colab_session.log
           colab --auth=adc exec -s "$SESSION" --timeout 14400 -f automation/episode_repair_20261031/runner.py 2>&1 | tee output/colab_execution.log
+          cat > output/verify_repair.py <<'PY'
+          import json
+          from pathlib import Path
+          root = Path("/content/episode_repair_20261031")
+          report = root / "qa_report.json"
+          final_video = root / "الحلقة_مدبلجة_بالعربية_النهائية.mkv"
+          if report.is_file():
+              qa = json.loads(report.read_text(encoding="utf-8"))
+              if qa.get("status") == "rendered_and_technical_checks_passed" and final_video.is_file():
+                  print("EPISODE_REPAIR_STATUS=RENDERED_AND_QA_PASSED")
+              else:
+                  print("EPISODE_REPAIR_STATUS=" + str(qa.get("status")))
+          else:
+              print("EPISODE_REPAIR_STATUS=MISSING_QA_REPORT")
+          PY
           colab --auth=adc exec -s "$SESSION" --timeout 300 -f output/verify_repair.py 2>&1 | tee output/repair_status_check.log
           if ! grep -q "EPISODE_REPAIR_STATUS=RENDERED_AND_QA_PASSED" output/repair_status_check.log; then
             echo "::error::Colab kernel returned without a successful final QA marker. The session will be retained for recovery."
