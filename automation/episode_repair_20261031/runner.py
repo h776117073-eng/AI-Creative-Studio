@@ -97,7 +97,21 @@ def drive_api():
         raise RuntimeError("Google ADC file is missing on the Colab runtime.")
     from google.auth import load_credentials_from_file
     from googleapiclient.discovery import build
-    credentials, _ = load_credentials_from_file(str(ADC_PATH))
+    # The GitHub-stored ADC token is used for Colab session control, but the first
+    # attempt showed it lacked Drive scopes. Explicitly request Drive scope during
+    # refresh; if the user's refresh token was not consented for Drive, fail clearly
+    # so the credential can be re-authorized rather than silently guessing.
+    drive_scope = "https://www.googleapis.com/auth/drive"
+    credentials, _ = load_credentials_from_file(str(ADC_PATH), scopes=[drive_scope])
+    log("ADC credential class=" + type(credentials).__name__ +
+        " scopes=" + str(getattr(credentials, "scopes", None)))
+    try:
+        from google.auth.transport.requests import Request
+        credentials.refresh(Request())
+    except Exception as exc:
+        raise RuntimeError("COLAB_CREDENTIALS could not refresh with Google Drive scope. " +
+                           type(exc).__name__ + ": " + str(exc)) from exc
+    log("Google Drive OAuth scope refresh succeeded.")
     DRIVE = build("drive", "v3", credentials=credentials, cache_discovery=False)
     return DRIVE
 
