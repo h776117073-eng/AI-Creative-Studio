@@ -1,6 +1,11 @@
 name: Arabic Episode CPU Lip-Sync — Drive Preflight
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/arabic-episode-cpu-lipsync.yml"
+      - "automation/github_actions_lipsync_20261031/**"
   workflow_dispatch:
     inputs:
       chunk_seconds:
@@ -27,15 +32,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      GOOGLE_DRIVE_CREDENTIALS_JSON: \${{ secrets.GOOGLE_DRIVE_CREDENTIALS_JSON }}
-      COLAB_CREDENTIALS: \${{ secrets.COLAB_CREDENTIALS }}
+      GOOGLE_DRIVE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS_JSON }}
+      COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
       EPISODE_SOURCE_ID: "13AL8R54GE-S41TsIbXGX1rhIa-Y0HZm-"
       CURRENT_DUB_ID: "15MkBM0m9YduRz4pim2Stp_9ruW5XbqKw"
       TIMING_REPORTS_ID: "1mVJpaVrR0Y9ikfeX_lynBCVwDBoUemxV"
       VOICE_ARCHIVE_ID: "1kW388RgJNpoVCFEE8HRU18x4sX250bBf"
       OUTPUT_FOLDER_ID: "189EzPY0ZgR2fa6hHL2jw2gmHwW_OLLGH"
-      CHUNK_SECONDS: \${{ inputs.chunk_seconds }}
-      MAX_PARALLEL: \${{ inputs.max_parallel }}
+      CHUNK_SECONDS: ${{ inputs.chunk_seconds }}
+      MAX_PARALLEL: ${{ inputs.max_parallel }}
     steps:
       - name: Checkout automation
         uses: actions/checkout@v4
