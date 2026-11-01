@@ -110,6 +110,11 @@ jobs:
               kwargs.pop("force_filename",None)
               return _hf_download(*args,**kwargs)
           huggingface_hub.hf_hub_download=_hub_download_compat
+          # Hub 1.x raises HfHubHTTPError for an absent optional custom.py;
+          # SpeechBrain 1.0.3 only catches requests.HTTPError.
+          import speechbrain.utils.fetching as _sb_fetching
+          from huggingface_hub.errors import HfHubHTTPError
+          _sb_fetching.HTTPError=(_sb_fetching.HTTPError,HfHubHTTPError)
           from speechbrain.inference.speaker import EncoderClassifier
           model=EncoderClassifier.from_hparams(source="speechbrain/spkrec-ecapa-voxceleb",savedir=str(ROOT/"ecapa"),run_opts={"device":"cuda"})
           from scipy.signal import resample_poly
