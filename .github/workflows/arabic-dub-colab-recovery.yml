@@ -3,8 +3,6 @@ name: Arabic dubbing — isolated Colab recovery preflight
 on:
   push:
     branches: [automation/arabic-dub-colab-recovery-20261101]
-    paths:
-      - "RECOVERY_TRIGGER.txt"
   workflow_dispatch:
 
 permissions:
@@ -106,6 +104,19 @@ jobs:
         if: always()
         continue-on-error: true
         run: colab --auth=adc stop -s "$SESSION" || true
+      - name: Enforce the Drive authorization gate
+        if: always()
+        run: |
+          python - <<'PY'
+          import json, pathlib
+          p=pathlib.Path("output/drive_scope_preflight.json")
+          if not p.is_file(): raise SystemExit("Drive preflight report is missing.")
+          report=json.loads(p.read_text(encoding="utf-8"))
+          if report.get("status")!="passed":
+              print(report.get("reason","Drive read authorization failed."))
+              raise SystemExit(1)
+          print("Drive readonly access verified for the required input assets.")
+          PY
       - name: Save diagnostics
         if: always()
         uses: actions/upload-artifact@v4
