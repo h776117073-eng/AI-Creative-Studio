@@ -1,0 +1,21 @@
+name: Cancel queued duplicate audit
+
+on:
+  push:
+    branches: [automation/cancel-queued-audit-20261102]
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cancel:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cancel queued duplicate audit only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api -X POST "/repos/${GITHUB_REPOSITORY}/actions/runs/41350570482/cancel"
+          echo "Requested cancellation of queued duplicate audit run 41350570482."
