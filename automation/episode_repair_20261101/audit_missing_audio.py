@@ -215,7 +215,13 @@ def main():
  log("REPORT expected="+str(len(expected))+" rendered="+str(len(rendered))+" missing="+str(len(missing)))
 
  from faster_whisper import WhisperModel
- model=WhisperModel("small",device="cuda",compute_type="float16")
+ try:
+  model=WhisperModel("small",device="cuda",compute_type="float16")
+  log("ASR_DEVICE=CUDA_FLOAT16")
+ except Exception as e:
+  log("ASR_CUDA_UNAVAILABLE_CPU_INT8_FALLBACK="+repr(e))
+  model=WhisperModel("small",device="cpu",compute_type="int8")
+  log("ASR_DEVICE=CPU_INT8_ON_STANDARD_T4_SESSION")
  voice_asr={}
  for sid,path in voice_paths.items():
   log("TRANSCRIBE_VOICE_MASTER "+sid+" "+path.name)
