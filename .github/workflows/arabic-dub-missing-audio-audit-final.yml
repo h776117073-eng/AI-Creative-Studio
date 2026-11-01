@@ -1,4 +1,5 @@
 name: Missing-line audit (CPU-safe ASR)
+# Single serialized T4 run; CPU ASR avoids the missing CUDA cublas library in Colab.
 
 on:
   push:
