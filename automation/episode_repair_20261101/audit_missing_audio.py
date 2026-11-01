@@ -99,10 +99,19 @@ def translate_zh_ar(text,cache):
  return ""
 
 def transcribe(model,path,language):
- segs,info=model.transcribe(str(path),language=language,beam_size=5,vad_filter=True,
+ # Decode/resample with ffmpeg and pass a numpy array to faster-whisper.
+ # This avoids the PyAV metadata_errors API mismatch seen in the first T4 attempt.
+ import soundfile as sf
+ path=Path(path)
+ tmp=path.with_name(path.stem+".audit16k.wav")
+ run(["ffmpeg","-y","-hide_banner","-loglevel","error","-i",str(path),"-vn","-ac","1","-ar","16000","-c:a","pcm_s16le",str(tmp)],timeout=300)
+ audio,sr=sf.read(str(tmp),dtype="float32")
+ if sr!=16000: raise RuntimeError("Unexpected audit sample rate: "+str(sr))
+ segs,info=model.transcribe(audio,language=language,beam_size=5,vad_filter=True,
                             condition_on_previous_text=False)
  rows=[{"start":round(float(s.start),3),"end":round(float(s.end),3),"text":s.text.strip(),
         "avg_logprob":round(float(s.avg_logprob),3),"no_speech_prob":round(float(s.no_speech_prob),3)} for s in segs]
+ tmp.unlink(missing_ok=True)
  return rows,{"language":info.language,"language_probability":float(info.language_probability)}
 
 def best_asr_match(rows,target):
