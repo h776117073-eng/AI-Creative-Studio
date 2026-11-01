@@ -1,0 +1,135 @@
+name: Verify source and alternate MP4 timeline alignment
+
+on:
+  push:
+    branches: [automation/arabic-dub-colab-recovery-20261101]
+    paths:
+      - ".github/workflows/arabic-dub-frame-alignment.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install official Colab CLI
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip google-colab-cli
+          colab version
+
+      - name: Configure credentials locally only
+        env:
+          COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/gcloud" output
+          if [ -z "${COLAB_CREDENTIALS:-}" ]; then echo "::error::COLAB_CREDENTIALS missing"; exit 1; fi
+          python - <<'PY'
+          import json,os,pathlib
+          obj=json.loads(os.environ["COLAB_CREDENTIALS"])
+          if obj.get("type") not in {"authorized_user","service_account","external_account","impersonated_service_account"}: raise SystemExit("Unsupported credential type")
+          p=pathlib.Path.home()/".config/gcloud/application_default_credentials.json"
+          p.write_text(os.environ["COLAB_CREDENTIALS"],encoding="utf-8");p.chmod(0o600)
+          with open(os.environ["GITHUB_ENV"],"a",encoding="utf-8") as f:f.write(f"GOOGLE_APPLICATION_CREDENTIALS={p}\n")
+          print("Colab credentials configured locally only.")
+          PY
+
+      - name: Create standard T4 session
+        run: |
+          set -euo pipefail
+          SESSION="arabic-dub-frame-check-${GITHUB_RUN_ID}"
+          echo "SESSION=$SESSION" >> "$GITHUB_ENV"
+          colab --auth=adc new -s "$SESSION" --gpu T4 2>&1 | tee output/session.log
+          colab --auth=adc status -s "$SESSION" 2>&1 | tee output/runtime.txt
+          grep -Eqi 'Hardware: T4|gpu-t4' output/runtime.txt
+
+      - name: Compare picture frames at selected timestamps
+        timeout-minutes: 120
+        run: |
+          set -euo pipefail
+          mkdir -p output
+          cat > output/compare_frames.py <<'PY'
+          import json, subprocess, sys
+          from pathlib import Path
+          ROOT=Path("/content/arabic_dub_frame_check");ROOT.mkdir(parents=True,exist_ok=True)
+          SOURCE=ROOT/"source.mkv"; ALT=ROOT/"alternate.mp4"
+          sources=[
+            ("source", "13AL8R54GE-S41TsIbXGX1rhIa-Y0HZm-",846325293,SOURCE),
+            ("alternate", "1TjyE6CuhxxU0iGZDOE3x3S_mnxmiEqlX",920467672,ALT)
+          ]
+          TIMES=[60,68,72,82.8,89.8,94,97.6,225,231.4,239.8,390,402.8,5330,5350,4110,4123,4134]
+          def run(cmd):
+            p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=900)
+            if p.returncode: raise RuntimeError(p.stdout[-3000:])
+            return p.stdout
+          import torch
+          if not torch.cuda.is_available() or "T4" not in torch.cuda.get_device_name(0).upper(): raise RuntimeError("T4 not available")
+          subprocess.run([sys.executable,"-m","pip","install","-q","gdown","Pillow","ImageHash","numpy"],check=True)
+          import gdown, imagehash
+          from PIL import Image
+          import numpy as np
+          files={}
+          for label,fid,expected,path in sources:
+            print("DOWNLOAD_START",label,flush=True)
+            got=gdown.download(id=fid,output=str(path),quiet=False,resume=True)
+            if not got or not path.is_file() or path.stat().st_size!=expected: raise RuntimeError("Download size mismatch for "+label)
+            files[label]=path
+            print("DOWNLOAD_OK",label,path.stat().st_size,flush=True)
+          probes=[]
+          for t in TIMES:
+            row={"time":t,"frames":{}}
+            for label,path in files.items():
+              out=ROOT/f"{label}_{str(t).replace('.','_')}.jpg"
+              run(["ffmpeg","-y","-hide_banner","-loglevel","error","-ss",str(t),"-i",str(path),"-frames:v","1","-q:v","3",str(out)])
+              im=Image.open(out).convert("RGB")
+              row["frames"][label]={"file":out.name,"size":list(im.size),"phash":str(imagehash.phash(im))}
+            a=imagehash.hex_to_hash(row["frames"]["source"]["phash"])
+            b=imagehash.hex_to_hash(row["frames"]["alternate"]["phash"])
+            row["phash_hamming_distance"]=a-b
+            probes.append(row)
+          report={"status":"frame_compare_complete","source_bytes":SOURCE.stat().st_size,"alternate_bytes":ALT.stat().st_size,"times":probes,"note":"Compares decoded image frames only; it does not alter either video or establish audio synchronization by itself."}
+          (ROOT/"frame_report.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
+          print("FRAME_COMPARE_COMPLETE",flush=True)
+          for row in probes: print("FRAME",row["time"],"phash_distance",row["phash_hamming_distance"],flush=True)
+          PY
+          colab --auth=adc upload -s "$SESSION" output/compare_frames.py /content/compare_frames.py
+          colab --auth=adc exec -s "$SESSION" --timeout 7200 -f output/compare_frames.py 2>&1 | tee output/compare_execution.log
+
+      - name: Retrieve frame report and representative images
+        if: always()
+        continue-on-error: true
+        run: |
+          mkdir -p output/return
+          colab --auth=adc download -s "$SESSION" /content/arabic_dub_frame_check/frame_report.json output/return/frame_report.json || true
+          for t in 68 82_8 225 231_4 390 5330 4123; do
+            colab --auth=adc download -s "$SESSION" "/content/arabic_dub_frame_check/source_${t}.jpg" "output/return/source_${t}.jpg" || true
+            colab --auth=adc download -s "$SESSION" "/content/arabic_dub_frame_check/alternate_${t}.jpg" "output/return/alternate_${t}.jpg" || true
+          done
+          colab --auth=adc status -s "$SESSION" >> output/session.log 2>&1 || true
+
+      - name: Require comparison report
+        if: always()
+        run: |
+          test -s output/return/frame_report.json
+          python -m json.tool output/return/frame_report.json >/dev/null
+
+      - name: Stop T4
+        if: always()
+        continue-on-error: true
+        run: colab --auth=adc stop -s "$SESSION" || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: arabic-dub-frame-alignment-${{ github.run_id }}
+          path: output/**
+          if-no-files-found: warn
+          retention-days: 7
