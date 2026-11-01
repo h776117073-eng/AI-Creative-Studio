@@ -1,4 +1,4 @@
-name: Missing-line audit with CPU-safe ASR fallback
+name: Missing-line audit (CPU-safe ASR)
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: arabic-dub-colab-exclusive
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   audit:
@@ -24,7 +24,7 @@ jobs:
         run: python -m py_compile automation/episode_repair_20261101/audit_missing_audio.py
 
       - uses: actions/download-artifact@v4
-        name: Download the previously completed alternate-MP4 full transcript
+        name: Download the completed alternate-MP4 transcript (text only)
         with:
           name: arabic-dub-full-audio-index-41335378127
           run-id: 41335378127
@@ -32,14 +32,14 @@ jobs:
           path: output/evidence/transcript
 
       - uses: actions/download-artifact@v4
-        name: Download the previously completed alternate-MP4 dialogue probe
+        name: Download the completed alternate-MP4 probe (text only)
         with:
           name: arabic-dub-alternate-mp4-probe-41334011457
           run-id: 41334011457
           github-token: ${{ github.token }}
           path: output/evidence/probe
 
-      - name: Prepare text-only evidence files
+      - name: Prepare evidence files
         run: |
           set -euo pipefail
           mkdir -p output/evidence/return output/return
@@ -79,16 +79,25 @@ jobs:
           print("Colab CLI credentials configured locally; secret contents withheld.")
           PY
 
+      - name: Check no other T4 session is active
+        run: |
+          set -euo pipefail
+          colab --auth=adc sessions 2>&1 | tee output/sessions_before.txt
+          if grep -Eqi 'gpu-t4|Hardware: T4' output/sessions_before.txt; then
+            echo "::error::An active T4 session exists; refusing to allocate a competing session."
+            exit 1
+          fi
+
       - name: Allocate and verify standard Colab T4
         run: |
           set -euo pipefail
-          SESSION="arabic-dub-missing-audit-v4-${GITHUB_RUN_ID}"
+          SESSION="arabic-dub-missing-audit-final-${GITHUB_RUN_ID}"
           echo "SESSION=$SESSION" >> "$GITHUB_ENV"
           colab --auth=adc new -s "$SESSION" --gpu T4 2>&1 | tee output/session.log
           colab --auth=adc status -s "$SESSION" 2>&1 | tee output/runtime.txt
           grep -Eqi 'Hardware: T4|gpu-t4' output/runtime.txt
 
-      - name: Install ASR and audio dependencies in Colab
+      - name: Install CPU-safe ASR and audio dependencies in Colab
         run: |
           set -euo pipefail
           cat > output/install_deps.py <<'PY'
@@ -141,7 +150,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: arabic-dub-missing-audio-audit-v4-${{ github.run_id }}
+          name: arabic-dub-missing-audio-audit-final-${{ github.run_id }}
           path: output/**
           if-no-files-found: warn
           compression-level: 0
