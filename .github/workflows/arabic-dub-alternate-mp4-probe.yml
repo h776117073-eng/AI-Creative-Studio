@@ -124,7 +124,7 @@ jobs:
           print("PROBE_STATUS=COMPLETE",flush=True)
           PY
           colab --auth=adc upload -s "$SESSION" output/probe_alternate_mp4.py /content/probe_alternate_mp4.py
-          colab --auth=adc exec -s "$SESSION" --timeout 7200 -f /content/probe_alternate_mp4.py 2>&1 | tee output/probe_execution.log
+          colab --auth=adc exec -s "$SESSION" --timeout 7200 -f output/probe_alternate_mp4.py 2>&1 | tee output/probe_execution.log
 
       - name: Retrieve probe report
         if: always()
