@@ -59,10 +59,7 @@ jobs:
               return p.stdout
           import torch
           if not torch.cuda.is_available() or "T4" not in torch.cuda.get_device_name(0).upper():raise RuntimeError("T4 required")
-          # Colab torchaudio 2.9 removed list_audio_backends, which SpeechBrain 1.0.3 still calls.
-# Pin a matching PyTorch pair supported by the T4 runtime.
-subprocess.run([sys.executable,"-m","pip","install","-q","--force-reinstall","--index-url","https://download.pytorch.org/whl/cu126","torch==2.8.0","torchaudio==2.8.0"],check=True)
-subprocess.run([sys.executable,"-m","pip","install","-q","gdown","soundfile","speechbrain==1.0.3"],check=True)
+          subprocess.run([sys.executable,"-m","pip","install","-q","gdown","soundfile","speechbrain==1.0.3"],check=True)
           import gdown,numpy as np,soundfile as sf
           for path,fid,size in [(MP4,"1TjyE6CuhxxU0iGZDOE3x3S_mnxmiEqlX",920467672),(WAV,"1n-E4VaPurnlbvaT5V_5taMXNHaGC8Ipl",14792144)]:
               if not path.exists() or path.stat().st_size!=size:
@@ -78,6 +75,10 @@ subprocess.run([sys.executable,"-m","pip","install","-q","gdown","soundfile","sp
               out=ROOT/(n+".wav")
               run(["ffmpeg","-y","-hide_banner","-loglevel","error","-ss",str(a),"-i",str(src),"-t",str(b-a),"-vn","-ac","1","-ar","16000","-c:a","pcm_s16le",str(out)])
               paths[n]=out
+          # Torchaudio 2.9+ removed list_audio_backends; SpeechBrain 1.0.3 still probes it.
+          import torchaudio
+          if not hasattr(torchaudio,"list_audio_backends"):
+              torchaudio.list_audio_backends=lambda: ["soundfile"]
           from speechbrain.inference.speaker import EncoderClassifier
           model=EncoderClassifier.from_hparams(source="speechbrain/spkrec-ecapa-voxceleb",savedir=str(ROOT/"ecapa"),run_opts={"device":"cuda"})
           em={}
