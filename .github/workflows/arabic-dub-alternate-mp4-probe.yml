@@ -94,7 +94,7 @@ jobs:
           if not torch.cuda.is_available() or "T4" not in torch.cuda.get_device_name(0).upper():
               raise RuntimeError("This diagnostic requires the allocated Tesla T4.")
           print("T4="+torch.cuda.get_device_name(0),flush=True)
-          subprocess.run([sys.executable,"-m","pip","install","-q","gdown","faster-whisper"],check=True)
+          subprocess.run([sys.executable,"-m","pip","install","-q","gdown","faster-whisper","soundfile"],check=True)
           import gdown
           print("ALTERNATE_MP4_DOWNLOAD_START",flush=True)
           p=gdown.download(id=FILE_ID,output=str(VIDEO),quiet=False,resume=True)
@@ -105,6 +105,7 @@ jobs:
           fmt=info.get("format",{})
           ast=[x for x in info.get("streams",[]) if x.get("codec_type")=="audio"]
           print("MP4_DURATION="+str(fmt.get("duration"))+" AUDIO_STREAMS="+str(len(ast)),flush=True)
+          import soundfile as sf
           from faster_whisper import WhisperModel
           model=WhisperModel("small",device="cuda",compute_type="float16")
           results=[]
@@ -113,7 +114,9 @@ jobs:
               out=ROOT/(name+".json")
               print("EXTRACT "+name+" "+str(start)+"-"+str(end),flush=True)
               run(["ffmpeg","-y","-hide_banner","-loglevel","error","-ss",str(start),"-i",str(VIDEO),"-t",str(end-start),"-vn","-ac","1","-ar","16000","-c:a","pcm_s16le",str(wav)],timeout=300)
-              segments,meta=model.transcribe(str(wav),language="ar",beam_size=5,vad_filter=True,condition_on_previous_text=False)
+              audio,sample_rate=sf.read(str(wav),dtype="float32")
+              if sample_rate != 16000: raise RuntimeError("Unexpected probe sample rate: "+str(sample_rate))
+              segments,meta=model.transcribe(audio,language="ar",beam_size=5,vad_filter=True,condition_on_previous_text=False)
               rows=[{"start":round(float(s.start)+start,3),"end":round(float(s.end)+start,3),"text":s.text.strip()} for s in segments]
               item={"name":name,"source_window":[start,end],"language":meta.language,"language_probability":meta.language_probability,"segments":rows,"transcript":" ".join(x["text"] for x in rows)}
               results.append(item)
@@ -133,6 +136,16 @@ jobs:
           mkdir -p output/return
           colab --auth=adc download -s "$SESSION" /content/arabic_dub_mp4_probe/probe_report.json output/return/probe_report.json || true
           colab --auth=adc status -s "$SESSION" > output/session_final.txt 2>&1 || true
+
+      - name: Require a completed probe report
+        if: always()
+        run: |
+          if [ ! -s output/return/probe_report.json ]; then
+            echo "::error::The remote probe did not produce its required report."
+            tail -n 100 output/probe_execution.log || true
+            exit 1
+          fi
+          python -m json.tool output/return/probe_report.json >/dev/null
 
       - name: Stop T4
         if: always()
