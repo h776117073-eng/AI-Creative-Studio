@@ -48,9 +48,8 @@ jobs:
           set +e
           SESSION="arabic-dub-mp4-probe-41334011457"
           echo "SESSION=$SESSION"
-          colab --auth=adc status -s "$SESSION" 2>&1 | tee output/session_status.txt
-          colab --auth=adc log -s "$SESSION" -n 150 -o output/notebook_history.txt 2>&1 | tee output/log_fetch.txt
-          test -s output/notebook_history.txt && tail -n 150 output/notebook_history.txt || true
+          colab --auth=adc sessions 2>&1 | tee output/server_sessions.txt
+          colab --auth=adc usage 2>&1 | tee output/colab_usage.txt || true
           exit 0
 
       - uses: actions/upload-artifact@v4
