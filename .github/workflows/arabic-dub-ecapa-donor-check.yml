@@ -104,8 +104,11 @@ jobs:
           import huggingface_hub
           _hf_download=huggingface_hub.hf_hub_download
           def _hub_download_compat(*args,**kwargs):
-           if "use_auth_token" in kwargs: kwargs["token"]=kwargs.pop("use_auth_token")
-           return _hf_download(*args,**kwargs)
+              if "use_auth_token" in kwargs: kwargs["token"]=kwargs.pop("use_auth_token")
+              kwargs.pop("resume_download",None)
+              kwargs.pop("local_dir_use_symlinks",None)
+              kwargs.pop("force_filename",None)
+              return _hf_download(*args,**kwargs)
           huggingface_hub.hf_hub_download=_hub_download_compat
           from speechbrain.inference.speaker import EncoderClassifier
           model=EncoderClassifier.from_hparams(source="speechbrain/spkrec-ecapa-voxceleb",savedir=str(ROOT/"ecapa"),run_opts={"device":"cuda"})
