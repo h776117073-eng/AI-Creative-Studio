@@ -107,7 +107,7 @@ jobs:
           print("MP4_DURATION="+str(fmt.get("duration"))+" AUDIO_STREAMS="+str(len(ast)),flush=True)
           import soundfile as sf
           from faster_whisper import WhisperModel
-          model=WhisperModel("small",device="cuda",compute_type="float16")
+          model=WhisperModel("small",device="cpu",compute_type="int8",cpu_threads=4,num_workers=1)
           results=[]
           for name,start,end in ranges:
               wav=ROOT/(name+".wav")
