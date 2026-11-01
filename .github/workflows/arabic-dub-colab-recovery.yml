@@ -1,0 +1,118 @@
+name: Arabic dubbing — isolated Colab recovery preflight
+
+on:
+  push:
+    branches: [automation/arabic-dub-colab-recovery-20261101]
+    paths:
+      - "automation/arabic_dub_colab_recovery_20261101/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arabic-dub-colab-recovery-20261101
+  cancel-in-progress: false
+
+jobs:
+  colab-drive-preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install official Colab CLI and Drive API client
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade google-colab-cli google-auth google-api-python-client
+          colab version
+      - name: Configure repository Colab credentials locally
+        env:
+          COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/gcloud" output
+          if [ -z "${COLAB_CREDENTIALS:-}" ]; then echo "COLAB_CREDENTIALS missing"; exit 1; fi
+          python - <<'PY'
+          import json, os, pathlib
+          obj=json.loads(os.environ["COLAB_CREDENTIALS"])
+          if obj.get("type") not in {"authorized_user","service_account","external_account","impersonated_service_account"}:
+              raise SystemExit("Unsupported Google ADC credential JSON")
+          p=pathlib.Path.home()/".config/gcloud/application_default_credentials.json"
+          p.write_text(os.environ["COLAB_CREDENTIALS"],encoding="utf-8"); p.chmod(0o600)
+          with open(os.environ["GITHUB_ENV"],"a",encoding="utf-8") as f: f.write(f"GOOGLE_APPLICATION_CREDENTIALS={p}\n")
+          print("Colab ADC configured; credential contents withheld.")
+          PY
+      - name: Request and verify a new standard Colab T4
+        id: colab
+        run: |
+          set -euo pipefail
+          SESSION="arabic-dub-preflight-${GITHUB_RUN_ID}"
+          echo "SESSION=$SESSION" >> "$GITHUB_ENV"
+          colab --auth=adc new -s "$SESSION" --gpu T4 2>&1 | tee output/colab_session.log
+          colab --auth=adc status -s "$SESSION" 2>&1 | tee output/colab_runtime_status.txt
+          grep -Eqi 'Hardware: T4|gpu-t4' output/colab_runtime_status.txt
+      - name: Test actual remote CUDA availability without sending credentials to the runtime
+        run: |
+          set -euo pipefail
+          colab --auth=adc exec -s "$SESSION" --timeout 180 -f <(cat <<'PY'
+          import json, shutil, subprocess, torch
+          result={"cuda_available":bool(torch.cuda.is_available()),"gpu":None,"ffmpeg":shutil.which("ffmpeg"),"disk_free_gib":round(shutil.disk_usage("/content").free/1024**3,2)}
+          if result["cuda_available"]: result["gpu"]=torch.cuda.get_device_name(0)
+          result["gpu_is_t4"]=bool(result["gpu"] and "T4" in result["gpu"].upper())
+          print("COLAB_RUNTIME_REPORT="+json.dumps(result))
+          if not result["gpu_is_t4"]: raise SystemExit("Expected a real Tesla T4 runtime; refusing media work.")
+          PY
+          ) 2>&1 | tee output/colab_gpu_probe.log
+      - name: Check whether the existing ADC token has Drive read permission
+        id: drive
+        continue-on-error: true
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ env.GOOGLE_APPLICATION_CREDENTIALS }}
+        run: |
+          set +e
+          python - <<'PY'
+          import json, os, pathlib
+          from google.auth import load_credentials_from_file
+          from google.auth.transport.requests import Request
+          from googleapiclient.discovery import build
+          report={"status":"failed","scope":"https://www.googleapis.com/auth/drive.readonly","checked_ids":[]}
+          try:
+              creds,_=load_credentials_from_file(os.environ["GOOGLE_APPLICATION_CREDENTIALS"],scopes=[report["scope"]])
+              creds.refresh(Request())
+              service=build("drive","v3",credentials=creds,cache_discovery=False)
+              service.about().get(fields="user(displayName)").execute()
+              ids={"source":"13AL8R54GE-S41TsIbXGX1rhIa-Y0HZm-","current_dub":"15MkBM0m9YduRz4pim2Stp_9ruW5XbqKw","reports":"1mVJpaVrR0Y9ikfeX_lynBCVwDBoUemxV","voice_archive":"1kW388RgJNpoVCFEE8HRU18x4sX250bBf"}
+              for label,fid in ids.items():
+                  meta=service.files().get(fileId=fid,fields="id,name,mimeType,size,trashed,videoMediaMetadata",supportsAllDrives=True).execute()
+                  if meta.get("trashed"): raise RuntimeError(label+" is trashed")
+                  report["checked_ids"].append({"label":label,"name":meta.get("name"),"size":meta.get("size"),"duration_ms":(meta.get("videoMediaMetadata") or {}).get("durationMillis")})
+              report["status"]="passed"
+          except Exception as exc:
+              msg=str(exc).lower()
+              if "insufficient authentication scopes" in msg or "insufficientpermissions" in msg:
+                  report["reason"]="The current COLAB_CREDENTIALS token does not grant Google Drive readonly scope."
+              elif "invalid_grant" in msg or "expired" in msg:
+                  report["reason"]="The Google OAuth refresh credential is expired or revoked."
+              else:
+                  report["reason"]="Drive authorization or file access failed; details are intentionally limited to avoid exposing credential data."
+              report["error_type"]=type(exc).__name__
+          pathlib.Path("output/drive_scope_preflight.json").write_text(json.dumps(report,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+          print(json.dumps(report,ensure_ascii=False,indent=2))
+          raise SystemExit(0 if report["status"]=="passed" else 1)
+          PY
+      - name: Stop the temporary T4 session
+        if: always()
+        continue-on-error: true
+        run: colab --auth=adc stop -s "$SESSION" || true
+      - name: Save diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arabic-dub-colab-preflight-${{ github.run_id }}
+          path: output/**
+          if-no-files-found: warn
+          retention-days: 14
