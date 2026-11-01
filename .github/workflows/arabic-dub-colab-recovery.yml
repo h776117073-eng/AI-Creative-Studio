@@ -4,7 +4,7 @@ on:
   push:
     branches: [automation/arabic-dub-colab-recovery-20261101]
     paths:
-      - "automation/arabic_dub_colab_recovery_20261101/**"
+      - "RECOVERY_TRIGGER.txt"
   workflow_dispatch:
 
 permissions:
@@ -59,7 +59,7 @@ jobs:
         run: |
           set -euo pipefail
           colab --auth=adc exec -s "$SESSION" --timeout 180 -f <(cat <<'PY'
-          import json, shutil, subprocess, torch
+          import json, shutil, torch
           result={"cuda_available":bool(torch.cuda.is_available()),"gpu":None,"ffmpeg":shutil.which("ffmpeg"),"disk_free_gib":round(shutil.disk_usage("/content").free/1024**3,2)}
           if result["cuda_available"]: result["gpu"]=torch.cuda.get_device_name(0)
           result["gpu_is_t4"]=bool(result["gpu"] and "T4" in result["gpu"].upper())
@@ -70,8 +70,6 @@ jobs:
       - name: Check whether the existing ADC token has Drive read permission
         id: drive
         continue-on-error: true
-        env:
-          GOOGLE_APPLICATION_CREDENTIALS: ${{ env.GOOGLE_APPLICATION_CREDENTIALS }}
         run: |
           set +e
           python - <<'PY'
