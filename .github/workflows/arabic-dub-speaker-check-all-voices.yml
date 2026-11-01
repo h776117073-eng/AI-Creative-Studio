@@ -1,0 +1,174 @@
+name: Compare Cartier donor against all ten original speaker masters
+
+on:
+  push:
+    branches: [automation/arabic-dub-colab-recovery-20261101]
+    paths:
+      - ".github/workflows/arabic-dub-speaker-check-all-voices.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare-speakers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Colab CLI
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip google-colab-cli
+          colab version
+
+      - name: Configure Colab credentials locally only
+        env:
+          COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/gcloud" output
+          if [ -z "${COLAB_CREDENTIALS:-}" ]; then echo "::error::COLAB_CREDENTIALS missing"; exit 1; fi
+          python - <<'PY'
+          import json,os,pathlib
+          obj=json.loads(os.environ["COLAB_CREDENTIALS"])
+          if obj.get("type") not in {"authorized_user","service_account","external_account","impersonated_service_account"}: raise SystemExit("Unsupported Colab credential type")
+          p=pathlib.Path.home()/".config/gcloud/application_default_credentials.json"
+          p.write_text(os.environ["COLAB_CREDENTIALS"],encoding="utf-8");p.chmod(0o600)
+          with open(os.environ["GITHUB_ENV"],"a",encoding="utf-8") as f:f.write(f"GOOGLE_APPLICATION_CREDENTIALS={p}\n")
+          print("Colab CLI credentials configured locally; secret contents withheld.")
+          PY
+
+      - name: Allocate standard Colab T4
+        run: |
+          set -euo pipefail
+          SESSION="arabic-dub-all-speakers-${GITHUB_RUN_ID}"
+          echo "SESSION=$SESSION" >> "$GITHUB_ENV"
+          colab --auth=adc new -s "$SESSION" --gpu T4 2>&1 | tee output/session.log
+          colab --auth=adc status -s "$SESSION" 2>&1 | tee output/runtime.txt
+          grep -Eqi 'Hardware: T4|gpu-t4' output/runtime.txt
+
+      - name: Compare donor clips with all original speaker masters
+        timeout-minutes: 120
+        run: |
+          set -euo pipefail
+          mkdir -p output
+          cat > output/compare_all_speakers.py <<'PY'
+          import json,os,subprocess,sys
+          from pathlib import Path
+          ROOT=Path("/content/arabic_dub_all_speakers");ROOT.mkdir(parents=True,exist_ok=True)
+          VIDEO=ROOT/"alternate.mp4";ARCHIVE=ROOT/"voice_archive.zip"
+          FILES={
+            "01_Leda":("1mrtadf_yTJtk9vv2OIEqCSyhi-O_VJjA",17743026,"01_Leda.wav"),
+            "02_Achird":("1n-E4VaPurnlbvaT5V_5taMXNHaGC8Ipl",14792144,"02_Achird.wav"),
+            "03_Kore":("10cFLVZkb79xhYlBIYatBn_6s2hOjc4Os",13408692,"03_Kore.wav"),
+            "04_Fu":("1ZGttKXDYt6lzCtcCYU_2qr84ZgPXHDJq",6129236,"04_Fu.wav"),
+            "05_Zephyr":("11HSnZ57lpUBlvztteIXF58FLydtJOD_J",7190128,"05_Zephyr.wav")
+          }
+          ARCHIVE_ID="1kW388RgJNpoVCFEE8HRU18x4sX250bBf"; ARCHIVE_BYTES=38683364; VIDEO_ID="1TjyE6CuhxxU0iGZDOE3x3S_mnxmiEqlX";VIDEO_BYTES=920467672
+          EXPECTED_ARCHIVE={
+            "06_Fenrir":("final/06_لي_هواي_شين_Fenrir.wav",9554276),
+            "07_Aoede":("final/07_والدة_لي_يانغ_Aoede.wav",4479716),
+            "08_Charon":("final/08_لو_تشن_هونغ_Charon.wav",11929316),
+            "09_Callirrhoe":("final/09_الأدوار_النسائية_الثانوية_Callirrhoe.wav",6157796),
+            "10_Iapetus":("final/10_الأدوار_الرجالية_الثانوية_Iapetus.wav",6559076)
+          }
+          def run(cmd,timeout=900):
+              p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=timeout)
+              if p.returncode: raise RuntimeError(p.stdout[-3000:])
+              return p.stdout
+          import torch
+          if not torch.cuda.is_available() or "T4" not in torch.cuda.get_device_name(0).upper(): raise RuntimeError("Expected standard Tesla T4")
+          subprocess.run([sys.executable,"-m","pip","install","-q","gdown","resemblyzer","soundfile"],check=True)
+          import gdown,numpy as np,soundfile as sf,zipfile
+          def download(fid,dest,expected):
+              if dest.is_file() and dest.stat().st_size==expected:return
+              got=gdown.download(id=fid,output=str(dest),quiet=False,resume=True)
+              if not got or not dest.is_file() or dest.stat().st_size!=expected:raise RuntimeError("Download size mismatch: "+dest.name)
+          download(VIDEO_ID,VIDEO,VIDEO_BYTES)
+          download(ARCHIVE_ID,ARCHIVE,ARCHIVE_BYTES)
+          archive_dir=ROOT/"archive";archive_dir.mkdir(exist_ok=True)
+          with zipfile.ZipFile(ARCHIVE) as z:z.extractall(archive_dir)
+          paths={}
+          for label,(fid,expected,name) in FILES.items():
+              path=ROOT/name;download(fid,path,expected);paths[label]=path
+          for label,(relative,expected) in EXPECTED_ARCHIVE.items():
+              path=archive_dir/relative
+              if not path.is_file() or path.stat().st_size!=expected:raise RuntimeError("Archived voice WAV missing or size mismatch: "+label)
+              paths[label]=path
+          candidates={
+            "cartier_candidate_108s":(108.1,7.5),
+            "cartier_candidate_2188s":(2187.7,6.0)
+          }
+          clips={}
+          for label,(start,duration) in candidates.items():
+              path=ROOT/(label+".wav")
+              run(["ffmpeg","-y","-hide_banner","-loglevel","error","-ss",str(start),"-i",str(VIDEO),"-t",str(duration),"-vn","-ac","1","-ar","16000","-c:a","pcm_s16le",str(path)])
+              clips[label]=sf.read(str(path),dtype="float32")[0]
+              print("CANDIDATE_EXTRACTED",label,"duration",len(clips[label])/16000,flush=True)
+          from resemblyzer import VoiceEncoder,preprocess_wav
+          encoder=VoiceEncoder("cpu")
+          def embedding(x,sr):
+              y=preprocess_wav(x,source_sr=sr)
+              return encoder.embed_utterance(y)
+          ref_emb={}
+          for label,path in paths.items():
+              x,sr=sf.read(str(path),dtype="float32",always_2d=False)
+              if x.ndim>1:x=x.mean(axis=1)
+              # Average embeddings from multiple non-overlapping 8-second windows from this actor's master.
+              em=[]
+              for start in range(0,max(1,len(x)-int(4*sr)),int(8*sr)):
+                  seg=x[start:min(len(x),start+int(8*sr))]
+                  if len(seg)/sr>=4:
+                      em.append(embedding(seg,sr))
+              if not em:raise RuntimeError("No suitable speech windows in "+label)
+              mean=np.mean(em,axis=0);mean=mean/(np.linalg.norm(mean)+1e-12)
+              ref_emb[label]=mean
+              print("REFERENCE_EMBEDDED",label,"windows",len(em),flush=True)
+          # Targeted Achird references avoid relying only on an entire-master average.
+          achird=sf.read(str(paths["02_Achird"]),dtype="float32")[0]
+          targeted={}
+          for label,(start,end) in {"Achird_chased":(39.14,43.06),"Achird_blacklist":(142.81,155.64)}.items():
+              seg=achird[int(start*24000):int(end*24000)]
+              targeted[label]=embedding(seg,24000)
+          all_refs={**ref_emb,**targeted}
+          report={"status":"all_speaker_comparison_complete","gpu":torch.cuda.get_device_name(0),"candidates":{},"method":"Resemblyzer cosine-similarity screening against all ten supplied voice masters plus targeted Achird dialogue references. This is not proof of identity."}
+          for cname,x in clips.items():
+              e=embedding(x,16000);e=e/(np.linalg.norm(e)+1e-12)
+              scores=sorted([(float(np.dot(e,v)),name) for name,v in all_refs.items()],reverse=True)
+              report["candidates"][cname]={"duration_seconds":len(x)/16000,"top_matches":[{"speaker":name,"cosine":score} for score,name in scores[:6]],"achird_centroid_cosine":float(np.dot(e,ref_emb["02_Achird"]))}
+          (ROOT/"all_speaker_report.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
+          print("ALL_SPEAKER_REPORT="+json.dumps(report,ensure_ascii=False),flush=True)
+          PY
+          colab --auth=adc upload -s "$SESSION" output/compare_all_speakers.py /content/compare_all_speakers.py
+          colab --auth=adc exec -s "$SESSION" --timeout 7200 -f output/compare_all_speakers.py 2>&1 | tee output/compare_execution.log
+
+      - name: Retrieve comparison report
+        if: always()
+        continue-on-error: true
+        run: |
+          mkdir -p output/return
+          colab --auth=adc download -s "$SESSION" /content/arabic_dub_all_speakers/all_speaker_report.json output/return/all_speaker_report.json || true
+          colab --auth=adc status -s "$SESSION" >> output/session.log 2>&1 || true
+
+      - name: Require report
+        if: always()
+        run: |
+          test -s output/return/all_speaker_report.json
+          python -m json.tool output/return/all_speaker_report.json >/dev/null
+
+      - name: Stop T4
+        if: always()
+        continue-on-error: true
+        run: colab --auth=adc stop -s "$SESSION" || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: arabic-dub-all-speakers-${{ github.run_id }}
+          path: output/**
+          if-no-files-found: warn
+          retention-days: 7
