@@ -222,7 +222,7 @@ def main():
   if r.get("speaker_script_id") and r.get("speaker_script_id")!="unmatched":
    by_key[(r["speaker_script_id"],int(r.get("utterance_index") or 0))].append(r)
  # Translate grouped source segments once, then rank against every missing utterance.
- clusters=group_rows(assignments)
+ clusters=group_rows([r for r in assignments if r.get("speaker_script_id")=="unmatched"])
  cache={}
  log("TRANSLATE_SOURCE_CLUSTERS count="+str(len(clusters)))
  for i,c in enumerate(clusters):
