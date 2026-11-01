@@ -1,0 +1,37 @@
+name: Full dubbing report audit for all missing utterances
+
+on:
+  push:
+    branches: [automation/arabic-dub-colab-recovery-20261101]
+    paths:
+      - "automation/episode_repair_20261101/deep_report_audit.py"
+      - ".github/workflows/arabic-dub-deep-report-audit.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download and audit the exact saved report archive
+        run: |
+          set -euo pipefail
+          python -m pip install -q gdown
+          python automation/episode_repair_20261101/deep_report_audit.py | tee output_summary.json
+          python -m json.tool output/full_report_audit.json >/dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arabic-dub-full-report-audit-${{ github.run_id }}
+          path: |
+            output/full_report_audit.json
+            output/reports.zip
+            output_summary.json
+          if-no-files-found: error
+          retention-days: 7
