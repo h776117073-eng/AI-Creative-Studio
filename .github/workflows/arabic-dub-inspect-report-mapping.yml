@@ -1,0 +1,66 @@
+name: Inspect saved dubbing report speaker and timing map
+
+on:
+  push:
+    branches: [automation/arabic-dub-colab-recovery-20261101]
+    paths:
+      - ".github/workflows/arabic-dub-inspect-report-mapping.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-reports:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download and inspect the saved report archive
+        run: |
+          set -euo pipefail
+          python -m pip install -q gdown
+          python - <<'PY'
+          import gdown,json,zipfile
+          from pathlib import Path
+          p=Path('reports.zip')
+          if not gdown.download(id='1mVJpaVrR0Y9ikfeX_lynBCVwDBoUemxV',output=str(p),quiet=False,resume=True):
+              raise SystemExit('Could not download the shared report archive.')
+          with zipfile.ZipFile(p) as z:
+              bad=z.testzip()
+              if bad: raise SystemExit('Corrupt ZIP member: '+bad)
+              def load(name):
+                  hits=[n for n in z.namelist() if Path(n).name==name]
+                  if len(hits)!=1: raise SystemExit('Expected exactly one '+name+'; found '+str(len(hits)))
+                  return json.loads(z.read(hits[0]).decode('utf-8-sig'))
+              manifest=load('render_manifest.json')
+              timing=load('voice_line_timing.json')
+              mapping=load('source_to_arabic_lines.json')
+          expected={(t['speaker_id'],int(u['utterance_index'])) for t in timing.get('tracks',[]) for u in t.get('utterances',[])}
+          rendered={(x.get('speaker_script_id'),int(x.get('utterance_index') or 0)) for x in manifest.get('lines',[])}
+          missing=sorted(expected-rendered)
+          report={'status':'report_mapping_inspected','archive_bytes':p.stat().st_size,'tracks':[],'missing_utterances':missing,'cartier_source_assignments':[],'cartier_voice_timing':[]}
+          for t in timing.get('tracks',[]):
+              items=[]
+              for u in t.get('utterances',[]):
+                  key=(t['speaker_id'],int(u['utterance_index']))
+                  if key in missing or any(k in str(u.get('text','')).lower() for k in ['كارتييه','cartier','حديقة']):
+                      items.append({'utterance_index':key[1],'missing':key in missing,'text':u.get('text'),'track_file':t.get('track_file'),'track_start_seconds':u.get('track_start_seconds'),'track_end_seconds':u.get('track_end_seconds')})
+              report['tracks'].append({'speaker_id':t.get('speaker_id'),'track_file':t.get('track_file'),'selected_utterances':items})
+          for row in mapping.get('assignments',[]):
+              text=str(row.get('source_text') or '')
+              if any(k in text.lower() for k in ['卡地亚','cartier','garden']):
+                  report['cartier_source_assignments'].append({k:row.get(k) for k in ['speaker_script_id','utterance_index','source_speaker_id','source_start','source_end','confidence','source_text']})
+          out=Path('report_mapping.json')
+          out.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
+          print(json.dumps(report,ensure_ascii=False,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: arabic-dub-report-mapping-${{ github.run_id }}
+          path: report_mapping.json
+          if-no-files-found: error
+          retention-days: 7
