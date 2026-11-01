@@ -1,127 +1,285 @@
-name: Arabic dubbing — isolated Colab recovery preflight
+name: Arabic dubbing — public-link Colab T4 repair
 
 on:
   push:
     branches: [automation/arabic-dub-colab-recovery-20261101]
+    paths:
+      - ".github/workflows/arabic-dub-colab-recovery.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: arabic-dub-colab-recovery-20261101
+  group: arabic-dub-public-link-repair
   cancel-in-progress: false
 
 jobs:
-  colab-drive-preflight:
+  repair:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install official Colab CLI and Drive API client
+
+      - name: Install official Colab CLI
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip
-          python -m pip install --upgrade google-colab-cli google-auth google-api-python-client
+          python -m pip install --upgrade pip google-colab-cli
           colab version
-      - name: Configure repository Colab credentials locally
+
+      - name: Configure Colab CLI credentials locally only
         env:
           COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
         run: |
           set -euo pipefail
           mkdir -p "$HOME/.config/gcloud" output
-          if [ -z "${COLAB_CREDENTIALS:-}" ]; then echo "COLAB_CREDENTIALS missing"; exit 1; fi
+          if [ -z "${COLAB_CREDENTIALS:-}" ]; then
+            echo "::error::COLAB_CREDENTIALS is missing."
+            exit 1
+          fi
           python - <<'PY'
           import json, os, pathlib
-          obj=json.loads(os.environ["COLAB_CREDENTIALS"])
+          obj = json.loads(os.environ["COLAB_CREDENTIALS"])
           if obj.get("type") not in {"authorized_user","service_account","external_account","impersonated_service_account"}:
-              raise SystemExit("Unsupported Google ADC credential JSON")
-          p=pathlib.Path.home()/".config/gcloud/application_default_credentials.json"
-          p.write_text(os.environ["COLAB_CREDENTIALS"],encoding="utf-8"); p.chmod(0o600)
-          with open(os.environ["GITHUB_ENV"],"a",encoding="utf-8") as f: f.write(f"GOOGLE_APPLICATION_CREDENTIALS={p}\n")
-          print("Colab ADC configured; credential contents withheld.")
+              raise SystemExit("Unsupported Colab ADC credential type.")
+          p = pathlib.Path.home()/".config/gcloud/application_default_credentials.json"
+          p.write_text(os.environ["COLAB_CREDENTIALS"], encoding="utf-8")
+          p.chmod(0o600)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
+              f.write(f"GOOGLE_APPLICATION_CREDENTIALS={p}\n")
+          print("Colab CLI credentials configured locally; secret contents withheld.")
           PY
-      - name: Request and verify a new standard Colab T4
-        id: colab
+
+      - name: Allocate and verify standard Tesla T4
+        id: runtime
         run: |
           set -euo pipefail
-          SESSION="arabic-dub-preflight-${GITHUB_RUN_ID}"
+          SESSION="arabic-dub-link-repair-${GITHUB_RUN_ID}"
           echo "SESSION=$SESSION" >> "$GITHUB_ENV"
           colab --auth=adc new -s "$SESSION" --gpu T4 2>&1 | tee output/colab_session.log
           colab --auth=adc status -s "$SESSION" 2>&1 | tee output/colab_runtime_status.txt
           grep -Eqi 'Hardware: T4|gpu-t4' output/colab_runtime_status.txt
-      - name: Test actual remote CUDA availability without sending credentials to the runtime
+
+      - name: Create remote public-link repair bootstrap
         run: |
           set -euo pipefail
-          colab --auth=adc exec -s "$SESSION" --timeout 180 -f <(cat <<'PY'
-          import json, shutil, torch
-          result={"cuda_available":bool(torch.cuda.is_available()),"gpu":None,"ffmpeg":shutil.which("ffmpeg"),"disk_free_gib":round(shutil.disk_usage("/content").free/1024**3,2)}
-          if result["cuda_available"]: result["gpu"]=torch.cuda.get_device_name(0)
-          result["gpu_is_t4"]=bool(result["gpu"] and "T4" in result["gpu"].upper())
-          print("COLAB_RUNTIME_REPORT="+json.dumps(result))
-          if not result["gpu_is_t4"]: raise SystemExit("Expected a real Tesla T4 runtime; refusing media work.")
+          mkdir -p output/colab_return
+          cat > output/run_link_repair.py <<'PY'
+          from __future__ import annotations
+          import hashlib, importlib.util, json, re, subprocess, sys, time, traceback
+          from pathlib import Path
+
+          ROOT = Path("/content/episode_repair_20261031")
+          ROOT.mkdir(parents=True, exist_ok=True)
+          (ROOT / "assets").mkdir(parents=True, exist_ok=True)
+          (ROOT / "voices").mkdir(parents=True, exist_ok=True)
+
+          # The public file links below are the only media-transfer credentials.
+          ASSETS = {
+              "source": {
+                  "id": "13AL8R54GE-S41TsIbXGX1rhIa-Y0HZm-",
+                  "name": "🔴 FULL - 女孩相亲认错人，将错就错与千亿霸总当天领证！ - Original Quality.mkv",
+                  "bytes": 846325293
+              },
+              "current_dub": {
+                  "id": "15MkBM0m9YduRz4pim2Stp_9ruW5XbqKw",
+                  "name": "الحلقة_مدبلجة_بالعربية.mkv",
+                  "bytes": 971090724
+              },
+              "reports": {
+                  "id": "1mVJpaVrR0Y9ikfeX_lynBCVwDBoUemxV",
+                  "name": "تقارير_التحقق_والموائمة.zip",
+                  "bytes": 197507
+              },
+              "voice_archive": {
+                  "id": "1kW388RgJNpoVCFEE8HRU18x4sX250bBf",
+                  "name": "الأصوات_العربية_المتبقية_06-10.zip",
+                  "bytes": 38683364
+              }
+          }
+          VOICES = {
+              "01_لي_يانغ_Leda.wav": {"id": "1mrtadf_yTJtk9vv2OIEqCSyhi-O_VJjA", "bytes": 17743026},
+              "02_لو_مينغ_Achird.wav": {"id": "1n-E4VaPurnlbvaT5V_5taMXNHaGC8Ipl", "bytes": 14792144},
+              "03_تشوانغ_شيان_يوي_Kore.wav": {"id": "10cFLVZkb79xhYlBIYatBn_6s2hOjc4Os", "bytes": 13408692},
+              "04_فو_شاوتشينغ_Puck.wav": {"id": "1ZGttKXDYt6lzCtcCYU_2qr84ZgPXHDJq", "bytes": 6129236},
+              "05_شيا_مو_يان_Zephyr.wav": {"id": "11HSnZ57lpUBlvztteIXF58FLydtJOD_J", "bytes": 7190128}
+          }
+
+          subprocess.run([sys.executable, "-m", "pip", "install", "-q", "gdown", "Pillow", "requests"], check=True)
+          import gdown
+
+          expected_sizes = {x["id"]: x["bytes"] for x in ASSETS.values()}
+          expected_sizes.update({x["id"]: x["bytes"] for x in VOICES.values()})
+
+          transfer = {
+              "transfer_policy": "public_viewer_links",
+              "created_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+              "files": {
+                  "source": {"name": ASSETS["source"]["name"], "url": "https://drive.google.com/uc?id=" + ASSETS["source"]["id"] + "&export=download"},
+                  "current_dub": {"name": ASSETS["current_dub"]["name"], "url": "https://drive.google.com/uc?id=" + ASSETS["current_dub"]["id"] + "&export=download"},
+                  "reports": {"name": ASSETS["reports"]["name"], "url": "https://drive.google.com/uc?id=" + ASSETS["reports"]["id"] + "&export=download"},
+                  "voice_archive": {"name": ASSETS["voice_archive"]["name"], "url": "https://drive.google.com/uc?id=" + ASSETS["voice_archive"]["id"] + "&export=download"},
+                  "individual_voices": {
+                      name: {"name": name, "url": "https://drive.google.com/uc?id=" + item["id"] + "&export=download"}
+                      for name, item in VOICES.items()
+                  }
+              }
+          }
+          (ROOT / "transfer_manifest.json").write_text(json.dumps(transfer, ensure_ascii=False, indent=2), encoding="utf-8")
+
+          runner_path = ROOT / "runner.py"
+          if not runner_path.is_file():
+              raise FileNotFoundError("Existing episode repair runner was not uploaded.")
+
+          def download_public_link(url: str, dest: Path, expected_sha256: str | None = None) -> Path:
+              match = re.search(r"(?:[?&]id=|/d/)([A-Za-z0-9_-]+)", url)
+              if not match:
+                  raise RuntimeError("A public Drive file link has no recognizable file ID.")
+              file_id = match.group(1)
+              expected = expected_sizes.get(file_id)
+              dest.parent.mkdir(parents=True, exist_ok=True)
+              tmp = dest.with_suffix(dest.suffix + ".download")
+              tmp.unlink(missing_ok=True)
+              print("PUBLIC_DOWNLOAD_START=" + dest.name + "; expected_bytes=" + str(expected), flush=True)
+              result = gdown.download(id=file_id, output=str(tmp), quiet=False, resume=True)
+              if not result or not tmp.is_file():
+                  raise RuntimeError("Public-link download failed for " + dest.name)
+              actual = tmp.stat().st_size
+              if expected is not None and actual != expected:
+                  tmp.unlink(missing_ok=True)
+                  raise RuntimeError("Downloaded size mismatch for " + dest.name + ": " + str(actual) + " != " + str(expected))
+              tmp.replace(dest)
+              print("PUBLIC_DOWNLOAD_VERIFIED=" + dest.name + "; bytes=" + str(actual), flush=True)
+              return dest
+
+          spec = importlib.util.spec_from_file_location("episode_repair_runner", runner_path)
+          if spec is None or spec.loader is None:
+              raise RuntimeError("Could not import the existing repair runner.")
+          runner = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(runner)
+
+          def read_public_manifest():
+              data = json.loads((ROOT / "transfer_manifest.json").read_text(encoding="utf-8"))
+              if data.get("transfer_policy") != "public_viewer_links":
+                  raise RuntimeError("Transfer manifest is not the declared public-link mode.")
+              return data
+
+          runner.load_transfer_manifest = read_public_manifest
+          runner.download_signed_url = download_public_link
+          print("T4_DEVICE_CHECK_BEGIN", flush=True)
+          import torch
+          if not torch.cuda.is_available() or "T4" not in torch.cuda.get_device_name(0).upper():
+              raise RuntimeError("A real Tesla T4 is required; no CPU fallback is allowed.")
+          print("T4_DEVICE_VERIFIED=" + torch.cuda.get_device_name(0), flush=True)
+
+          try:
+              runner.main()
+              qa_path = ROOT / "qa_report.json"
+              if not qa_path.is_file():
+                  raise RuntimeError("Runner ended without qa_report.json.")
+              qa = json.loads(qa_path.read_text(encoding="utf-8"))
+              final_video = ROOT / "الحلقة_مدبلجة_بالعربية_النهائية.mkv"
+              if qa.get("status") != "rendered_and_technical_checks_passed" or not final_video.is_file():
+                  raise RuntimeError("Repair did not pass its own render and technical QA gate.")
+              h = hashlib.sha256()
+              with final_video.open("rb") as f:
+                  for block in iter(lambda: f.read(8 * 1024 * 1024), b""):
+                      h.update(block)
+              if h.hexdigest() != qa.get("final_sha256"):
+                  raise RuntimeError("Final render SHA256 does not match the QA report.")
+              status = {
+                  "status": "TECHNICAL_QA_PASSED_MANUAL_REVIEW_REQUIRED",
+                  "file": final_video.name,
+                  "size_bytes": final_video.stat().st_size,
+                  "sha256": h.hexdigest(),
+                  "duration_seconds": qa.get("duration_seconds"),
+                  "visual_lip_animation": "not performed; source picture stream copied unchanged",
+                  "human_audio_review": "still required; automated runner performs technical decode only",
+                  "music_and_effects_review": "still required; not certified by automated checks"
+              }
+              (ROOT / "run_status.json").write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
+              print("PUBLIC_LINK_REPAIR_STATUS=TECHNICAL_QA_PASSED_MANUAL_REVIEW_REQUIRED", flush=True)
+              print(json.dumps(status, ensure_ascii=False), flush=True)
+          except Exception as exc:
+              failed = {"status": "failed_or_blocked", "error_type": type(exc).__name__, "error": str(exc)}
+              qa_path = ROOT / "qa_report.json"
+              if qa_path.is_file():
+                  try: failed["runner_qa"] = json.loads(qa_path.read_text(encoding="utf-8"))
+                  except Exception: pass
+              (ROOT / "run_status.json").write_text(json.dumps(failed, ensure_ascii=False, indent=2), encoding="utf-8")
+              print("PUBLIC_LINK_REPAIR_STATUS=FAILED_OR_BLOCKED", flush=True)
+              print(json.dumps(failed, ensure_ascii=False), flush=True)
+              raise
           PY
-          ) 2>&1 | tee output/colab_gpu_probe.log
-      - name: Check whether the existing ADC token has Drive read permission
-        id: drive
+
+      - name: Upload the runner and execute link-based repair on Colab
+        timeout-minutes: 300
+        run: |
+          set -euo pipefail
+          colab --auth=adc exec -s "$SESSION" --timeout 300 -f <(printf '%s\n' 'from pathlib import Path; p=Path("/content/episode_repair_20261031"); p.mkdir(parents=True,exist_ok=True); print("REMOTE_WORKSPACE_READY")')
+          colab --auth=adc upload -s "$SESSION" automation/episode_repair_20261031/runner.py /content/episode_repair_20261031/runner.py
+          colab --auth=adc exec -s "$SESSION" --timeout 14400 -f output/run_link_repair.py 2>&1 | tee output/colab_execution.log
+
+      - name: Retrieve outputs and diagnostics from Colab
+        if: always()
         continue-on-error: true
+        timeout-minutes: 60
         run: |
           set +e
-          python - <<'PY'
-          import json, os, pathlib
-          from google.auth import load_credentials_from_file
-          from google.auth.transport.requests import Request
-          from googleapiclient.discovery import build
-          report={"status":"failed","scope":"https://www.googleapis.com/auth/drive.readonly","checked_ids":[]}
-          try:
-              creds,_=load_credentials_from_file(os.environ["GOOGLE_APPLICATION_CREDENTIALS"],scopes=[report["scope"]])
-              creds.refresh(Request())
-              service=build("drive","v3",credentials=creds,cache_discovery=False)
-              service.about().get(fields="user(displayName)").execute()
-              ids={"source":"13AL8R54GE-S41TsIbXGX1rhIa-Y0HZm-","current_dub":"15MkBM0m9YduRz4pim2Stp_9ruW5XbqKw","reports":"1mVJpaVrR0Y9ikfeX_lynBCVwDBoUemxV","voice_archive":"1kW388RgJNpoVCFEE8HRU18x4sX250bBf"}
-              for label,fid in ids.items():
-                  meta=service.files().get(fileId=fid,fields="id,name,mimeType,size,trashed,videoMediaMetadata",supportsAllDrives=True).execute()
-                  if meta.get("trashed"): raise RuntimeError(label+" is trashed")
-                  report["checked_ids"].append({"label":label,"name":meta.get("name"),"size":meta.get("size"),"duration_ms":(meta.get("videoMediaMetadata") or {}).get("durationMillis")})
-              report["status"]="passed"
-          except Exception as exc:
-              msg=str(exc).lower()
-              if "insufficient authentication scopes" in msg or "insufficientpermissions" in msg:
-                  report["reason"]="The current COLAB_CREDENTIALS token does not grant Google Drive readonly scope."
-              elif "invalid_grant" in msg or "expired" in msg:
-                  report["reason"]="The Google OAuth refresh credential is expired or revoked."
-              else:
-                  report["reason"]="Drive authorization or file access failed; details are intentionally limited to avoid exposing credential data."
-              report["error_type"]=type(exc).__name__
-          pathlib.Path("output/drive_scope_preflight.json").write_text(json.dumps(report,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
-          print(json.dumps(report,ensure_ascii=False,indent=2))
-          raise SystemExit(0 if report["status"]=="passed" else 1)
-          PY
-      - name: Stop the temporary T4 session
-        if: always()
-        continue-on-error: true
-        run: colab --auth=adc stop -s "$SESSION" || true
-      - name: Enforce the Drive authorization gate
+          mkdir -p output/colab_return
+          colab --auth=adc download -s "$SESSION" /content/episode_repair_20261031/qa_report.json output/colab_return/qa_report.json
+          colab --auth=adc download -s "$SESSION" /content/episode_repair_20261031/run_status.json output/colab_return/run_status.json
+          colab --auth=adc download -s "$SESSION" /content/episode_repair_20261031/progress.json output/colab_return/progress.json
+          colab --auth=adc download -s "$SESSION" /content/episode_repair_20261031/asset_audit.json output/colab_return/asset_audit.json
+          colab --auth=adc download -s "$SESSION" /content/episode_repair_20261031/timeline_plan.json output/colab_return/timeline_plan.json
+          colab --auth=adc download -s "$SESSION" /content/episode_repair_20261031/contact_sheet.jpg output/colab_return/contact_sheet.jpg
+          colab --auth=adc download -s "$SESSION" /content/episode_repair_20261031/repair.log output/colab_return/repair.log
+          colab --auth=adc download -s "$SESSION" /content/episode_repair_20261031/الحلقة_مدبلجة_بالعربية_النهائية.mkv output/colab_return/final_repaired.mkv
+          colab --auth=adc status -s "$SESSION" >> output/colab_session.log 2>&1
+          colab --auth=adc log -s "$SESSION" -n 100 -o output/colab_history.txt >> output/colab_session.log 2>&1
+
+      - name: Verify retrieved final candidate against remote QA
         if: always()
         run: |
           python - <<'PY'
-          import json, pathlib
-          p=pathlib.Path("output/drive_scope_preflight.json")
-          if not p.is_file(): raise SystemExit("Drive preflight report is missing.")
-          report=json.loads(p.read_text(encoding="utf-8"))
-          if report.get("status")!="passed":
-              print(report.get("reason","Drive read authorization failed."))
-              raise SystemExit(1)
-          print("Drive readonly access verified for the required input assets.")
+          import hashlib, json, pathlib, sys
+          root=pathlib.Path("output/colab_return")
+          qa=root/"qa_report.json"
+          video=root/"final_repaired.mkv"
+          if not qa.is_file() or not video.is_file():
+              print("RETRIEVED_FINAL=NOT_AVAILABLE")
+              sys.exit(0)
+          report=json.loads(qa.read_text(encoding="utf-8"))
+          h=hashlib.sha256()
+          with video.open("rb") as f:
+              for b in iter(lambda:f.read(8*1024*1024),b""): h.update(b)
+          valid=(report.get("status")=="rendered_and_technical_checks_passed"
+                 and video.stat().st_size==int(report.get("final_size_bytes") or 0)
+                 and h.hexdigest()==report.get("final_sha256"))
+          print("RETRIEVED_FINAL_SHA256_CHECK="+("PASSED" if valid else "FAILED"))
+          if not valid: sys.exit(1)
+          print("RETRIEVED_FINAL=VERIFIED_TECHNICAL_CANDIDATE")
           PY
-      - name: Save diagnostics
+
+      - name: Stop T4 after a successful completed render
+        if: success()
+        continue-on-error: true
+        run: colab --auth=adc stop -s "$SESSION" || true
+
+      - name: Preserve session when repair or verification fails
+        if: failure()
+        run: echo "Colab session $SESSION retained for checkpoint-based diagnosis."
+
+      - name: Upload QA, execution logs and rendered candidate
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: arabic-dub-colab-preflight-${{ github.run_id }}
+          name: arabic-dub-public-link-repair-${{ github.run_id }}
           path: output/**
           if-no-files-found: warn
+          compression-level: 0
           retention-days: 14
