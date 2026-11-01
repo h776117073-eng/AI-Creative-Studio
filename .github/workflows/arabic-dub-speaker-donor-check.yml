@@ -81,10 +81,11 @@ jobs:
           print("DOWNLOADS_VERIFIED",flush=True)
           # Extract candidate Cartier Garden speech and reference utterances from Achird's own voice master.
           clips={
-              "candidate_cartier_108s":(MP4,108.1,115.6),
+              "candidate_cartier_108s":(MP4,108.31,112.01),
+              "candidate_context_108s":(MP4,102.31,115.51),
               "reference_chased_achird":(WAV,39.0,43.2),
               "reference_blacklist_achird":(WAV,142.7,155.8),
-              "candidate_cartier_repeat_2188s":(MP4,2187.7,2193.0)
+              "candidate_cartier_repeat_2188s":(MP4,2188.0,2192.0)
           }
           extracted={}
           for name,(src,start,end) in clips.items():
