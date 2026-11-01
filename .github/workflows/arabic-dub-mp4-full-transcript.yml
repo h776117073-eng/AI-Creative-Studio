@@ -1,0 +1,177 @@
+name: Arabic dub — full MP4 audio phrase index (resumable)
+
+on:
+  push:
+    branches: [automation/arabic-dub-colab-recovery-20261101]
+    paths:
+      - ".github/workflows/arabic-dub-mp4-full-transcript.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arabic-dub-full-audio-index
+  cancel-in-progress: false
+
+jobs:
+  index-audio:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install official Colab CLI
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip google-colab-cli
+          colab version
+
+      - name: Configure Colab CLI credentials locally only
+        env:
+          COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/gcloud" output
+          if [ -z "${COLAB_CREDENTIALS:-}" ]; then echo "::error::COLAB_CREDENTIALS missing"; exit 1; fi
+          python - <<'PY'
+          import json,os,pathlib
+          obj=json.loads(os.environ["COLAB_CREDENTIALS"])
+          if obj.get("type") not in {"authorized_user","service_account","external_account","impersonated_service_account"}: raise SystemExit("Unsupported Colab credential type")
+          p=pathlib.Path.home()/".config/gcloud/application_default_credentials.json"
+          p.write_text(os.environ["COLAB_CREDENTIALS"],encoding="utf-8");p.chmod(0o600)
+          with open(os.environ["GITHUB_ENV"],"a",encoding="utf-8") as f:f.write(f"GOOGLE_APPLICATION_CREDENTIALS={p}\n")
+          print("Local Colab CLI credentials configured; credential contents withheld.")
+          PY
+
+      - name: Allocate standard Colab T4
+        run: |
+          set -euo pipefail
+          SESSION="arabic-dub-audio-index-${GITHUB_RUN_ID}"
+          echo "SESSION=$SESSION" >> "$GITHUB_ENV"
+          colab --auth=adc new -s "$SESSION" --gpu T4 2>&1 | tee output/session.log
+          colab --auth=adc status -s "$SESSION" 2>&1 | tee output/runtime.txt
+          grep -Eqi 'Hardware: T4|gpu-t4' output/runtime.txt
+
+      - name: Build resumable full-audio indexer
+        run: |
+          set -euo pipefail
+          mkdir -p output
+          cat > output/index_full_audio.py <<'PY'
+          import hashlib,json,subprocess,sys,time
+          from pathlib import Path
+          import numpy as np
+          import soundfile as sf
+
+          ROOT=Path("/content/arabic_dub_full_audio_index");ROOT.mkdir(parents=True,exist_ok=True)
+          VIDEO=ROOT/"Billionaire_Granny_Arabic_Dubbed_Final.mp4"
+          AUDIO=ROOT/"audio_16k_mono.wav"
+          FILE_ID="1TjyE6CuhxxU0iGZDOE3x3S_mnxmiEqlX"
+          EXPECTED=920467672
+          def run(cmd,timeout=1800):
+              p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=timeout)
+              if p.returncode: raise RuntimeError(p.stdout[-5000:])
+              return p.stdout
+          def write_json(p,obj):
+              tmp=p.with_suffix(p.suffix+".tmp");tmp.write_text(json.dumps(obj,ensure_ascii=False,indent=2),encoding="utf-8");tmp.replace(p)
+          import torch
+          if not torch.cuda.is_available() or "T4" not in torch.cuda.get_device_name(0).upper(): raise RuntimeError("Expected standard Colab T4 runtime")
+          print("COLAB_GPU="+torch.cuda.get_device_name(0),flush=True)
+          subprocess.run([sys.executable,"-m","pip","install","-q","gdown","faster-whisper","soundfile"],check=True)
+          import gdown
+          if not VIDEO.is_file() or VIDEO.stat().st_size!=EXPECTED:
+              print("DOWNLOADING_ALTERNATE_MP4",flush=True)
+              got=gdown.download(id=FILE_ID,output=str(VIDEO),quiet=False,resume=True)
+              if not got or not VIDEO.is_file() or VIDEO.stat().st_size!=EXPECTED: raise RuntimeError("Alternate MP4 download failed size verification")
+          print("MP4_BYTES="+str(VIDEO.stat().st_size),flush=True)
+          if not AUDIO.is_file():
+              print("EXTRACTING_AUDIO",flush=True)
+              run(["ffmpeg","-y","-hide_banner","-loglevel","error","-i",str(VIDEO),"-vn","-ac","1","-ar","16000","-c:a","pcm_s16le",str(AUDIO)],timeout=1800)
+          info=sf.info(str(AUDIO));duration=float(info.duration)
+          print("AUDIO_DURATION="+str(duration),flush=True)
+          meta={"video_name":VIDEO.name,"video_bytes":VIDEO.stat().st_size,"audio_duration":duration,"audio_sample_rate":info.samplerate,"audio_channels":info.channels,"model":"tiny","device":"cpu","compute_type":"int8","chunk_seconds":300}
+          write_json(ROOT/"audio_index_manifest.json",meta)
+          from faster_whisper import WhisperModel
+          print("LOADING_TINY_CPU_INT8",flush=True)
+          model=WhisperModel("tiny",device="cpu",compute_type="int8",cpu_threads=4,num_workers=1)
+          chunks=ROOT/"chunks";chunks.mkdir(exist_ok=True)
+          total=int(np.ceil(duration/300))
+          for idx in range(total):
+              out=chunks/f"chunk_{idx:03d}.json"
+              if out.is_file():
+                  try:
+                      obj=json.loads(out.read_text(encoding="utf-8"))
+                      if obj.get("status")=="complete":
+                          print("RESUME_SKIP_CHUNK="+str(idx),flush=True);continue
+                  except Exception: pass
+              start=idx*300;end=min(duration,(idx+1)*300)
+              with sf.SoundFile(str(AUDIO)) as f:
+                  f.seek(int(start*info.samplerate))
+                  arr=f.read(int((end-start)*info.samplerate),dtype="float32",always_2d=False)
+              print("TRANSCRIBE_CHUNK="+str(idx+1)+"/"+str(total)+"; "+str(start)+"-"+str(end),flush=True)
+              segs,language_info=model.transcribe(arr,language="ar",beam_size=1,best_of=1,vad_filter=True,condition_on_previous_text=False)
+              rows=[]
+              for s in segs:
+                  rows.append({"start":round(float(s.start)+start,3),"end":round(float(s.end)+start,3),"text":s.text.strip(),"avg_logprob":round(float(s.avg_logprob),3),"no_speech_prob":round(float(s.no_speech_prob),3)})
+              obj={"status":"complete","chunk_index":idx,"start":start,"end":end,"language":language_info.language,"language_probability":language_info.language_probability,"segments":rows}
+              write_json(out,obj)
+              print("CHUNK_COMPLETE="+str(idx)+"; segments="+str(len(rows)),flush=True)
+              for s in rows:
+                  low=s["text"].lower()
+                  if any(x in low for x in ["شيان يوي","القائمة السوداء","فو شاوتشينغ","حراس","ساعي البريد","نادل","رجال جدي","هوية","مسكن","كارتير","المر","يؤلمني","ابنتي"]):
+                      print("PHRASE_CANDIDATE="+json.dumps(s,ensure_ascii=False),flush=True)
+          allrows=[]
+          for idx in range(total):
+              obj=json.loads((chunks/f"chunk_{idx:03d}.json").read_text(encoding="utf-8"))
+              allrows.extend(obj["segments"])
+          full={"status":"full_audio_index_complete","manifest":meta,"segment_count":len(allrows),"segments":allrows}
+          write_json(ROOT/"full_transcript.json",full)
+          h=hashlib.sha256(AUDIO.read_bytes()).hexdigest()
+          write_json(ROOT/"run_status.json",{"status":"complete","segments":len(allrows),"audio_sha256":h,"duration_seconds":duration,"chunks":total})
+          print("FULL_AUDIO_INDEX_COMPLETE segments="+str(len(allrows))+" sha256="+h,flush=True)
+          PY
+
+      - name: Upload indexer and transcribe entire MP4 audio with resumable 5-minute chunks
+        timeout-minutes: 300
+        run: |
+          set -euo pipefail
+          colab --auth=adc upload -s "$SESSION" output/index_full_audio.py /content/index_full_audio.py
+          colab --auth=adc exec -s "$SESSION" --timeout 18000 -f output/index_full_audio.py 2>&1 | tee output/full_audio_index.log
+
+      - name: Retrieve transcript and index status
+        if: always()
+        continue-on-error: true
+        run: |
+          mkdir -p output/return
+          colab --auth=adc download -s "$SESSION" /content/arabic_dub_full_audio_index/full_transcript.json output/return/full_transcript.json || true
+          colab --auth=adc download -s "$SESSION" /content/arabic_dub_full_audio_index/run_status.json output/return/run_status.json || true
+          colab --auth=adc download -s "$SESSION" /content/arabic_dub_full_audio_index/audio_index_manifest.json output/return/audio_index_manifest.json || true
+          colab --auth=adc status -s "$SESSION" >> output/session.log 2>&1 || true
+
+      - name: Require complete audio index
+        if: always()
+        run: |
+          if [ ! -s output/return/full_transcript.json ] || [ ! -s output/return/run_status.json ]; then
+            echo "::error::Full audio index was not completed or could not be retrieved."
+            tail -n 100 output/full_audio_index.log || true
+            exit 1
+          fi
+          python -m json.tool output/return/full_transcript.json >/dev/null
+          python -m json.tool output/return/run_status.json >/dev/null
+          grep -q '"status": "complete"' output/return/run_status.json
+
+      - name: Stop Colab T4
+        if: always()
+        continue-on-error: true
+        run: colab --auth=adc stop -s "$SESSION" || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: arabic-dub-full-audio-index-${{ github.run_id }}
+          path: output/**
+          if-no-files-found: warn
+          compression-level: 6
+          retention-days: 7
