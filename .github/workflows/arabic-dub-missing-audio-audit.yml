@@ -1,4 +1,5 @@
 name: Audit all missing Arabic dub lines against voice masters and source
+# Re-run after the audit-script syntax correction.
 
 on:
   push:
