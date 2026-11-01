@@ -1,0 +1,62 @@
+name: Read-only monitor for current Arabic dub Colab session
+
+on:
+  push:
+    branches: [automation/arabic-dub-colab-recovery-20261101]
+    paths:
+      - ".github/workflows/arabic-dub-colab-session-monitor.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Colab CLI
+        run: |
+          python -m pip install --upgrade pip google-colab-cli
+          colab version
+
+      - name: Configure Colab CLI credentials locally only
+        env:
+          COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/gcloud" output
+          if [ -z "${COLAB_CREDENTIALS:-}" ]; then echo "::error::COLAB_CREDENTIALS missing"; exit 1; fi
+          python - <<'PY'
+          import json,os,pathlib
+          obj=json.loads(os.environ["COLAB_CREDENTIALS"])
+          if obj.get("type") not in {"authorized_user","service_account","external_account","impersonated_service_account"}:
+              raise SystemExit("Unsupported credential type")
+          p=pathlib.Path.home()/".config/gcloud/application_default_credentials.json"
+          p.write_text(os.environ["COLAB_CREDENTIALS"],encoding="utf-8"); p.chmod(0o600)
+          with open(os.environ["GITHUB_ENV"],"a",encoding="utf-8") as f: f.write(f"GOOGLE_APPLICATION_CREDENTIALS={p}\n")
+          print("Local CLI configuration complete; no credential value displayed.")
+          PY
+
+      - name: Read current Colab session and notebook history
+        continue-on-error: true
+        run: |
+          set +e
+          SESSION="arabic-dub-mp4-probe-41334011457"
+          echo "SESSION=$SESSION"
+          colab --auth=adc status -s "$SESSION" 2>&1 | tee output/session_status.txt
+          colab --auth=adc log -s "$SESSION" -n 150 -o output/notebook_history.txt 2>&1 | tee output/log_fetch.txt
+          test -s output/notebook_history.txt && tail -n 150 output/notebook_history.txt || true
+          exit 0
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: arabic-dub-colab-live-monitor-${{ github.run_id }}
+          path: output/**
+          if-no-files-found: warn
+          retention-days: 3
