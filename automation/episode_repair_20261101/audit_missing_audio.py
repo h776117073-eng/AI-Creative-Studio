@@ -368,7 +368,14 @@ def main():
   for sid,x in voice_asr.items()
  },ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
  log("AUDIT_COMPLETE missing="+str(len(results))+" frames="+str(len(list(FRAMES.glob("*.jpg")))))
- import zipfile as _zipfile\n bundle=OUT/"missing_audio_audit_bundle.zip"\n with _zipfile.ZipFile(bundle,"w",compression=_zipfile.ZIP_DEFLATED,compresslevel=4) as zf:\n  for p in OUT.rglob("*"):\n   if p.is_file() and p != bundle:\n    zf.write(p,p.relative_to(OUT))\n log("BUNDLE_BYTES="+str(bundle.stat().st_size))\n print(json.dumps({"status":result["status"],"missing":len(results),
+ import zipfile as _zipfile
+ bundle=OUT/"missing_audio_audit_bundle.zip"
+ with _zipfile.ZipFile(bundle,"w",compression=_zipfile.ZIP_DEFLATED,compresslevel=4) as zf:
+  for p in OUT.rglob("*"):
+   if p.is_file() and p != bundle:
+    zf.write(p,p.relative_to(OUT))
+ log("BUNDLE_BYTES="+str(bundle.stat().st_size))
+ print(json.dumps({"status":result["status"],"missing":len(results),
                    "voice_tracks_transcribed":len(voice_asr),
                    "candidate_checks":sum(len(x["candidate_checks"]) for x in results),
                    "output":str(OUT/"missing_audio_audit.json")},ensure_ascii=False),flush=True)
