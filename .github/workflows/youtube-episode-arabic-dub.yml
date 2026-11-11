@@ -1,5 +1,4 @@
 name: YouTube episode — Arabic multi-speaker dubbing on Colab
-
 on:
   workflow_dispatch:
     inputs:
@@ -13,15 +12,14 @@ on:
     branches: [main]
     paths:
       - "scripts/youtube_episode_arabic_dub.py"
+      - "scripts/verify_youtube_dub.py"
+      - "scripts/export_youtube_dub_artifacts.py"
       - ".github/workflows/youtube-episode-arabic-dub.yml"
-
 permissions:
   contents: read
-
 concurrency:
   group: youtube-arabic-dub-eSskYhfTWZ0
-  cancel-in-progress: false
-
+  cancel-in-progress: true
 jobs:
   dub-on-colab:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.rights_confirmed == 'yes' }}
@@ -30,7 +28,6 @@ jobs:
     steps:
       - name: Check out pipeline
         uses: actions/checkout@v4
-
       - name: Set up Python and Node
         uses: actions/setup-python@v5
         with:
@@ -38,14 +35,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-
-      - name: Install Google Colab CLI and Drive API client
+      - name: Install Google Colab CLI
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
           python -m pip install --upgrade google-colab-cli google-api-python-client google-auth google-auth-httplib2
           colab --help
-
       - name: Configure Colab ADC and output configuration
         env:
           COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
@@ -53,164 +48,156 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$HOME/.config/gcloud" output
-          if [ -z "${COLAB_CREDENTIALS:-}" ]; then
-            echo "::error::GitHub secret COLAB_CREDENTIALS is missing or empty."
-            exit 1
-          fi
+          if [ -z "${COLAB_CREDENTIALS:-}" ]; then echo "::error::COLAB_CREDENTIALS missing"; exit 1; fi
           python - <<'PY'
-          import json, os, pathlib, sys
-          raw = os.environ["COLAB_CREDENTIALS"]
-          path = pathlib.Path.home() / ".config/gcloud/application_default_credentials.json"
+          import json,os,pathlib,sys
+          raw=os.environ["COLAB_CREDENTIALS"]; path=pathlib.Path.home()/".config/gcloud/application_default_credentials.json"
           try:
-              data = json.loads(raw)
-              if not isinstance(data, dict) or data.get("type") not in {
-                  "authorized_user", "service_account", "external_account", "impersonated_service_account"
-              }:
-                  raise ValueError("Unsupported Google ADC credential JSON")
-              path.write_text(raw, encoding="utf-8")
-              path.chmod(0o600)
-          except Exception as exc:
-              print(f"Credential validation failed: {type(exc).__name__}: {exc}")
-              sys.exit(1)
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
-              f.write(f"GOOGLE_APPLICATION_CREDENTIALS={path}\n")
-          print(f"Google ADC validated (type={data['type']}); secret value was not printed.")
+              data=json.loads(raw)
+              if not isinstance(data,dict) or data.get("type") not in {"authorized_user","service_account","external_account","impersonated_service_account"}: raise ValueError("Unsupported ADC")
+              path.write_text(raw,encoding="utf-8"); path.chmod(0o600)
+          except Exception as e: print(f"Credential validation failed: {type(e).__name__}: {e}"); sys.exit(1)
+          with open(os.environ["GITHUB_ENV"],"a",encoding="utf-8") as f: f.write(f"GOOGLE_APPLICATION_CREDENTIALS={path}\n")
+          print(f"Google ADC validated (type={data['type']}); secret not printed.")
           PY
           export GOOGLE_APPLICATION_CREDENTIALS="$HOME/.config/gcloud/application_default_credentials.json"
           python - <<'PY'
           import json
-          config = {
-              "youtube_url": "https://youtu.be/eSskYhfTWZ0",
-              "video_id": "eSskYhfTWZ0",
-              "output_target": "github_actions_artifact"
-          }
-          with open("output/dub_config.json", "w", encoding="utf-8") as f:
-              json.dump(config, f, ensure_ascii=False, indent=2)
-          print("Source and local-artifact output configuration prepared.")
+          c={"youtube_url":"https://youtu.be/eSskYhfTWZ0","video_id":"eSskYhfTWZ0","output_target":"github_actions_artifact"}
+          json.dump(c,open("output/dub_config.json","w",encoding="utf-8"),ensure_ascii=False,indent=2)
           PY
-
       - name: Provision Google Colab GPU runtime
         id: colab
         shell: bash
         run: |
           set -euo pipefail
-          SESSION="youtube-ar-dub-${GITHUB_RUN_ID}"
-          echo "SESSION=$SESSION" >> "$GITHUB_ENV"
+          SESSION="youtube-ar-dub-${GITHUB_RUN_ID}"; echo "SESSION=$SESSION" >> "$GITHUB_ENV"
           if colab --auth=adc new -s "$SESSION" --gpu T4 --high-mem 2>&1 | tee output/colab_runtime.log; then
             echo "Allocated T4 high-RAM runtime."
           elif colab --auth=adc new -s "$SESSION" --gpu T4 2>&1 | tee -a output/colab_runtime.log; then
             echo "Allocated standard-RAM T4 runtime."
           elif colab --auth=adc new -s "$SESSION" --high-mem 2>&1 | tee -a output/colab_runtime.log; then
-            echo "GPU unavailable; allocated high-RAM CPU runtime."
+            echo "Allocated high-RAM CPU runtime."
           else
-            echo "::error::Colab could not allocate a T4 or high-RAM runtime. See output/colab_runtime.log."
-            exit 1
+            echo "::error::Colab could not allocate runtime"; exit 1
           fi
           colab --auth=adc status -s "$SESSION" | tee -a output/colab_runtime.log
-
-      - name: Install dubbing pipeline dependencies on Colab
+      - name: Install dependencies and verify PyAV decoder
         timeout-minutes: 60
         shell: bash
         run: |
           set -euo pipefail
-          # Use a streaming pip process and print a heartbeat every 5 seconds.
-          # This keeps Colab's remote kernel connection alive during large wheel downloads.
           colab --auth=adc exec -s "$SESSION" --timeout 0 <<'PY'
-          import selectors
-          import subprocess
-          import sys
-          import time
+          import selectors,subprocess,sys,time,tempfile
           from pathlib import Path
-
-          Path("/content/youtube_arabic_dub").mkdir(parents=True, exist_ok=True)
-          packages = [
-              "yt-dlp", "faster-whisper", "speechbrain", "scikit-learn",
-              "edge-tts", "deep-translator", "demucs", "soundfile"
-          ]
-          command = [
-              sys.executable, "-m", "pip", "install",
-              "--disable-pip-version-check", "--no-input", "--prefer-binary",
-              *packages
-          ]
-          print("Installing Colab dubbing dependencies with streamed output...", flush=True)
-          process = subprocess.Popen(
-              command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-              text=True, bufsize=1
-          )
-          assert process.stdout is not None
-          selector = selectors.DefaultSelector()
-          selector.register(process.stdout, selectors.EVENT_READ)
-          last_heartbeat = time.monotonic()
-          while process.poll() is None:
-              events = selector.select(timeout=5)
-              for key, _ in events:
-                  line = key.fileobj.readline()
-                  if line:
-                      print(line.rstrip(), flush=True)
-                  else:
-                      try:
-                          selector.unregister(key.fileobj)
-                      except Exception:
-                          pass
-              now = time.monotonic()
-              if now - last_heartbeat >= 5:
-                  print(f"[dependency-install heartbeat] pip still running; elapsed={int(now-last_heartbeat)}s since last heartbeat", flush=True)
-                  last_heartbeat = now
-          for line in process.stdout:
-              print(line.rstrip(), flush=True)
-          code = process.wait()
-          if code:
-              raise SystemExit(f"pip dependency installation failed with exit code {code}")
-          import torch
-          print("CUDA available:", torch.cuda.is_available(), flush=True)
-          if torch.cuda.is_available():
-              print("GPU:", torch.cuda.get_device_name(0), flush=True)
+          Path("/content/youtube_arabic_dub").mkdir(parents=True,exist_ok=True)
+          pkgs=["yt-dlp","faster-whisper","av==18.1.0","speechbrain","scikit-learn","edge-tts","deep-translator","demucs","soundfile"]
+          p=subprocess.Popen([sys.executable,"-m","pip","install","--disable-pip-version-check","--no-input","--prefer-binary",*pkgs],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
+          assert p.stdout is not None
+          sel=selectors.DefaultSelector(); sel.register(p.stdout,selectors.EVENT_READ); last=time.monotonic()
+          while p.poll() is None:
+              for key,_ in sel.select(timeout=5):
+                  line=key.fileobj.readline()
+                  if line: print(line.rstrip(),flush=True)
+              if time.monotonic()-last>=5: print("[pip keepalive] install running",flush=True); last=time.monotonic()
+          for line in p.stdout: print(line.rstrip(),flush=True)
+          if p.wait(): raise SystemExit("pip failed")
+          import av,torch
+          from faster_whisper.audio import decode_audio
+          print("PyAV:",av.__version__,"CUDA:",torch.cuda.is_available(),flush=True)
+          if tuple(int(x) for x in av.__version__.split(".")[:2])>=(19,0): raise RuntimeError("PyAV 19+ is incompatible with faster-whisper 1.2.1")
+          wav=Path(tempfile.gettempdir())/"pyav_decode_smoke.wav"
+          subprocess.run(["ffmpeg","-y","-hide_banner","-loglevel","error","-f","lavfi","-i","sine=frequency=880:duration=1","-ar","16000","-ac","1",str(wav)],check=True)
+          with av.open(str(wav),mode="r",metadata_errors="ignore") as c: assert len(c.streams.audio)==1
+          assert len(decode_audio(str(wav),sampling_rate=16000))>=15000
+          print("PYAV_SMOKE_TEST=PASS",flush=True)
+          if torch.cuda.is_available(): print("GPU:",torch.cuda.get_device_name(0),flush=True)
           PY
-
-      - name: Transfer task configuration to Colab
+      - name: Transfer task configuration
         shell: bash
         run: |
           set -euo pipefail
           colab --auth=adc upload -s "$SESSION" output/dub_config.json /content/dub_config.json
-
-      - name: Execute full Arabic dubbing pipeline in Colab
+      - name: Run complete dubbing pipeline
         id: dubbing
         timeout-minutes: 345
         shell: bash
         run: |
           set -euo pipefail
-          # Disable Colab CLI's 30-second idle-output timeout; this 3h15m episode has long silent FFmpeg/ASR stages.
-          # The GitHub Actions step timeout (345 minutes) remains the total execution limit.
           colab --auth=adc exec -s "$SESSION" --timeout 0 -f scripts/youtube_episode_arabic_dub.py 2>&1 | tee output/colab_dubbing.log
-
-      - name: Retrieve reports and logs
-        if: always()
-        continue-on-error: true
+      - name: Independently verify audio/video result
+        if: always() && steps.colab.outcome == 'success'
+        timeout-minutes: 30
         shell: bash
         run: |
+          set -euo pipefail
+          colab --auth=adc exec -s "$SESSION" --timeout 0 -f scripts/verify_youtube_dub.py 2>&1 | tee output/colab_verification.log
+          grep -q "VERIFICATION_STATUS=PASS" output/colab_verification.log
+      - name: Prepare chunked export
+        if: always() && steps.colab.outcome == 'success'
+        timeout-minutes: 30
+        shell: bash
+        run: |
+          set -euo pipefail
+          colab --auth=adc exec -s "$SESSION" --timeout 0 -f scripts/export_youtube_dub_artifacts.py 2>&1 | tee output/colab_export.log
+          grep -q "EXPORT_MANIFEST_READY=1" output/colab_export.log
           mkdir -p output/colab_return
-          for item in \
-            "/content/youtube_arabic_dub/eSskYhfTWZ0_Arabic_Dub.mp4" \
-            "/content/youtube_arabic_dub/quality_report.json" \
-            "/content/youtube_arabic_dub/progress.json" \
-            "/content/youtube_arabic_dub/run.log" \
-            "/content/youtube_arabic_dub/Arabic_word_timed_subtitles.srt" \
-            "/content/youtube_arabic_dub/work/speaker_profiles.json" \
-            "/content/youtube_arabic_dub/work/asr.json" \
-            "/content/youtube_arabic_dub/work/arabic_segments.json"; do
-            name="$(basename "$item")"
-            colab --auth=adc download -s "$SESSION" "$item" "output/colab_return/$name" || true
-          done
-
+          colab --auth=adc download -s "$SESSION" /content/youtube_arabic_dub/export_manifest.json output/colab_return/export_manifest.json
+      - name: Retrieve and assemble deliverables
+        if: always() && steps.colab.outcome == 'success'
+        timeout-minutes: 120
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output/colab_return/video_parts
+          download_retry() {
+            local remote="$1" dest="$2"; mkdir -p "$(dirname "$dest")"
+            for attempt in 1 2 3; do
+              if colab --auth=adc download -s "$SESSION" "$remote" "$dest"; then return 0; fi
+              echo "Retry $attempt failed: $remote" >&2; sleep 5
+            done
+            return 1
+          }
+          python - <<'PY' > output/export_small.tsv
+          import json
+          p=json.load(open("output/colab_return/export_manifest.json",encoding="utf-8"))
+          for f in p.get("files",[]): print(f["remote"]+"\t"+f["relative"])
+          PY
+          while IFS=$'\t' read -r remote relative; do
+            [ -n "$remote" ] || continue
+            download_retry "$remote" "output/colab_return/$relative"
+          done < output/export_small.tsv
+          python - <<'PY' > output/export_parts.tsv
+          import json
+          p=json.load(open("output/colab_return/export_manifest.json",encoding="utf-8"))
+          for f in (p.get("video") or {}).get("parts",[]): print(f["remote"]+"\t"+f["name"])
+          PY
+          if [ -s output/export_parts.tsv ]; then
+            while IFS=$'\t' read -r remote name; do
+              [ -n "$remote" ] || continue
+              download_retry "$remote" "output/colab_return/video_parts/$name"
+            done < output/export_parts.tsv
+            python - <<'PY'
+          import hashlib,json,pathlib
+          root=pathlib.Path("output/colab_return"); m=json.load(open(root/"export_manifest.json",encoding="utf-8"))
+          v=m["video"]; target=root/v["filename"]; h=hashlib.sha256(); size=0
+          with target.open("wb") as out:
+              for p in v["parts"]:
+                  part=root/"video_parts"/p["name"]
+                  if not part.is_file() or part.stat().st_size!=p["size_bytes"]: raise SystemExit("Missing/truncated "+p["name"])
+                  with part.open("rb") as src:
+                      for b in iter(lambda:src.read(8*1024*1024),b""): out.write(b); h.update(b); size+=len(b)
+          if size!=v["size_bytes"] or h.hexdigest()!=v["sha256"]: raise SystemExit("MP4 reassembly hash/size mismatch")
+          print("REASSEMBLED_MP4_OK bytes=",size,flush=True)
+          PY
+            rm -rf output/colab_return/video_parts
+          fi
       - name: Stop Colab runtime
         if: always()
         continue-on-error: true
         run: |
-          if [ -n "${SESSION:-}" ]; then
-            colab --auth=adc stop -s "$SESSION" || true
-          fi
-
-      - name: Upload run reports and diagnostics
+          if [ -n "${SESSION:-}" ]; then colab --auth=adc stop -s "$SESSION" || true; fi
+      - name: Upload media, review samples and diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -220,6 +207,8 @@ jobs:
             output/dub_config.json
             output/colab_runtime.log
             output/colab_dubbing.log
+            output/colab_verification.log
+            output/colab_export.log
             output/colab_return/**
           if-no-files-found: warn
           retention-days: 14

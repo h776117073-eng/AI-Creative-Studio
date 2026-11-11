@@ -797,9 +797,20 @@ def main() -> None:
     atomic_json(ROOT / "progress.json", {"stage": "complete", "status": "FINAL_VERIFIED",
                                          "updated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
     upload_outputs(drive, [final, srt, report_path, PROGRESS, LOG])
-    log("SUCCESS: final MP4, word-level subtitles, speaker report and quality report uploaded to Google Drive")
+    if getattr(drive, "local_only", False):
+        log("SUCCESS: final MP4 and reports generated in Colab local output for GitHub artifact export.")
+    else:
+        log("SUCCESS: final MP4, word-level subtitles, speaker report and quality report uploaded to Google Drive")
     print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BaseException as exc:
+        try:
+            update_progress("failed", error_type=type(exc).__name__, error=str(exc)[:1500])
+            log(f"PIPELINE_FAILED: {type(exc).__name__}: {exc}")
+        except Exception:
+            pass
+        raise
