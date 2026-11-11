@@ -76,6 +76,7 @@ jobs:
               f.write(f"GOOGLE_APPLICATION_CREDENTIALS={path}\n")
           print(f"Google ADC validated (type={data['type']}); secret value was not printed.")
           PY
+          export GOOGLE_APPLICATION_CREDENTIALS="$HOME/.config/gcloud/application_default_credentials.json"
           python - <<'PY'
           import json, os
           from google.auth import load_credentials_from_file
