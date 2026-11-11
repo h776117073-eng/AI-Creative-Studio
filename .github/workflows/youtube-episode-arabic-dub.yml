@@ -24,7 +24,7 @@ concurrency:
 
 jobs:
   dub-on-colab:
-    if: \${{ github.event_name != 'workflow_dispatch' || inputs.rights_confirmed == 'yes' }}
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.rights_confirmed == 'yes' }}
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
@@ -48,12 +48,12 @@ jobs:
 
       - name: Configure Google ADC and create Drive output folder
         env:
-          COLAB_CREDENTIALS: \${{ secrets.COLAB_CREDENTIALS }}
+          COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$HOME/.config/gcloud" output
-          if [ -z "\${COLAB_CREDENTIALS:-}" ]; then
+          if [ -z "${COLAB_CREDENTIALS:-}" ]; then
             echo "::error::GitHub secret COLAB_CREDENTIALS is missing or empty."
             exit 1
           fi
@@ -122,7 +122,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          SESSION="youtube-ar-dub-\${GITHUB_RUN_ID}"
+          SESSION="youtube-ar-dub-${GITHUB_RUN_ID}"
           echo "SESSION=$SESSION" >> "$GITHUB_ENV"
           if colab --auth=adc new -s "$SESSION" --gpu T4 --high-mem 2>&1 | tee output/colab_runtime.log; then
             echo "Allocated T4 high-RAM runtime."
@@ -185,7 +185,7 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
-          if [ -n "\${SESSION:-}" ]; then
+          if [ -n "${SESSION:-}" ]; then
             colab --auth=adc stop -s "$SESSION" || true
           fi
 
@@ -193,7 +193,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: youtube-arabic-dub-\${{ github.run_id }}
+          name: youtube-arabic-dub-${{ github.run_id }}
           path: |
             output/dub_config.json
             output/colab_runtime.log
