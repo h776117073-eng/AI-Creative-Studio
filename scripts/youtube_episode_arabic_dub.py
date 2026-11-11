@@ -814,3 +814,5 @@ if __name__ == "__main__":
         except Exception:
             pass
         raise
+
+# Dependency compatibility: keep PyAV below 19 until faster-whisper's released decoder API is updated.
