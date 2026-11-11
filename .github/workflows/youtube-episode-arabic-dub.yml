@@ -1,0 +1,203 @@
+name: YouTube episode — Arabic multi-speaker dubbing on Colab
+
+on:
+  workflow_dispatch:
+    inputs:
+      rights_confirmed:
+        description: "Confirm that you own or are authorized to dub this episode"
+        required: true
+        type: choice
+        options: ["no", "yes"]
+        default: "no"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/youtube_episode_arabic_dub.py"
+      - ".github/workflows/youtube-episode-arabic-dub.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: youtube-arabic-dub-eSskYhfTWZ0
+  cancel-in-progress: false
+
+jobs:
+  dub-on-colab:
+    if: \${{ github.event_name != 'workflow_dispatch' || inputs.rights_confirmed == 'yes' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Check out pipeline
+        uses: actions/checkout@v4
+
+      - name: Set up Python and Node
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Google Colab CLI and Drive API client
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade google-colab-cli google-api-python-client google-auth google-auth-httplib2
+          colab --help
+
+      - name: Configure Google ADC and create Drive output folder
+        env:
+          COLAB_CREDENTIALS: \${{ secrets.COLAB_CREDENTIALS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/gcloud" output
+          if [ -z "\${COLAB_CREDENTIALS:-}" ]; then
+            echo "::error::GitHub secret COLAB_CREDENTIALS is missing or empty."
+            exit 1
+          fi
+          python - <<'PY'
+          import json, os, pathlib, sys
+          raw = os.environ["COLAB_CREDENTIALS"]
+          path = pathlib.Path.home() / ".config/gcloud/application_default_credentials.json"
+          try:
+              data = json.loads(raw)
+              if not isinstance(data, dict) or data.get("type") not in {
+                  "authorized_user", "service_account", "external_account", "impersonated_service_account"
+              }:
+                  raise ValueError("Unsupported Google ADC credential JSON")
+              path.write_text(raw, encoding="utf-8")
+              path.chmod(0o600)
+          except Exception as exc:
+              print(f"Credential validation failed: {type(exc).__name__}: {exc}")
+              sys.exit(1)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
+              f.write(f"GOOGLE_APPLICATION_CREDENTIALS={path}\n")
+          print(f"Google ADC validated (type={data['type']}); secret value was not printed.")
+          PY
+          python - <<'PY'
+          import json, os
+          from google.auth import load_credentials_from_file
+          from googleapiclient.discovery import build
+
+          creds, _ = load_credentials_from_file(os.environ["GOOGLE_APPLICATION_CREDENTIALS"])
+          drive = build("drive", "v3", credentials=creds, cache_discovery=False)
+
+          def folder(name, parent):
+              escaped = name.replace("'", "\\'")
+              q = (f"name='{escaped}' and '{parent}' in parents "
+                   "and mimeType='application/vnd.google-apps.folder' and trashed=false")
+              rows = drive.files().list(
+                  q=q, pageSize=20, fields="files(id,name,parents)",
+                  supportsAllDrives=True, includeItemsFromAllDrives=True
+              ).execute(num_retries=3).get("files", [])
+              if rows:
+                  return rows[0]["id"]
+              created = drive.files().create(
+                  body={"name": name, "mimeType": "application/vnd.google-apps.folder", "parents": [parent]},
+                  fields="id,name,parents", supportsAllDrives=True
+              ).execute(num_retries=3)
+              return created["id"]
+
+          root = folder("YouTube_Arabic_Dubs", "root")
+          output = folder("eSskYhfTWZ0_Arabic_Dub", root)
+          drive.files().get(fileId=output, fields="id,name,mimeType", supportsAllDrives=True).execute()
+          config = {
+              "youtube_url": "https://youtu.be/eSskYhfTWZ0",
+              "video_id": "eSskYhfTWZ0",
+              "drive_output_folder_id": output
+          }
+          with open("output/dub_config.json", "w", encoding="utf-8") as f:
+              json.dump(config, f, ensure_ascii=False, indent=2)
+          print(json.dumps({
+              "source": "https://youtu.be/eSskYhfTWZ0",
+              "drive_output": "My Drive/YouTube_Arabic_Dubs/eSskYhfTWZ0_Arabic_Dub",
+              "drive_api": "verified"
+          }, ensure_ascii=False))
+          PY
+
+      - name: Provision Google Colab GPU runtime
+        id: colab
+        shell: bash
+        run: |
+          set -euo pipefail
+          SESSION="youtube-ar-dub-\${GITHUB_RUN_ID}"
+          echo "SESSION=$SESSION" >> "$GITHUB_ENV"
+          if colab --auth=adc new -s "$SESSION" --gpu T4 --high-mem 2>&1 | tee output/colab_runtime.log; then
+            echo "Allocated T4 high-RAM runtime."
+          elif colab --auth=adc new -s "$SESSION" --gpu T4 2>&1 | tee -a output/colab_runtime.log; then
+            echo "Allocated standard-RAM T4 runtime."
+          elif colab --auth=adc new -s "$SESSION" --high-mem 2>&1 | tee -a output/colab_runtime.log; then
+            echo "GPU unavailable; allocated high-RAM CPU runtime."
+          else
+            echo "::error::Colab could not allocate a T4 or high-RAM runtime. See output/colab_runtime.log."
+            exit 1
+          fi
+          colab --auth=adc status -s "$SESSION" | tee -a output/colab_runtime.log
+
+      - name: Install dubbing pipeline dependencies on Colab
+        run: |
+          set -euo pipefail
+          colab --auth=adc install -s "$SESSION" yt-dlp faster-whisper speechbrain scikit-learn edge-tts deep-translator demucs soundfile google-api-python-client google-auth google-auth-httplib2
+          colab --auth=adc exec -s "$SESSION" <<'PY'
+          from pathlib import Path
+          Path("/content/.private").mkdir(parents=True, exist_ok=True)
+          Path("/content/youtube_arabic_dub").mkdir(parents=True, exist_ok=True)
+          import torch
+          print("CUDA available:", torch.cuda.is_available())
+          if torch.cuda.is_available():
+              print("GPU:", torch.cuda.get_device_name(0))
+          PY
+
+      - name: Transfer configuration and protected Google credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          colab --auth=adc upload -s "$SESSION" "$GOOGLE_APPLICATION_CREDENTIALS" /content/.private/google_adc.json
+          colab --auth=adc upload -s "$SESSION" output/dub_config.json /content/dub_config.json
+
+      - name: Execute full Arabic dubbing pipeline in Colab
+        id: dubbing
+        timeout-minutes: 345
+        shell: bash
+        run: |
+          set -euo pipefail
+          colab --auth=adc exec -s "$SESSION" -f scripts/youtube_episode_arabic_dub.py 2>&1 | tee output/colab_dubbing.log
+
+      - name: Retrieve reports and logs
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          mkdir -p output/colab_return
+          for item in \
+            "/content/youtube_arabic_dub/quality_report.json" \
+            "/content/youtube_arabic_dub/progress.json" \
+            "/content/youtube_arabic_dub/run.log" \
+            "/content/youtube_arabic_dub/Arabic_word_timed_subtitles.srt" \
+            "/content/youtube_arabic_dub/work/speaker_profiles.json"; do
+            name="$(basename "$item")"
+            colab --auth=adc download -s "$SESSION" "$item" "output/colab_return/$name" || true
+          done
+
+      - name: Stop Colab runtime
+        if: always()
+        continue-on-error: true
+        run: |
+          if [ -n "\${SESSION:-}" ]; then
+            colab --auth=adc stop -s "$SESSION" || true
+          fi
+
+      - name: Upload run reports and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: youtube-arabic-dub-\${{ github.run_id }}
+          path: |
+            output/dub_config.json
+            output/colab_runtime.log
+            output/colab_dubbing.log
+            output/colab_return/**
+          if-no-files-found: warn
+          retention-days: 14
