@@ -109,16 +109,62 @@ jobs:
           colab --auth=adc status -s "$SESSION" | tee -a output/colab_runtime.log
 
       - name: Install dubbing pipeline dependencies on Colab
+        timeout-minutes: 60
+        shell: bash
         run: |
           set -euo pipefail
-          colab --auth=adc install -s "$SESSION" yt-dlp faster-whisper speechbrain scikit-learn edge-tts deep-translator demucs soundfile
-          colab --auth=adc exec -s "$SESSION" <<'PY'
+          # Use a streaming pip process and print a heartbeat every 5 seconds.
+          # This keeps Colab's remote kernel connection alive during large wheel downloads.
+          colab --auth=adc exec -s "$SESSION" --timeout 0 <<'PY'
+          import selectors
+          import subprocess
+          import sys
+          import time
           from pathlib import Path
+
           Path("/content/youtube_arabic_dub").mkdir(parents=True, exist_ok=True)
+          packages = [
+              "yt-dlp", "faster-whisper", "speechbrain", "scikit-learn",
+              "edge-tts", "deep-translator", "demucs", "soundfile"
+          ]
+          command = [
+              sys.executable, "-m", "pip", "install",
+              "--disable-pip-version-check", "--no-input", "--prefer-binary",
+              *packages
+          ]
+          print("Installing Colab dubbing dependencies with streamed output...", flush=True)
+          process = subprocess.Popen(
+              command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+              text=True, bufsize=1
+          )
+          assert process.stdout is not None
+          selector = selectors.DefaultSelector()
+          selector.register(process.stdout, selectors.EVENT_READ)
+          last_heartbeat = time.monotonic()
+          while process.poll() is None:
+              events = selector.select(timeout=5)
+              for key, _ in events:
+                  line = key.fileobj.readline()
+                  if line:
+                      print(line.rstrip(), flush=True)
+                  else:
+                      try:
+                          selector.unregister(key.fileobj)
+                      except Exception:
+                          pass
+              now = time.monotonic()
+              if now - last_heartbeat >= 5:
+                  print(f"[dependency-install heartbeat] pip still running; elapsed={int(now-last_heartbeat)}s since last heartbeat", flush=True)
+                  last_heartbeat = now
+          for line in process.stdout:
+              print(line.rstrip(), flush=True)
+          code = process.wait()
+          if code:
+              raise SystemExit(f"pip dependency installation failed with exit code {code}")
           import torch
-          print("CUDA available:", torch.cuda.is_available())
+          print("CUDA available:", torch.cuda.is_available(), flush=True)
           if torch.cuda.is_available():
-              print("GPU:", torch.cuda.get_device_name(0))
+              print("GPU:", torch.cuda.get_device_name(0), flush=True)
           PY
 
       - name: Transfer task configuration to Colab
