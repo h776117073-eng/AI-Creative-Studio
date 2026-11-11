@@ -133,7 +133,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          colab --auth=adc exec -s "$SESSION" -f scripts/youtube_episode_arabic_dub.py 2>&1 | tee output/colab_dubbing.log
+          # Disable Colab CLI's 30-second idle-output timeout; this 3h15m episode has long silent FFmpeg/ASR stages.
+          # The GitHub Actions step timeout (345 minutes) remains the total execution limit.
+          colab --auth=adc exec -s "$SESSION" --timeout 0 -f scripts/youtube_episode_arabic_dub.py 2>&1 | tee output/colab_dubbing.log
 
       - name: Retrieve reports and logs
         if: always()
