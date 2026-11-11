@@ -93,6 +93,19 @@ def sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+class LocalStore:
+    """Local-only output mode when this runtime has no Google Drive OAuth scope."""
+    parent_id = ""
+    local_only = True
+
+    def restore_checkpoints(self) -> None:
+        log("Drive API scope unavailable; using local Colab checkpoints for this run.")
+
+    def upload(self, path: Path, name: str | None = None, parent: str | None = None):
+        # Keep files on the Colab VM; GitHub Actions retrieves final deliverables after execution.
+        return {"name": name or path.name, "local_only": True}
+
+
 class DriveStore:
     def __init__(self, parent_id: str):
         import google.auth
@@ -465,8 +478,11 @@ def make_checkpoint(indices: list[int], manifest: dict, drive: DriveStore) -> No
                 if path.is_file():
                     tar.add(path, arcname=path.name)
         tar.add(CLIPS / "clip_manifest.json", arcname="clip_manifest.json")
-    drive.upload(archive, archive.name)
-    archive.unlink(missing_ok=True)
+    if getattr(drive, "local_only", False):
+        log(f"Local checkpoint retained: {archive.name}")
+    else:
+        drive.upload(archive, archive.name)
+        archive.unlink(missing_ok=True)
     atomic_json(CLIPS / "clip_manifest.json", manifest)
 
 
@@ -686,14 +702,18 @@ def main() -> None:
     config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     url = str(config["youtube_url"])
     video_id = str(config["video_id"])
-    drive_parent = str(config["drive_output_folder_id"])
+    drive_parent = str(config.get("drive_output_folder_id") or "").strip()
     WORK.mkdir(parents=True, exist_ok=True)
     CLIPS.mkdir(parents=True, exist_ok=True)
-    CREDENTIALS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    drive = DriveStore(drive_parent)
-    drive.restore_checkpoints()
-    # The Google ADC file is used only by this Colab VM and is never copied to the repository.
-    update_progress("starting", video_id=video_id, output_folder_id=drive_parent)
+    if drive_parent and CREDENTIALS_PATH.is_file():
+        drive = DriveStore(drive_parent)
+        drive.restore_checkpoints()
+        output_target = "Google Drive"
+    else:
+        drive = LocalStore()
+        drive.restore_checkpoints()
+        output_target = "GitHub Actions artifact (local Colab output)"
+    update_progress("starting", video_id=video_id, output_target=output_target)
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         raise RuntimeError("FFmpeg/FFprobe are required in the Colab runtime")
     source = download_source(url)
