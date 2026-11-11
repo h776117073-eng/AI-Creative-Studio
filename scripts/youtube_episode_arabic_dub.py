@@ -456,8 +456,8 @@ async def synth_one(item: dict, path: Path, voice_info: dict) -> dict:
     return {"boundaries": boundaries}
 
 
-def make_checkpoint(batch_no: int, indices: list[int], manifest: dict, drive: DriveStore) -> None:
-    archive = WORK / f"tts_checkpoint_{batch_no:04d}.tar.gz"
+def make_checkpoint(indices: list[int], manifest: dict, drive: DriveStore) -> None:
+    archive = WORK / f"tts_checkpoint_{indices[0]:06d}_{indices[-1]:06d}.tar.gz"
     with tarfile.open(archive, "w:gz") as tar:
         for idx in indices:
             for suffix in (".mp3", ".wav", ".json"):
@@ -478,48 +478,46 @@ def synthesize_all(segments: list[dict], profiles: dict, voices: dict,
     manifest_path = CLIPS / "clip_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else {"items": {}}
     translated = []
-    new_indices = []
-    total = len(segments)
+
+    # Reuse full per-segment metadata, translation and generated speech when fingerprints match.
     for pos, seg in enumerate(segments):
         idx = int(seg["index"])
         sid = seg["speaker_id"]
-        text = seg["text"]
-        fingerprint = hashlib.sha256((text + sid + voices[sid]["voice"]).encode("utf-8")).hexdigest()
-        entry = manifest["items"].get(str(idx), {})
-        mp3 = CLIPS / f"{idx:06d}.mp3"
-        wav = CLIPS / f"{idx:06d}.wav"
-        meta = CLIPS / f"{idx:06d}.json"
-        arabic = entry.get("arabic") if entry.get("fingerprint") == fingerprint else None
-        if not arabic:
-            arabic = translate_text(text, translator, source_language)
-        data = {"index": idx, "start": seg["start"], "end": seg["end"],
-                "speaker_id": sid, "source": text, "arabic": arabic}
-        translated.append(data)
-        if entry.get("fingerprint") == fingerprint and wav.is_file() and wav.stat().st_size > 500:
-            continue
-        data["fingerprint"] = fingerprint
-        atomic_json(meta, data)
-        # Generate in small concurrent batches below; translation remains serialized to avoid service throttling.
-        new_indices.append(idx)
-        if len(new_indices) >= 40:
-            break
-    # Translate remaining items before synthesis, retaining a deterministic record for every segment.
-    already = {x["index"] for x in translated}
-    for seg in segments:
-        idx = int(seg["index"])
-        if idx in already:
-            continue
-        sid = seg["speaker_id"]
         fingerprint = hashlib.sha256((seg["text"] + sid + voices[sid]["voice"]).encode("utf-8")).hexdigest()
+        meta = CLIPS / f"{idx:06d}.json"
+        wav = CLIPS / f"{idx:06d}.wav"
+        mp3 = CLIPS / f"{idx:06d}.mp3"
         entry = manifest["items"].get(str(idx), {})
-        arabic = entry.get("arabic") if entry.get("fingerprint") == fingerprint else None
-        if not arabic:
-            arabic = translate_text(seg["text"], translator, source_language)
-        data = {"index": idx, "start": seg["start"], "end": seg["end"],
+        data = {}
+        if meta.is_file():
+            try:
+                cached = json.loads(meta.read_text(encoding="utf-8"))
+                if cached.get("fingerprint") == fingerprint:
+                    data = cached
+            except Exception:
+                data = {}
+        if not data:
+            arabic = entry.get("arabic") if entry.get("fingerprint") == fingerprint else None
+            if not arabic:
+                arabic = translate_text(seg["text"], translator, source_language)
+            data = {
+                "index": idx, "start": seg["start"], "end": seg["end"],
                 "speaker_id": sid, "source": seg["text"], "arabic": arabic,
-                "fingerprint": fingerprint}
+                "fingerprint": fingerprint
+            }
+        data["index"] = idx
+        data["start"] = seg["start"]
+        data["end"] = seg["end"]
+        data["speaker_id"] = sid
+        data["source"] = seg["text"]
+        data["fingerprint"] = fingerprint
         translated.append(data)
-        atomic_json(CLIPS / f"{idx:06d}.json", data)
+        if not (wav.is_file() and wav.stat().st_size > 500 and data.get("tts_words")):
+            atomic_json(meta, data)
+
+        if (pos + 1) % 100 == 0:
+            log(f"Translation and checkpoint scan: {pos + 1}/{len(segments)} segments")
+
     translated.sort(key=lambda x: x["index"])
     atomic_json(WORK / "arabic_segments.json", {"segments": translated, "source_language": source_language})
     update_progress("translation_complete", segments=len(translated), speakers=len(profiles))
@@ -529,9 +527,6 @@ def synthesize_all(segments: list[dict], profiles: dict, voices: dict,
         idx = item["index"]
         sid = item["speaker_id"]
         mp3 = CLIPS / f"{idx:06d}.mp3"
-        meta = CLIPS / f"{idx:06d}.json"
-        if not meta.is_file():
-            atomic_json(meta, item)
         result = await synth_one(item, mp3, voices[sid])
         return idx, result
 
@@ -540,19 +535,19 @@ def synthesize_all(segments: list[dict], profiles: dict, voices: dict,
         for item in translated:
             idx = item["index"]
             wav = CLIPS / f"{idx:06d}.wav"
-            entry = manifest["items"].get(str(idx), {})
-            if entry.get("fingerprint") == item["fingerprint"] and wav.is_file() and wav.stat().st_size > 500:
-                continue
-            todo.append(item)
+            if not (wav.is_file() and wav.stat().st_size > 500 and item.get("tts_words")):
+                todo.append(item)
         log(f"Microsoft Edge Neural TTS: {len(translated)-len(todo)} cached, {len(todo)} pending")
         sem = asyncio.Semaphore(4)
+
         async def limited(item):
             async with sem:
                 return await worker(item)
-        finished = 0
+
         for start in range(0, len(todo), 32):
             batch = todo[start:start+32]
             results = await asyncio.gather(*(limited(x) for x in batch))
+            batch_indices = []
             for idx, meta_data in results:
                 item = next(x for x in translated if x["index"] == idx)
                 mp3 = CLIPS / f"{idx:06d}.mp3"
@@ -569,23 +564,21 @@ def synthesize_all(segments: list[dict], profiles: dict, voices: dict,
                 atomic_json(CLIPS / f"{idx:06d}.json", item)
                 manifest["items"][str(idx)] = {
                     "fingerprint": item["fingerprint"], "arabic": item["arabic"],
-                    "voice": voices[item["speaker_id"]]["voice"], "atempo": tempo
+                    "voice": voices[item["speaker_id"]]["voice"], "attempo": tempo
                 }
-                finished += 1
+                batch_indices.append(idx)
             atomic_json(manifest_path, manifest)
-            log(f"TTS batch complete: {finished}/{len(todo)} new clips")
+            log(f"TTS batch complete: {min(start+len(batch), len(todo))}/{len(todo)} new clips")
             drive.upload(manifest_path, "clip_manifest.json")
-            # Keep resumable audio and word-boundary metadata on Drive in small, verified batches.
-            batch_ids = [x["index"] for x in batch]
-            make_checkpoint(start // 32 + 1, batch_ids, manifest, drive)
+            make_checkpoint(batch_indices, manifest, drive)
         return
+
     asyncio.run(produce())
-    # Enrich cached entries with boundaries and word-level subtitle metadata.
+    # Refresh cached metadata after synthesis so word timings and clip lengths are available to the mixer.
     for item in translated:
         meta = json.loads((CLIPS / f"{item['index']:06d}.json").read_text(encoding="utf-8"))
         item.update(meta)
     return translated
-
 
 def write_word_srt(segments: list[dict], output: Path) -> None:
     def stamp(seconds: float) -> str:
@@ -608,8 +601,6 @@ def write_word_srt(segments: list[dict], output: Path) -> None:
             b = a + max(0.08, float(word["duration"]) / max(tempo, 1.0))
             rows.append((a, b, text))
     rows.sort(key=lambda x: x[0])
-    for a, b, text in rows:
-        output.write_text("", encoding="utf-8") if False else None
     with output.open("w", encoding="utf-8") as f:
         for a, b, text in rows:
             f.write(f"{n}\n{stamp(a)} --> {stamp(b)}\n{text}\n\n")
@@ -698,6 +689,7 @@ def main() -> None:
     drive_parent = str(config["drive_output_folder_id"])
     WORK.mkdir(parents=True, exist_ok=True)
     CLIPS.mkdir(parents=True, exist_ok=True)
+    CREDENTIALS_PATH.parent.mkdir(parents=True, exist_ok=True)
     drive = DriveStore(drive_parent)
     drive.restore_checkpoints()
     # The Google ADC file is used only by this Colab VM and is never copied to the repository.
