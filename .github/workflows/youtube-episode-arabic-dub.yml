@@ -8,6 +8,10 @@ on:
         type: choice
         options: ["no", "yes"]
         default: "no"
+      source_download_url:
+        description: "Temporary signed download URL returned by the connected Google Drive download action"
+        required: true
+        type: string
   push:
     branches: [main]
     paths:
@@ -22,7 +26,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   dub-on-colab:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.rights_confirmed == 'yes' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.rights_confirmed == 'yes' && inputs.source_download_url != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
@@ -44,9 +48,11 @@ jobs:
       - name: Configure Colab ADC and output configuration
         env:
           COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
+          SOURCE_DOWNLOAD_URL: ${{ inputs.source_download_url }}
         shell: bash
         run: |
           set -euo pipefail
+          echo "::add-mask::$SOURCE_DOWNLOAD_URL"
           mkdir -p "$HOME/.config/gcloud" output
           if [ -z "${COLAB_CREDENTIALS:-}" ]; then echo "::error::COLAB_CREDENTIALS missing"; exit 1; fi
           python - <<'PY'
@@ -63,7 +69,10 @@ jobs:
           export GOOGLE_APPLICATION_CREDENTIALS="$HOME/.config/gcloud/application_default_credentials.json"
           python - <<'PY'
           import json
-          c={"youtube_url":"https://youtu.be/eSskYhfTWZ0","video_id":"eSskYhfTWZ0","output_target":"github_actions_artifact"}
+          import os
+          c={"youtube_url":"","source_download_url":os.environ["SOURCE_DOWNLOAD_URL"],
+             "source_label":"Google Drive file ID: 13Tpk4XD8RCq1jWl0KDL6G9k3Eve5ib43",
+             "video_id":"eSskYhfTWZ0","output_target":"github_actions_artifact"}
           json.dump(c,open("output/dub_config.json","w",encoding="utf-8"),ensure_ascii=False,indent=2)
           PY
       - name: Provision Google Colab GPU runtime
@@ -300,7 +309,6 @@ jobs:
           name: youtube-arabic-dub-${{ github.run_id }}
           compression-level: 0
           path: |
-            output/dub_config.json
             output/colab_runtime.log
             output/colab_dubbing.log
             output/colab_verification.log
