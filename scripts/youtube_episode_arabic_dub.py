@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import tarfile
 import time
+import urllib.request
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -211,8 +212,38 @@ def update_progress(stage: str, **fields) -> None:
     log("STAGE=" + stage)
 
 
-def download_source(url: str) -> Path:
+def download_source(url: str, direct_url: str | None = None) -> Path:
     WORK.mkdir(parents=True, exist_ok=True)
+    if direct_url:
+        # Stream the Drive connector's short-lived signed URL without logging or persisting it.
+        source = WORK / "source.mkv"
+        request = urllib.request.Request(
+            direct_url, headers={"User-Agent": "AI-Creative-Studio/1.0"}
+        )
+        total = 0
+        try:
+            with urllib.request.urlopen(request, timeout=90) as response, source.open("wb") as out:
+                expected = int(response.headers.get("Content-Length") or 0)
+                while True:
+                    block = response.read(8 * 1024 * 1024)
+                    if not block:
+                        break
+                    out.write(block)
+                    total += len(block)
+                    if total % (128 * 1024 * 1024) < len(block):
+                        log(f"Drive source download: {total / (1024**3):.2f} GiB")
+        except Exception as exc:
+            source.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"Drive source download failed ({type(exc).__name__}); refresh the temporary Drive download link and retry"
+            ) from exc
+        if total < 1_000_000 or (expected and total != expected):
+            source.unlink(missing_ok=True)
+            raise RuntimeError(f"Drive source size validation failed: received {total} bytes; expected {expected or 'unknown'}")
+        log(f"Drive source download complete: {total} bytes")
+        return source
+    if not url:
+        raise RuntimeError("No source_download_url or youtube_url was supplied")
     base = WORK / "source.%(ext)s"
     run([
         "yt-dlp", "--no-playlist", "--newline", "--retries", "10",
@@ -700,7 +731,9 @@ def main() -> None:
     if not CONFIG_PATH.is_file():
         raise FileNotFoundError(CONFIG_PATH)
     config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    url = str(config["youtube_url"])
+    url = str(config.get("youtube_url") or "")
+    direct_source_url = str(config.get("source_download_url") or "").strip()
+    source_label = str(config.get("source_label") or ("Google Drive source" if direct_source_url else url))
     video_id = str(config["video_id"])
     drive_parent = str(config.get("drive_output_folder_id") or "").strip()
     WORK.mkdir(parents=True, exist_ok=True)
@@ -716,7 +749,7 @@ def main() -> None:
     update_progress("starting", video_id=video_id, output_target=output_target)
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         raise RuntimeError("FFmpeg/FFprobe are required in the Colab runtime")
-    source = download_source(url)
+    source = download_source(url, direct_source_url)
     duration = probe_duration(source)
     update_progress("download_complete", source_file=source.name,
                     duration_seconds=round(duration, 2), size_bytes=source.stat().st_size)
@@ -776,7 +809,7 @@ def main() -> None:
     word_count = sum(len(x.get("tts_words", [])) for x in translated)
     report = {
         "status": "FINAL_VERIFIED", "video_id": video_id,
-        "source_url": url, "duration_seconds": round(duration, 2),
+        "source_url": source_label, "duration_seconds": round(duration, 2),
         "speaker_count": len(profiles), "speaker_profiles": profiles,
         "segments_translated_and_voiced": len(translated),
         "tts_word_boundary_count": word_count,
