@@ -8,10 +8,6 @@ on:
         type: choice
         options: ["no", "yes"]
         default: "no"
-      source_download_url:
-        description: "Temporary signed download URL returned by the connected Google Drive download action"
-        required: true
-        type: string
   push:
     branches: [main]
     paths:
@@ -26,7 +22,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   dub-on-colab:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.rights_confirmed == 'yes' && inputs.source_download_url != '' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.rights_confirmed == 'yes' }}
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
@@ -48,10 +44,11 @@ jobs:
       - name: Configure Colab ADC and output configuration
         env:
           COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
-          SOURCE_DOWNLOAD_URL: ${{ inputs.source_download_url }}
+          SOURCE_DOWNLOAD_URL: ${{ secrets.SOURCE_DOWNLOAD_URL }}
         shell: bash
         run: |
           set -euo pipefail
+          if [ -z "${SOURCE_DOWNLOAD_URL:-}" ]; then echo "::error::SOURCE_DOWNLOAD_URL repository secret is missing"; exit 1; fi
           echo "::add-mask::$SOURCE_DOWNLOAD_URL"
           mkdir -p "$HOME/.config/gcloud" output
           if [ -z "${COLAB_CREDENTIALS:-}" ]; then echo "::error::COLAB_CREDENTIALS missing"; exit 1; fi
