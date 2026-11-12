@@ -14,6 +14,8 @@ def main():
  ("Arabic_word_timed_subtitles.srt",ROOT/"Arabic_word_timed_subtitles.srt"),("post_render_qa.json",ROOT/"post_render_qa.json"),
  ("work/speaker_profiles.json",ROOT/"work"/"speaker_profiles.json"),("work/asr.json",ROOT/"work"/"asr.json"),
  ("work/arabic_segments.json",ROOT/"work"/"arabic_segments.json"),
+ ("work/arabic_segments.partial.json",ROOT/"work"/"arabic_segments.partial.json"),
+ ("work/clips/clip_manifest.json",ROOT/"work"/"clips"/"clip_manifest.json"),
  ("post_render_review/frames/start.jpg",ROOT/"post_render_review"/"frames"/"start.jpg"),
  ("post_render_review/frames/middle.jpg",ROOT/"post_render_review"/"frames"/"middle.jpg"),
  ("post_render_review/frames/end.jpg",ROOT/"post_render_review"/"frames"/"end.jpg"),
@@ -24,6 +26,14 @@ def main():
  ("post_render_review/audio/middle_voice.wav",ROOT/"post_render_review"/"audio"/"middle_voice.wav"),
  ("post_render_review/audio/end_voice.wav",ROOT/"post_render_review"/"audio"/"end_voice.wav")]
  files=[{"remote":str(p),"relative":r,"size_bytes":p.stat().st_size} for r,p in candidates if p.is_file() and p.stat().st_size]
+ # Preserve per-segment Arabic JSON metadata so translation can resume without redoing ASR.
+ clips_dir=ROOT/"work"/"clips"
+ if clips_dir.is_dir():
+  for p in sorted(clips_dir.glob("*.json")):
+   if p.is_file() and p.stat().st_size:
+    rel=str(p.relative_to(ROOT))
+    if not any(x["relative"]==rel for x in files):
+     files.append({"remote":str(p),"relative":rel,"size_bytes":p.stat().st_size})
  video=None; parts=[]
  if FINAL.is_file() and FINAL.stat().st_size>1_000_000:
   if PARTS.exists(): shutil.rmtree(PARTS)
