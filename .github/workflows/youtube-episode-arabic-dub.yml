@@ -19,15 +19,17 @@ permissions:
   contents: read
 concurrency:
   group: youtube-arabic-dub-eSskYhfTWZ0
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   dub-on-colab:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.rights_confirmed == 'yes' }}
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.rights_confirmed == 'yes') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[authorized-dub-run]')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
       - name: Check out pipeline
         uses: actions/checkout@v4
+      - name: Validate pipeline Python before allocating Colab
+        run: python -m py_compile scripts/youtube_episode_arabic_dub.py scripts/verify_youtube_dub.py scripts/export_youtube_dub_artifacts.py
       - name: Set up Python and Node
         uses: actions/setup-python@v5
         with:
@@ -45,6 +47,7 @@ jobs:
         env:
           COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
           SOURCE_DOWNLOAD_URL: ${{ secrets.SOURCE_DOWNLOAD_URL }}
+          GOOGLE_AI_API_KEY: ${{ secrets.GOOGLE_AI }}
         shell: bash
         run: |
           set -euo pipefail
@@ -69,6 +72,8 @@ jobs:
           import os
           c={"youtube_url":"","source_download_url":os.environ["SOURCE_DOWNLOAD_URL"],
              "source_label":"Google Drive file ID: 13Tpk4XD8RCq1jWl0KDL6G9k3Eve5ib43",
+             "translation_api_key":os.environ.get("GOOGLE_AI_API_KEY",""),
+             "translation_model":"gemini-3.8-flash",
              "video_id":"eSskYhfTWZ0","output_target":"github_actions_artifact"}
           json.dump(c,open("output/dub_config.json","w",encoding="utf-8"),ensure_ascii=False,indent=2)
           PY
@@ -103,7 +108,7 @@ jobs:
               import selectors,subprocess,sys,time,tempfile
               from pathlib import Path
               Path("/content/youtube_arabic_dub").mkdir(parents=True,exist_ok=True)
-              pkgs=["yt-dlp","faster-whisper","av==18.1.0","speechbrain","scikit-learn","edge-tts","deep-translator","demucs","soundfile"]
+              pkgs=["yt-dlp","faster-whisper","av==18.1.0","speechbrain","scikit-learn","edge-tts","deep-translator","google-genai","demucs","soundfile"]
               p=subprocess.Popen([sys.executable,"-m","pip","install","--disable-pip-version-check","--no-input","--prefer-binary",*pkgs],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
               assert p.stdout is not None
               sel=selectors.DefaultSelector(); sel.register(p.stdout,selectors.EVENT_READ); last=time.monotonic()
@@ -236,7 +241,7 @@ jobs:
           colab --auth=adc exec -s "$SESSION" --timeout 0 -f scripts/verify_youtube_dub.py 2>&1 | tee output/colab_verification.log
           grep -q "VERIFICATION_STATUS=PASS" output/colab_verification.log
       - name: Prepare chunked export
-        if: always() && steps.dubbing.outcome == 'success'
+        if: always() && steps.colab.outcome == 'success' && steps.dubbing.outcome != 'skipped'
         timeout-minutes: 30
         shell: bash
         run: |
@@ -246,7 +251,7 @@ jobs:
           mkdir -p output/colab_return
           colab --auth=adc download -s "$SESSION" /content/youtube_arabic_dub/export_manifest.json output/colab_return/export_manifest.json
       - name: Retrieve and assemble deliverables
-        if: always() && steps.dubbing.outcome == 'success'
+        if: always() && steps.colab.outcome == 'success' && steps.dubbing.outcome != 'skipped'
         timeout-minutes: 120
         shell: bash
         run: |
