@@ -110,23 +110,96 @@ jobs:
           subprocess.run(["ffmpeg","-y","-hide_banner","-loglevel","error","-f","lavfi","-i","sine=frequency=880:duration=1","-ar","16000","-ac","1",str(wav)],check=True)
           with av.open(str(wav),mode="r",metadata_errors="ignore") as c: assert len(c.streams.audio)==1
           assert len(decode_audio(str(wav),sampling_rate=16000))>=15000
+          # Keep CUDA 12 libraries isolated from Colab's preinstalled CUDA 13 PyTorch stack.
+          import shutil, json, os
+          cuda_root=Path("/content/cuda12libs")
+          shutil.rmtree(cuda_root,ignore_errors=True)
+          p=subprocess.Popen([sys.executable,"-m","pip","install","--disable-pip-version-check","--no-input","--prefer-binary","--target",str(cuda_root),"nvidia-cublas-cu12","nvidia-cudnn-cu12==9.*"],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
+          assert p.stdout is not None
+          sel=selectors.DefaultSelector(); sel.register(p.stdout,selectors.EVENT_READ); last=time.monotonic()
+          while p.poll() is None:
+              for key,_ in sel.select(timeout=5):
+                  line=key.fileobj.readline()
+                  if line: print(line.rstrip(),flush=True)
+              if time.monotonic()-last>=5: print("[CUDA 12 keepalive] install running",flush=True); last=time.monotonic()
+          for line in p.stdout: print(line.rstrip(),flush=True)
+          if p.wait(): raise RuntimeError("CUDA 12 cuBLAS/cuDNN install failed")
+          libdirs=sorted(str(x) for x in (cuda_root/"nvidia").glob("*/lib") if x.is_dir())
+          if not any((Path(x)/"libcublas.so.12").exists() for x in libdirs): raise RuntimeError("libcublas.so.12 missing after CUDA 12 install")
+          if not any((Path(x)/"libcudnn.so.9").exists() for x in libdirs): raise RuntimeError("libcudnn.so.9 missing after CUDA 12 install")
+          env=os.environ.copy()
+          env["LD_LIBRARY_PATH"]=":".join(libdirs+[env.get("LD_LIBRARY_PATH","")])
+          smoke_code=r"""
+          import torch,tempfile,subprocess
+          from pathlib import Path
+          from faster_whisper import WhisperModel
+          wav=Path(tempfile.gettempdir())/"pyav_decode_smoke.wav"
+          print("CUDA_DEVICE",torch.cuda.get_device_name(0),flush=True)
+          conv=torch.nn.Conv2d(3,8,3).cuda()
+          out=conv(torch.randn(1,3,32,32,device="cuda"))
+          print("TORCH_CUDA_CONV=PASS",tuple(out.shape),flush=True)
+          model=WhisperModel("tiny",device="cuda",compute_type="float16")
+          segments,info=model.transcribe(str(wav),language="en",beam_size=1,vad_filter=False)
+          list(segments)
+          print("CTRANSLATE2_CUDA_SMOKE_TEST=PASS",flush=True)
+          """
+          result=subprocess.run([sys.executable,"-c",smoke_code],env=env,text=True,capture_output=True)
+          if result.stdout: print(result.stdout,flush=True)
+          if result.stderr: print(result.stderr,flush=True)
+          if result.returncode: raise RuntimeError("CUDA 12 PyTorch/CTranslate2 smoke test failed")
+          Path("/content/cuda12_library_paths.json").write_text(json.dumps(libdirs),encoding="utf-8")
           print("PYAV_SMOKE_TEST=PASS",flush=True)
-          if torch.cuda.is_available(): print("GPU:",torch.cuda.get_device_name(0),flush=True)
+          print("CUDA12_CUBLAS_CUDNN_TEST=PASS",flush=True)
+          print("GPU:",torch.cuda.get_device_name(0),flush=True)
           PY
       - name: Transfer task configuration
         shell: bash
         run: |
           set -euo pipefail
           colab --auth=adc upload -s "$SESSION" output/dub_config.json /content/dub_config.json
+      - name: Transfer pipeline source
+        shell: bash
+        run: |
+          set -euo pipefail
+          colab --auth=adc upload -s "$SESSION" scripts/youtube_episode_arabic_dub.py /content/youtube_episode_arabic_dub.py
       - name: Run complete dubbing pipeline
         id: dubbing
         timeout-minutes: 345
         shell: bash
         run: |
           set -euo pipefail
-          colab --auth=adc exec -s "$SESSION" --timeout 0 -f scripts/youtube_episode_arabic_dub.py 2>&1 | tee output/colab_dubbing.log
+          colab --auth=adc exec -s "$SESSION" --timeout 0 <<'PY' 2>&1 | tee output/colab_dubbing.log
+          import json,os,subprocess,sys
+          from pathlib import Path
+          marker=Path("/content/youtube_arabic_dub/pipeline_exit.json")
+          code=127; detail=""
+          try:
+              libs=json.loads(Path("/content/cuda12_library_paths.json").read_text(encoding="utf-8"))
+              env=os.environ.copy()
+              env["LD_LIBRARY_PATH"]=":".join(libs+[env.get("LD_LIBRARY_PATH","")])
+              proc=subprocess.Popen([sys.executable,"/content/youtube_episode_arabic_dub.py"],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1,env=env)
+              assert proc.stdout is not None
+              for line in proc.stdout: print(line.rstrip(),flush=True)
+              code=proc.wait()
+              detail="pipeline process exit"
+          except BaseException as exc:
+              detail=type(exc).__name__+": "+str(exc)
+              print("PIPELINE_WRAPPER_ERROR="+detail,flush=True)
+          finally:
+              marker.parent.mkdir(parents=True,exist_ok=True)
+              marker.write_text(json.dumps({"returncode":code,"detail":detail}),encoding="utf-8")
+          print("PIPELINE_EXIT_CODE="+str(code),flush=True)
+          PY
+          mkdir -p output/colab_return
+          colab --auth=adc download -s "$SESSION" /content/youtube_arabic_dub/pipeline_exit.json output/colab_return/pipeline_exit.json
+          python - <<'PY'
+          import json,sys
+          r=json.load(open("output/colab_return/pipeline_exit.json",encoding="utf-8"))
+          print("Colab pipeline exit:",r)
+          if r.get("returncode") != 0: sys.exit(r.get("returncode") or 1)
+          PY
       - name: Independently verify audio/video result
-        if: always() && steps.colab.outcome == 'success'
+        if: always() && steps.dubbing.outcome == 'success'
         timeout-minutes: 30
         shell: bash
         run: |
@@ -134,7 +207,7 @@ jobs:
           colab --auth=adc exec -s "$SESSION" --timeout 0 -f scripts/verify_youtube_dub.py 2>&1 | tee output/colab_verification.log
           grep -q "VERIFICATION_STATUS=PASS" output/colab_verification.log
       - name: Prepare chunked export
-        if: always() && steps.colab.outcome == 'success'
+        if: always() && steps.dubbing.outcome == 'success'
         timeout-minutes: 30
         shell: bash
         run: |
@@ -144,7 +217,7 @@ jobs:
           mkdir -p output/colab_return
           colab --auth=adc download -s "$SESSION" /content/youtube_arabic_dub/export_manifest.json output/colab_return/export_manifest.json
       - name: Retrieve and assemble deliverables
-        if: always() && steps.colab.outcome == 'success'
+        if: always() && steps.dubbing.outcome == 'success'
         timeout-minutes: 120
         shell: bash
         run: |
