@@ -157,7 +157,6 @@ jobs:
               print("PYAV_SMOKE_TEST=PASS",flush=True)
               print("CUDA12_CUBLAS_CUDNN_TEST=PASS",flush=True)
               print("GPU:",torch.cuda.get_device_name(0),flush=True)
-              PY
               smoke_returncode=0
               smoke_detail='CUDA 12 and PyTorch/CTranslate2 checks passed'
           except BaseException as exc:
