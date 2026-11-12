@@ -462,11 +462,78 @@ def choose_voices(profiles: dict) -> dict:
     return mapping
 
 
+class GeminiBatchTranslator:
+    """Batch dialogue translation with the official Google GenAI Interactions API."""
+    def __init__(self, api_key: str, model: str):
+        from google import genai
+        self.client = genai.Client(api_key=api_key)
+        self.model = model
+
+    def translate_batch(self, items: list[tuple[int, str]], source_language: str) -> dict[int, str]:
+        expected = {int(idx) for idx, _ in items}
+        payload = [{"id": int(idx), "text": str(text)} for idx, text in items]
+        prompt = (
+            "You are a professional subtitle and dubbing translator. Translate every dialogue "
+            "segment into natural, clear Arabic suitable for spoken dubbing. Preserve the exact "
+            "meaning, names, numbers, emotional intent, and register. Do not summarize, censor, "
+            "add explanations, or merge separate segments. Keep each translation aligned to its "
+            "input id. Use concise natural Arabic; prefer Modern Standard Arabic unless the line "
+            "clearly requires colloquial phrasing. Return ONLY a valid JSON array of objects with "
+            "exactly these fields: id (integer) and arabic (string). Include every id exactly once.\n"
+            f"Detected source-language code: {source_language}\n"
+            "Input segments:\n"
+            + json.dumps(payload, ensure_ascii=False)
+        )
+        last = None
+        for attempt in range(6):
+            try:
+                response = self.client.interactions.create(model=self.model, input=prompt)
+                raw = str(getattr(response, "output_text", "") or "").strip()
+                fence = chr(96) * 3
+                if raw.startswith(fence):
+                    raw = raw[len(fence):].strip()
+                    if raw.lower().startswith("json"):
+                        raw = raw[4:].strip()
+                    if raw.endswith(fence):
+                        raw = raw[:-len(fence)].strip()
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError:
+                    match = re.search(r"\[[\s\S]*\]", raw)
+                    if not match:
+                        raise ValueError("Gemini response did not contain a JSON array")
+                    parsed = json.loads(match.group(0))
+                if isinstance(parsed, dict):
+                    parsed = parsed.get("translations", parsed.get("items"))
+                if not isinstance(parsed, list):
+                    raise ValueError("Gemini translation response is not a JSON array")
+                result = {}
+                for row in parsed:
+                    if not isinstance(row, dict) or "id" not in row:
+                        continue
+                    idx = int(row["id"])
+                    arabic = re.sub(r"\s+", " ", str(row.get("arabic", "")).strip())
+                    if arabic:
+                        result[idx] = arabic
+                if set(result) != expected:
+                    missing = sorted(expected - set(result))
+                    raise ValueError(f"Gemini omitted or duplicated translation ids: {missing[:8]}")
+                return result
+            except Exception as exc:
+                last = exc
+                if attempt == 5:
+                    break
+                delay = min(60, 5 * (2 ** attempt))
+                log(f"Gemini translation batch retry {attempt + 1}/6 after {type(exc).__name__}; waiting {delay}s")
+                time.sleep(delay)
+        raise RuntimeError(f"Gemini Arabic batch translation failed: {type(last).__name__ if last else 'unknown'}")
+
+
 def translate_text(text: str, translator, source_language: str) -> str:
     if source_language == "ar":
         return text
     last = None
-    for attempt in range(4):
+    for attempt in range(7):
         try:
             result = translator.translate(text)
             if not result or not str(result).strip():
@@ -474,9 +541,12 @@ def translate_text(text: str, translator, source_language: str) -> str:
             return re.sub(r"\s+", " ", str(result)).strip()
         except Exception as exc:
             last = exc
-            time.sleep(min(6, 1.5 ** attempt))
+            if attempt == 6:
+                break
+            delay = min(90, 8 * (2 ** attempt))
+            log(f"Fallback translator retry {attempt + 1}/7 after {type(exc).__name__}; waiting {delay}s")
+            time.sleep(delay)
     raise RuntimeError(f"Arabic translation failed: {type(last).__name__ if last else 'unknown'}")
-
 
 async def synth_one(item: dict, path: Path, voice_info: dict) -> dict:
     import edge_tts
@@ -518,55 +588,106 @@ def make_checkpoint(indices: list[int], manifest: dict, drive: DriveStore) -> No
 
 
 def synthesize_all(segments: list[dict], profiles: dict, voices: dict,
-                   source_language: str, drive: DriveStore) -> list[dict]:
-    from deep_translator import GoogleTranslator
-    translator = GoogleTranslator(source="auto", target="ar")
+                   source_language: str, drive: DriveStore,
+                   translation_api_key: str = "", translation_model: str = "gemini-3.8-flash") -> list[dict]:
+    gemini = None
+    fallback_translator = None
+    if source_language != "ar" and translation_api_key:
+        gemini = GeminiBatchTranslator(translation_api_key, translation_model)
+        log(f"Translation provider: Gemini API model={translation_model}; batch size=12")
+    elif source_language != "ar":
+        from deep_translator import GoogleTranslator
+        fallback_translator = GoogleTranslator(source="auto", target="ar")
+        log("Translation provider: GoogleTranslator fallback; throttled requests enabled")
+    else:
+        log("Source language is Arabic; translation requests skipped")
+
     CLIPS.mkdir(parents=True, exist_ok=True)
     manifest_path = CLIPS / "clip_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else {"items": {}}
-    translated = []
+    translated_by_id = {}
+    pending = []
 
-    # Reuse full per-segment metadata, translation and generated speech when fingerprints match.
+    # Reuse cached Arabic text and TTS metadata whenever the segment fingerprint matches.
     for pos, seg in enumerate(segments):
         idx = int(seg["index"])
         sid = seg["speaker_id"]
         fingerprint = hashlib.sha256((seg["text"] + sid + voices[sid]["voice"]).encode("utf-8")).hexdigest()
         meta = CLIPS / f"{idx:06d}.json"
         wav = CLIPS / f"{idx:06d}.wav"
-        mp3 = CLIPS / f"{idx:06d}.mp3"
         entry = manifest["items"].get(str(idx), {})
         data = {}
         if meta.is_file():
             try:
                 cached = json.loads(meta.read_text(encoding="utf-8"))
-                if cached.get("fingerprint") == fingerprint:
+                if cached.get("fingerprint") == fingerprint and str(cached.get("arabic", "")).strip():
                     data = cached
             except Exception:
                 data = {}
         if not data:
             arabic = entry.get("arabic") if entry.get("fingerprint") == fingerprint else None
-            if not arabic:
-                arabic = translate_text(seg["text"], translator, source_language)
             data = {
                 "index": idx, "start": seg["start"], "end": seg["end"],
-                "speaker_id": sid, "source": seg["text"], "arabic": arabic,
+                "speaker_id": sid, "source": seg["text"], "arabic": str(arabic or "").strip(),
                 "fingerprint": fingerprint
             }
-        data["index"] = idx
-        data["start"] = seg["start"]
-        data["end"] = seg["end"]
-        data["speaker_id"] = sid
-        data["source"] = seg["text"]
-        data["fingerprint"] = fingerprint
-        translated.append(data)
-        if not (wav.is_file() and wav.stat().st_size > 500 and data.get("tts_words")):
+        data.update({
+            "index": idx, "start": seg["start"], "end": seg["end"],
+            "speaker_id": sid, "source": seg["text"], "fingerprint": fingerprint
+        })
+        if data.get("arabic"):
+            translated_by_id[idx] = data
+        else:
+            pending.append((seg, data, meta))
+        if (pos + 1) % 250 == 0:
+            log(f"Translation cache scan: {pos + 1}/{len(segments)} segments")
+
+    def save_partial_translation():
+        partial = [translated_by_id[k] for k in sorted(translated_by_id)]
+        atomic_json(WORK / "arabic_segments.partial.json", {
+            "segments": partial, "source_language": source_language,
+            "translated_segments": len(partial), "total_segments": len(segments),
+            "partial": len(partial) < len(segments)
+        })
+
+    # Save restored translations before making any network calls.
+    save_partial_translation()
+    batch_size = 12 if gemini else 1
+    for offset in range(0, len(pending), batch_size):
+        batch = pending[offset:offset + batch_size]
+        if source_language == "ar":
+            results = {int(seg["index"]): str(seg["text"]) for seg, _, _ in batch}
+        elif gemini:
+            results = gemini.translate_batch(
+                [(int(seg["index"]), str(seg["text"])) for seg, _, _ in batch],
+                source_language
+            )
+        else:
+            results = {}
+            for seg, _, _ in batch:
+                idx = int(seg["index"])
+                results[idx] = translate_text(str(seg["text"]), fallback_translator, source_language)
+                time.sleep(1.25)
+
+        for seg, data, meta in batch:
+            idx = int(seg["index"])
+            arabic = str(results.get(idx, "")).strip()
+            if not arabic:
+                raise RuntimeError(f"Arabic translation is empty for segment {idx}")
+            data["arabic"] = arabic
             atomic_json(meta, data)
+            translated_by_id[idx] = data
 
-        if (pos + 1) % 100 == 0:
-            log(f"Translation and checkpoint scan: {pos + 1}/{len(segments)} segments")
+        save_partial_translation()
+        completed_new = min(offset + len(batch), len(pending))
+        log(f"Arabic translation batches: {completed_new}/{len(pending)} new; "
+            f"{len(translated_by_id)}/{len(segments)} total cached")
 
-    translated.sort(key=lambda x: x["index"])
+    translated = [translated_by_id[k] for k in sorted(translated_by_id)]
+    if len(translated) != len(segments):
+        raise RuntimeError(f"Translation coverage mismatch: {len(translated)}/{len(segments)}")
     atomic_json(WORK / "arabic_segments.json", {"segments": translated, "source_language": source_language})
+    (WORK / "arabic_segments.partial.json").unlink(missing_ok=True)
     update_progress("translation_complete", segments=len(translated), speakers=len(profiles))
     drive.upload(WORK / "arabic_segments.json", "arabic_segments.json", drive.parent_id)
 
@@ -605,7 +726,7 @@ def synthesize_all(segments: list[dict], profiles: dict, voices: dict,
                 run(["ffmpeg", "-y", "-v", "error", "-i", str(mp3),
                      "-af", f"atempo={tempo:.5f}", "-ac", "1", "-ar", "24000",
                      "-c:a", "pcm_s16le", str(wav)], timeout=180)
-                item["atempo"] = tempo
+                item["attempo"] = tempo
                 item["tts_words"] = meta_data["boundaries"]
                 item["clip_duration"] = duration / tempo
                 atomic_json(CLIPS / f"{idx:06d}.json", item)
@@ -621,12 +742,10 @@ def synthesize_all(segments: list[dict], profiles: dict, voices: dict,
         return
 
     asyncio.run(produce())
-    # Refresh cached metadata after synthesis so word timings and clip lengths are available to the mixer.
     for item in translated:
         meta = json.loads((CLIPS / f"{item['index']:06d}.json").read_text(encoding="utf-8"))
         item.update(meta)
     return translated
-
 def write_word_srt(segments: list[dict], output: Path) -> None:
     def stamp(seconds: float) -> str:
         millis = max(0, int(seconds * 1000))
@@ -783,7 +902,9 @@ def main() -> None:
     drive.upload(WORK / "speaker_profiles.json", "speaker_profiles.json", drive.parent_id)
     update_progress("speakers_identified", speaker_count=len(profiles),
                     speaker_profiles=profiles)
-    translated = synthesize_all(segments, profiles, voices, language, drive)
+    translated = synthesize_all(segments, profiles, voices, language, drive,
+                                str(config.get("translation_api_key") or "").strip(),
+                                str(config.get("translation_model") or "gemini-3.8-flash"))
     update_progress("tts_complete", speaker_count=len(profiles), segments=len(translated),
                     word_boundary_segments=sum(bool(x.get("tts_words")) for x in translated))
     try:
