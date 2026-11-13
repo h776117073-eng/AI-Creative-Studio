@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Prepare chunked media and reports for retrieval from Colab."""
-import hashlib,json,shutil
+import hashlib,json,shutil,tarfile
 from pathlib import Path
 ROOT=Path("/content/youtube_arabic_dub"); FINAL=ROOT/"eSskYhfTWZ0_Arabic_Dub.mp4"; PARTS=ROOT/"export_parts"; CHUNK=96*1024*1024
 def sha(p):
@@ -35,6 +35,9 @@ def main():
    for p in checkpoint_archives:
     tar.add(p,arcname=p.name)
   print("Bundled TTS checkpoints:",len(checkpoint_archives),flush=True)
+  rel=str(bundle.relative_to(ROOT))
+  if not any(x["relative"]==rel for x in files):
+   files.append({"remote":str(bundle),"relative":rel,"size_bytes":bundle.stat().st_size})
  video=None; parts=[]
  if FINAL.is_file() and FINAL.stat().st_size>1_000_000:
   if PARTS.exists(): shutil.rmtree(PARTS)
