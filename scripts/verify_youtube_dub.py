@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 ROOT=Path("/content/youtube_arabic_dub"); WORK=ROOT/"work"; CLIPS=WORK/"clips"
-FINAL=ROOT/"eSskYhfTWZ0_Arabic_Dub.mp4"; SOURCE=WORK/"source.mp4"
+FINAL=ROOT/"eSskYhfTWZ0_Arabic_Dub.mp4"; SOURCE=next((WORK/name for name in ("source.mp4","source.mkv","source.webm","source.mov") if (WORK/name).is_file()),WORK/"source.mp4")
 def fail(msg):
  print("VERIFICATION_STATUS=FAIL: "+str(msg),flush=True); raise SystemExit(2)
 def readj(p):
