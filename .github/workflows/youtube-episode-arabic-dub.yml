@@ -56,6 +56,16 @@ jobs:
           PY
       - name: Validate pipeline Python before allocating Colab
         run: python -m py_compile scripts/youtube_episode_arabic_dub.py scripts/verify_youtube_dub.py scripts/export_youtube_dub_artifacts.py
+      - name: Enforce local M2M100 translation without remote fallback
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q "class M2M100BatchTranslator" scripts/youtube_episode_arabic_dub.py
+          grep -q "Translation provider: local M2M100" scripts/youtube_episode_arabic_dub.py
+          if grep -Eq "GoogleTranslator|googletrans" scripts/youtube_episode_arabic_dub.py; then
+            echo "::error::Remote rate-limited translation fallback is prohibited"; exit 1
+          fi
+          echo "LOCAL_M2M100_GUARD=PASS"
       - name: Set up Python and Node
         uses: actions/setup-python@v5
         with:
