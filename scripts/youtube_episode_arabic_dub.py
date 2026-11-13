@@ -100,7 +100,34 @@ class LocalStore:
     local_only = True
 
     def restore_checkpoints(self) -> None:
-        log("Drive API scope unavailable; using local Colab checkpoints for this run.")
+        CLIPS.mkdir(parents=True, exist_ok=True)
+        bundle = WORK / "tts_checkpoints_bundle.tar.gz"
+        if bundle.is_file():
+            with tarfile.open(bundle, "r:gz") as tar:
+                members = tar.getmembers()
+                for member in members:
+                    if member.issym() or member.islnk() or member.isdev():
+                        raise RuntimeError(f"Unsafe entry in TTS bundle: {member.name}")
+                    target = (WORK / member.name).resolve()
+                    if WORK.resolve() not in target.parents and target != WORK.resolve():
+                        raise RuntimeError("Unsafe TTS bundle path")
+                tar.extractall(WORK, members=members)
+            log("Restored compressed TTS checkpoint bundle")
+        archives = sorted(WORK.glob("tts_checkpoint_*.tar.gz"))
+        restored = 0
+        for archive in archives:
+            with tarfile.open(archive, "r:gz") as tar:
+                members = tar.getmembers()
+                for member in members:
+                    if member.issym() or member.islnk() or member.isdev():
+                        raise RuntimeError(f"Unsafe entry in local TTS checkpoint: {member.name}")
+                    target = (CLIPS / member.name).resolve()
+                    if CLIPS.resolve() not in target.parents and target != CLIPS.resolve():
+                        raise RuntimeError("Unsafe local checkpoint archive path")
+                tar.extractall(CLIPS, members=members)
+            restored += 1
+            log(f"Restored local TTS checkpoint: {archive.name}")
+        log(f"Local checkpoint restore complete: {restored} archive(s)")
 
     def upload(self, path: Path, name: str | None = None, parent: str | None = None):
         # Keep files on the Colab VM; GitHub Actions retrieves final deliverables after execution.
@@ -325,10 +352,32 @@ def transcribe(audio_path: Path, digest: str, device: str) -> tuple[list[dict], 
 def diarize(audio_path: Path, segments: list[dict], device: str) -> tuple[list[dict], dict]:
     cache = WORK / "speaker_profiles.json"
     if cache.is_file():
-        old = json.loads(cache.read_text(encoding="utf-8"))
-        if old.get("segment_count") == len(segments) and old.get("segments"):
-            log(f"Restored speaker checkpoint: {old.get('speaker_count')} speakers")
-            return old["segments"], old["profiles"]
+        try:
+            old = json.loads(cache.read_text(encoding="utf-8"))
+            old_segments = old.get("segments") or []
+            old_profiles = old.get("profiles") or {}
+            same_segments = len(old_segments) == len(segments)
+            if same_segments:
+                for saved, current in zip(old_segments, segments):
+                    if (
+                        int(saved.get("index", -1)) != int(current.get("index", -2))
+                        or str(saved.get("text", "")) != str(current.get("text", ""))
+                        or abs(float(saved.get("start", 0)) - float(current.get("start", 0))) > 0.01
+                        or abs(float(saved.get("end", 0)) - float(current.get("end", 0))) > 0.01
+                    ):
+                        same_segments = False
+                        break
+            valid_profiles = (
+                bool(old_profiles)
+                and len(old_profiles) == int(old.get("speaker_count", len(old_profiles)))
+                and all(x.get("speaker_id") in old_profiles for x in old_segments)
+            )
+            if same_segments and valid_profiles:
+                log(f"Restored speaker checkpoint: {len(old_profiles)} speakers / {len(old_segments)} segments")
+                return old_segments, old_profiles
+            log("Saved speaker checkpoint did not match ASR; recalculating diarization")
+        except Exception as exc:
+            log(f"Saved speaker checkpoint is unreadable; recalculating ({type(exc).__name__})")
     import torch
     from speechbrain.inference.speaker import EncoderClassifier
     from sklearn.cluster import AgglomerativeClustering
@@ -462,91 +511,83 @@ def choose_voices(profiles: dict) -> dict:
     return mapping
 
 
-class GeminiBatchTranslator:
-    """Batch dialogue translation with the official Google GenAI Interactions API."""
-    def __init__(self, api_key: str, model: str):
-        from google import genai
-        self.client = genai.Client(api_key=api_key)
-        self.model = model
+class M2M100BatchTranslator:
+    """Local Chinese-to-Arabic translation; no external translation API or rate limit."""
+    MODEL_ID = "facebook/m2m100_418M"
+
+    def __init__(self, source_language: str, device: str):
+        import torch
+        from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer
+
+        aliases = {
+            "zh-cn": "zh", "zh-tw": "zh", "zh-hans": "zh", "zh-hant": "zh",
+            "cmn": "zh", "yue": "zh", "jp": "ja", "iw": "he"
+        }
+        code = str(source_language or "").lower().replace("_", "-")
+        source = aliases.get(code, code)
+        self.torch = torch
+        self.device = device if device in ("cuda", "cpu") else "cpu"
+        self.tokenizer = M2M100Tokenizer.from_pretrained(self.MODEL_ID)
+        try:
+            self.tokenizer.get_lang_id(source)
+        except Exception as exc:
+            raise RuntimeError(f"M2M100 does not support detected source language: {source}") from exc
+        self.tokenizer.src_lang = source
+        self.target_lang_id = self.tokenizer.get_lang_id("ar")
+        dtype = torch.float16 if self.device == "cuda" else torch.float32
+        self.model = M2M100ForConditionalGeneration.from_pretrained(
+            self.MODEL_ID, torch_dtype=dtype
+        )
+        self.model.to(self.device)
+        self.model.eval()
+        smoke = self._generate(["你好，欢迎光临。"])
+        if not smoke or not any("\u0600" <= ch <= "\u06ff" for ch in smoke[0]):
+            raise RuntimeError("M2M100 Chinese-to-Arabic smoke test did not produce Arabic text")
+        log(f"Local translation ready: {self.MODEL_ID}; source={source}; target=ar; device={self.device}")
+
+    def _generate(self, texts: list[str]) -> list[str]:
+        encoded = self.tokenizer(
+            texts, return_tensors="pt", padding=True,
+            truncation=True, max_length=384
+        )
+        encoded = {key: value.to(self.device) for key, value in encoded.items()}
+        with self.torch.inference_mode():
+            generated = self.model.generate(
+                **encoded,
+                forced_bos_token_id=self.target_lang_id,
+                num_beams=2,
+                max_new_tokens=160,
+                length_penalty=1.0,
+                no_repeat_ngram_size=3
+            )
+        return [
+            re.sub(r"\s+", " ", value).strip()
+            for value in self.tokenizer.batch_decode(generated, skip_special_tokens=True)
+        ]
 
     def translate_batch(self, items: list[tuple[int, str]], source_language: str) -> dict[int, str]:
-        expected = {int(idx) for idx, _ in items}
-        payload = [{"id": int(idx), "text": str(text)} for idx, text in items]
-        prompt = (
-            "You are a professional subtitle and dubbing translator. Translate every dialogue "
-            "segment into natural, clear Arabic suitable for spoken dubbing. Preserve the exact "
-            "meaning, names, numbers, emotional intent, and register. Do not summarize, censor, "
-            "add explanations, or merge separate segments. Keep each translation aligned to its "
-            "input id. Use concise natural Arabic; prefer Modern Standard Arabic unless the line "
-            "clearly requires colloquial phrasing. Return ONLY a valid JSON array of objects with "
-            "exactly these fields: id (integer) and arabic (string). Include every id exactly once.\n"
-            f"Detected source-language code: {source_language}\n"
-            "Input segments:\n"
-            + json.dumps(payload, ensure_ascii=False)
-        )
-        last = None
-        for attempt in range(6):
-            try:
-                response = self.client.interactions.create(model=self.model, input=prompt)
-                raw = str(getattr(response, "output_text", "") or "").strip()
-                fence = chr(96) * 3
-                if raw.startswith(fence):
-                    raw = raw[len(fence):].strip()
-                    if raw.lower().startswith("json"):
-                        raw = raw[4:].strip()
-                    if raw.endswith(fence):
-                        raw = raw[:-len(fence)].strip()
-                try:
-                    parsed = json.loads(raw)
-                except json.JSONDecodeError:
-                    match = re.search(r"\[[\s\S]*\]", raw)
-                    if not match:
-                        raise ValueError("Gemini response did not contain a JSON array")
-                    parsed = json.loads(match.group(0))
-                if isinstance(parsed, dict):
-                    parsed = parsed.get("translations", parsed.get("items"))
-                if not isinstance(parsed, list):
-                    raise ValueError("Gemini translation response is not a JSON array")
-                result = {}
-                for row in parsed:
-                    if not isinstance(row, dict) or "id" not in row:
-                        continue
-                    idx = int(row["id"])
-                    arabic = re.sub(r"\s+", " ", str(row.get("arabic", "")).strip())
-                    if arabic:
-                        result[idx] = arabic
-                if set(result) != expected:
-                    missing = sorted(expected - set(result))
-                    raise ValueError(f"Gemini omitted or duplicated translation ids: {missing[:8]}")
-                return result
-            except Exception as exc:
-                last = exc
-                if attempt == 5:
-                    break
-                delay = min(60, 5 * (2 ** attempt))
-                log(f"Gemini translation batch retry {attempt + 1}/6 after {type(exc).__name__}; waiting {delay}s")
-                time.sleep(delay)
-        raise RuntimeError(f"Gemini Arabic batch translation failed: {type(last).__name__ if last else 'unknown'}")
-
-
-def translate_text(text: str, translator, source_language: str) -> str:
-    if source_language == "ar":
-        return text
-    last = None
-    for attempt in range(7):
+        if not items:
+            return {}
         try:
-            result = translator.translate(text)
-            if not result or not str(result).strip():
-                raise RuntimeError("Empty translation")
-            return re.sub(r"\s+", " ", str(result)).strip()
-        except Exception as exc:
-            last = exc
-            if attempt == 6:
-                break
-            delay = min(90, 8 * (2 ** attempt))
-            log(f"Fallback translator retry {attempt + 1}/7 after {type(exc).__name__}; waiting {delay}s")
-            time.sleep(delay)
-    raise RuntimeError(f"Arabic translation failed: {type(last).__name__ if last else 'unknown'}")
+            outputs = self._generate([str(text) for _, text in items])
+        except RuntimeError as exc:
+            if self.device == "cuda" and "out of memory" in str(exc).lower() and len(items) > 1:
+                self.torch.cuda.empty_cache()
+                middle = len(items) // 2
+                log(f"M2M100 CUDA memory pressure; splitting batch {len(items)} into smaller batches")
+                left = self.translate_batch(items[:middle], source_language)
+                right = self.translate_batch(items[middle:], source_language)
+                return {**left, **right}
+            raise
+        if len(outputs) != len(items):
+            raise RuntimeError("M2M100 translation batch size mismatch")
+        result = {}
+        for (idx, _), arabic in zip(items, outputs):
+            arabic = str(arabic).strip()
+            if not arabic:
+                raise RuntimeError(f"M2M100 returned empty Arabic for segment {idx}")
+            result[int(idx)] = arabic
+        return result
 
 async def synth_one(item: dict, path: Path, voice_info: dict) -> dict:
     import edge_tts
@@ -588,17 +629,11 @@ def make_checkpoint(indices: list[int], manifest: dict, drive: DriveStore) -> No
 
 
 def synthesize_all(segments: list[dict], profiles: dict, voices: dict,
-                   source_language: str, drive: DriveStore,
-                   translation_api_key: str = "", translation_model: str = "gemini-3.8-flash") -> list[dict]:
-    gemini = None
-    fallback_translator = None
-    if source_language != "ar" and translation_api_key:
-        gemini = GeminiBatchTranslator(translation_api_key, translation_model)
-        log(f"Translation provider: Gemini API model={translation_model}; batch size=12")
-    elif source_language != "ar":
-        from deep_translator import GoogleTranslator
-        fallback_translator = GoogleTranslator(source="auto", target="ar")
-        log("Translation provider: GoogleTranslator fallback; throttled requests enabled")
+                   source_language: str, drive: DriveStore, device: str) -> list[dict]:
+    translator = None
+    if source_language != "ar":
+        translator = M2M100BatchTranslator(source_language, device)
+        log("Translation provider: local M2M100; no API key or external translation endpoint required")
     else:
         log("Source language is Arabic; translation requests skipped")
 
@@ -607,6 +642,18 @@ def synthesize_all(segments: list[dict], profiles: dict, voices: dict,
     manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else {"items": {}}
     translated_by_id = {}
     pending = []
+    partial_cache = {}
+    for cache_file in (WORK / "arabic_segments.json", WORK / "arabic_segments.partial.json"):
+        if cache_file.is_file():
+            try:
+                partial_data = json.loads(cache_file.read_text(encoding="utf-8"))
+                for item in partial_data.get("segments", []):
+                    if item.get("arabic"):
+                        partial_cache[int(item["index"])] = item
+            except Exception as exc:
+                log(f"Translation checkpoint unreadable ({cache_file.name}): {type(exc).__name__}")
+    if partial_cache:
+        log(f"Restored cached Arabic translations: {len(partial_cache)} segment(s)")
 
     # Reuse cached Arabic text and TTS metadata whenever the segment fingerprint matches.
     for pos, seg in enumerate(segments):
@@ -624,6 +671,10 @@ def synthesize_all(segments: list[dict], profiles: dict, voices: dict,
                     data = cached
             except Exception:
                 data = {}
+        if not data:
+            cached_partial = partial_cache.get(idx, {})
+            if cached_partial.get("fingerprint") == fingerprint and str(cached_partial.get("arabic", "")).strip():
+                data = dict(cached_partial)
         if not data:
             arabic = entry.get("arabic") if entry.get("fingerprint") == fingerprint else None
             data = {
@@ -652,22 +703,18 @@ def synthesize_all(segments: list[dict], profiles: dict, voices: dict,
 
     # Save restored translations before making any network calls.
     save_partial_translation()
-    batch_size = 12 if gemini else 1
+    batch_size = 12 if translator else 1
     for offset in range(0, len(pending), batch_size):
         batch = pending[offset:offset + batch_size]
         if source_language == "ar":
             results = {int(seg["index"]): str(seg["text"]) for seg, _, _ in batch}
-        elif gemini:
-            results = gemini.translate_batch(
+        elif translator:
+            results = translator.translate_batch(
                 [(int(seg["index"]), str(seg["text"])) for seg, _, _ in batch],
                 source_language
             )
         else:
-            results = {}
-            for seg, _, _ in batch:
-                idx = int(seg["index"])
-                results[idx] = translate_text(str(seg["text"]), fallback_translator, source_language)
-                time.sleep(1.25)
+            raise RuntimeError(f"No translation engine is available for source language {source_language}")
 
         for seg, data, meta in batch:
             idx = int(seg["index"])
@@ -688,7 +735,8 @@ def synthesize_all(segments: list[dict], profiles: dict, voices: dict,
         raise RuntimeError(f"Translation coverage mismatch: {len(translated)}/{len(segments)}")
     atomic_json(WORK / "arabic_segments.json", {"segments": translated, "source_language": source_language})
     (WORK / "arabic_segments.partial.json").unlink(missing_ok=True)
-    update_progress("translation_complete", segments=len(translated), speakers=len(profiles))
+    update_progress("translation_complete", segments=len(translated), speakers=len(profiles),
+                    translation_engine=translator.MODEL_ID if translator else "source-arabic")
     drive.upload(WORK / "arabic_segments.json", "arabic_segments.json", drive.parent_id)
 
     async def worker(item):
@@ -902,9 +950,7 @@ def main() -> None:
     drive.upload(WORK / "speaker_profiles.json", "speaker_profiles.json", drive.parent_id)
     update_progress("speakers_identified", speaker_count=len(profiles),
                     speaker_profiles=profiles)
-    translated = synthesize_all(segments, profiles, voices, language, drive,
-                                str(config.get("translation_api_key") or "").strip(),
-                                str(config.get("translation_model") or "gemini-3.8-flash"))
+    translated = synthesize_all(segments, profiles, voices, language, drive, device)
     update_progress("tts_complete", speaker_count=len(profiles), segments=len(translated),
                     word_boundary_segments=sum(bool(x.get("tts_words")) for x in translated))
     try:
@@ -932,6 +978,9 @@ def main() -> None:
         "status": "FINAL_VERIFIED", "video_id": video_id,
         "source_url": source_label, "duration_seconds": round(duration, 2),
         "speaker_count": len(profiles), "speaker_profiles": profiles,
+        "source_language": language,
+        "translation_engine": M2M100BatchTranslator.MODEL_ID if language != "ar" else "source-arabic",
+        "translation_model_license": "MIT" if language != "ar" else None,
         "segments_translated_and_voiced": len(translated),
         "tts_word_boundary_count": word_count,
         "timing_method": "Microsoft Edge TTS WordBoundary offsets mapped to source utterance starts; clip fitting capped at 1.25x",

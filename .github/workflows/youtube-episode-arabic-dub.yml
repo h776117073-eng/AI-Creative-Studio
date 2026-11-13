@@ -17,6 +17,7 @@ on:
       - ".github/workflows/youtube-episode-arabic-dub.yml"
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: youtube-arabic-dub-eSskYhfTWZ0
   cancel-in-progress: false
@@ -28,6 +29,31 @@ jobs:
     steps:
       - name: Check out pipeline
         uses: actions/checkout@v4
+      - name: Download reusable ASR and speaker checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          name: youtube-arabic-dub-43135593059
+          run-id: 43135593059
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: output/resume
+      - name: Validate reusable analysis checkpoint
+        run: |
+          python - <<'PY'
+          import json,pathlib
+          root=pathlib.Path("output/resume/colab_return/work")
+          asr=json.loads((root/"asr.json").read_text(encoding="utf-8"))
+          speakers=json.loads((root/"speaker_profiles.json").read_text(encoding="utf-8"))
+          n=len(asr.get("segments",[])); sn=len(speakers.get("segments",[]))
+          profiles=speakers.get("profiles",{})
+          if not asr.get("audio_sha256") or n<100 or sn!=n or len(profiles)!=int(speakers.get("speaker_count",0)):
+              raise SystemExit("Saved ASR/speaker checkpoint failed integrity checks")
+          if asr.get("language")!="zh":
+              raise SystemExit("Saved source language is not the expected Chinese source")
+          if any(x.get("speaker_id") not in profiles for x in speakers["segments"]):
+              raise SystemExit("Saved speaker assignments are incomplete")
+          print(f"RESUME_CHECKPOINT_OK asr_segments={n} speakers={len(profiles)}")
+          PY
       - name: Validate pipeline Python before allocating Colab
         run: python -m py_compile scripts/youtube_episode_arabic_dub.py scripts/verify_youtube_dub.py scripts/export_youtube_dub_artifacts.py
       - name: Set up Python and Node
@@ -47,7 +73,6 @@ jobs:
         env:
           COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
           SOURCE_DOWNLOAD_URL: ${{ secrets.SOURCE_DOWNLOAD_URL }}
-          GOOGLE_AI_API_KEY: ${{ secrets.GOOGLE_AI }}
         shell: bash
         run: |
           set -euo pipefail
@@ -72,8 +97,6 @@ jobs:
           import os
           c={"youtube_url":"","source_download_url":os.environ["SOURCE_DOWNLOAD_URL"],
              "source_label":"Google Drive file ID: 13Tpk4XD8RCq1jWl0KDL6G9k3Eve5ib43",
-             "translation_api_key":os.environ.get("GOOGLE_AI_API_KEY",""),
-             "translation_model":"gemini-3.8-flash",
              "video_id":"eSskYhfTWZ0","output_target":"github_actions_artifact"}
           json.dump(c,open("output/dub_config.json","w",encoding="utf-8"),ensure_ascii=False,indent=2)
           PY
@@ -108,7 +131,7 @@ jobs:
               import selectors,subprocess,sys,time,tempfile
               from pathlib import Path
               Path("/content/youtube_arabic_dub").mkdir(parents=True,exist_ok=True)
-              pkgs=["yt-dlp","faster-whisper","av==18.1.0","speechbrain","scikit-learn","edge-tts","deep-translator","google-genai","demucs","soundfile"]
+              pkgs=["yt-dlp","faster-whisper","av==18.1.0","speechbrain","scikit-learn","edge-tts","transformers>=4.45,<5","sentencepiece","demucs","soundfile"]
               p=subprocess.Popen([sys.executable,"-m","pip","install","--disable-pip-version-check","--no-input","--prefer-binary",*pkgs],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
               assert p.stdout is not None
               sel=selectors.DefaultSelector(); sel.register(p.stdout,selectors.EVENT_READ); last=time.monotonic()
@@ -164,6 +187,21 @@ jobs:
               if result.stdout: print(result.stdout,flush=True)
               if result.stderr: print(result.stderr,flush=True)
               if result.returncode: raise RuntimeError("CUDA 12 PyTorch/CTranslate2 smoke test failed")
+              from transformers import M2M100Tokenizer, M2M100ForConditionalGeneration
+              model_id="facebook/m2m100_418M"
+              tok=M2M100Tokenizer.from_pretrained(model_id)
+              tok.src_lang="zh"
+              model=M2M100ForConditionalGeneration.from_pretrained(model_id,torch_dtype=torch.float16)
+              model.to("cuda").eval()
+              batch=tok(["你好，欢迎光临。"],return_tensors="pt",padding=True).to("cuda")
+              with torch.inference_mode():
+                  generated=model.generate(**batch,forced_bos_token_id=tok.get_lang_id("ar"),num_beams=2,max_new_tokens=64)
+              translated=tok.batch_decode(generated,skip_special_tokens=True)[0]
+              if not any("\u0600" <= ch <= "\u06ff" for ch in translated):
+                  raise RuntimeError("M2M100 Chinese-to-Arabic smoke test did not return Arabic script")
+              print("M2M100_ZH_AR_SMOKE_TEST=PASS",flush=True)
+              del model,batch,generated,tok
+              torch.cuda.empty_cache()
               Path("/content/cuda12_library_paths.json").write_text(json.dumps(libdirs),encoding="utf-8")
               print("PYAV_SMOKE_TEST=PASS",flush=True)
               print("CUDA12_CUBLAS_CUDNN_TEST=PASS",flush=True)
@@ -196,6 +234,34 @@ jobs:
         run: |
           set -euo pipefail
           colab --auth=adc upload -s "$SESSION" scripts/youtube_episode_arabic_dub.py /content/youtube_episode_arabic_dub.py
+      - name: Restore prior work checkpoint into Colab
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -czf output/resume_work.tar.gz -C output/resume/colab_return work
+          colab --auth=adc exec -s "$SESSION" --timeout 0 <<'PY'
+          from pathlib import Path
+          Path("/content/youtube_arabic_dub").mkdir(parents=True,exist_ok=True)
+          PY
+          colab --auth=adc upload -s "$SESSION" output/resume_work.tar.gz /content/resume_work.tar.gz
+          colab --auth=adc exec -s "$SESSION" --timeout 0 <<'PY'
+          import json,tarfile
+          from pathlib import Path
+          root=Path("/content/youtube_arabic_dub").resolve()
+          archive=Path("/content/resume_work.tar.gz")
+          with tarfile.open(archive,"r:gz") as tar:
+              members=tar.getmembers()
+              for member in members:
+                  target=(root/member.name).resolve()
+                  if root not in target.parents and target!=root:
+                      raise RuntimeError("Unsafe resume archive path")
+                  if member.issym() or member.islnk() or member.isdev():
+                      raise RuntimeError("Unsafe resume archive entry")
+              tar.extractall(root,members=members)
+          asr=json.loads((root/"work/asr.json").read_text(encoding="utf-8"))
+          spk=json.loads((root/"work/speaker_profiles.json").read_text(encoding="utf-8"))
+          print("RESUME_FILES_RESTORED=1",len(asr.get("segments",[])),spk.get("speaker_count"),flush=True)
+          PY
       - name: Run complete dubbing pipeline
         id: dubbing
         timeout-minutes: 345
