@@ -8,6 +8,11 @@ on:
         type: choice
         options: ["no", "yes"]
         default: "no"
+      source_download_url:
+        description: "Short-lived authorized source URL for this run; do not print it"
+        required: false
+        type: string
+        default: ""
   push:
     branches: [main]
     paths:
@@ -82,12 +87,19 @@ jobs:
       - name: Configure Colab ADC and output configuration
         env:
           COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
-          SOURCE_DOWNLOAD_URL: ${{ secrets.SOURCE_DOWNLOAD_URL }}
+          SOURCE_DOWNLOAD_URL_INPUT: ${{ inputs.source_download_url }}
+          SOURCE_DOWNLOAD_URL_SECRET: ${{ secrets.SOURCE_DOWNLOAD_URL }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${SOURCE_DOWNLOAD_URL:-}" ]; then echo "::error::SOURCE_DOWNLOAD_URL repository secret is missing"; exit 1; fi
+          SOURCE_DOWNLOAD_URL="${SOURCE_DOWNLOAD_URL_INPUT:-${SOURCE_DOWNLOAD_URL_SECRET:-}}"
+          if [ -z "${SOURCE_DOWNLOAD_URL:-}" ]; then echo "::error::Provide a source_download_url input or configure the SOURCE_DOWNLOAD_URL repository secret"; exit 1; fi
+          case "$SOURCE_DOWNLOAD_URL" in
+            https://temp.4d4f16c61d89ec64e760039c4ec50717.r2.cloudflarestorage.com/*) ;;
+            *) echo "::error::Source URL host is not on the approved temporary download host"; exit 1 ;;
+          esac
           echo "::add-mask::$SOURCE_DOWNLOAD_URL"
+          export SOURCE_DOWNLOAD_URL
           mkdir -p "$HOME/.config/gcloud" output
           if [ -z "${COLAB_CREDENTIALS:-}" ]; then echo "::error::COLAB_CREDENTIALS missing"; exit 1; fi
           python - <<'PY'
