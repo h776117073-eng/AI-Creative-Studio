@@ -1,0 +1,78 @@
+name: Ibb Governorate Reverse Census (Colab + Drive)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/ibb_reverse_census.py"
+      - ".github/workflows/ibb-reverse-census.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ibb-reverse-census-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  run-ibb-census:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Google Colab CLI & Google API dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade google-colab-cli google-auth google-api-python-client google-auth-httplib2 requests pandas openpyxl duckdb
+
+      - name: Configure Google ADC credentials
+        env:
+          COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/gcloud" output
+          if [ -z "${COLAB_CREDENTIALS:-}" ]; then
+            echo "::error::COLAB_CREDENTIALS secret is missing."
+            exit 1
+          fi
+          python - <<'PY'
+          import json, os, pathlib
+          raw = os.environ["COLAB_CREDENTIALS"]
+          target = pathlib.Path.home() / ".config/gcloud/application_default_credentials.json"
+          target.write_text(raw, encoding="utf-8")
+          target.chmod(0o600)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
+              f.write(f"GOOGLE_APPLICATION_CREDENTIALS={target}\n")
+          PY
+
+      - name: Execute Reverse Census on Remote Colab Runtime (with Runner Fallback)
+        env:
+          SCRIPT_PATH: "scripts/ibb_reverse_census.py"
+          COLAB_GPU: "none"
+          COLAB_TIMEOUT_SECONDS: "1800"
+          TARGET_DRIVE_FOLDER_ID: "1hXAsTJNXS_E_L6kYsNDUqszjZbSuq9aK"
+        run: |
+          set -euo pipefail
+          if ! python scripts/colab_bridge.py; then
+            echo "::warning::Colab CLI session hit limit/timeout; executing locally on GitHub runner to guarantee completion and Drive upload..."
+            CENSUS_OUT_DIR="$PWD/output/ibb_census_output" python scripts/ibb_reverse_census.py
+          fi
+
+      - name: Upload Census Deliverables as GitHub Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ibb-reverse-census-${{ github.run_id }}
+          path: output/**
+          if-no-files-found: warn
+          retention-days: 30
