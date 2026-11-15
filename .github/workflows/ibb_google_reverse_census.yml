@@ -128,12 +128,23 @@ jobs:
               except Exception as e:
                   print("ADC Drive fetch failed:", repr(e))
           if not src_csv.is_file() or src_csv.stat().st_size < 10_000_000:
-              host = "".join(["https://", "drive.", "usercontent.", "google.", "com/download"])
-              url = f"{host}?id=16_t3e0WUja1UW_n2ap6925kzFQX2Jbk9&export=download&confirm=t"
-              urllib.request.urlretrieve(url, src_csv)
-          head = src_csv.read_bytes()[:200].lstrip()
-          if src_csv.stat().st_size < 10_000_000 or head.startswith(b"<"):
-              raise RuntimeError(f"Source CSV invalid or private (bytes={src_csv.stat().st_size}, head={head[:80]!r})")
+              try:
+                  host = "".join(["https://", "drive.", "usercontent.", "google.", "com/download"])
+                  url = f"{host}?id=16_t3e0WUja1UW_n2ap6925kzFQX2Jbk9&export=download&confirm=t"
+                  urllib.request.urlretrieve(url, src_csv)
+              except Exception as e:
+                  print("Direct Drive URL fetch failed:", repr(e))
+          head = src_csv.read_bytes()[:200].lstrip() if src_csv.is_file() else b""
+          if not src_csv.is_file() or src_csv.stat().st_size < 10_000_000 or head.startswith(b"<"):
+              gz_fallback = pathlib.Path("data/source_50700_tiles.csv.gz")
+              if gz_fallback.is_file():
+                  import gzip, shutil
+                  with gzip.open(gz_fallback, "rb") as f_in, open(src_csv, "wb") as f_out:
+                      shutil.copyfileobj(f_in, f_out)
+                  print("Loaded source CSV from repository fallback data/source_50700_tiles.csv.gz")
+          head = src_csv.read_bytes()[:200].lstrip() if src_csv.is_file() else b""
+          if not src_csv.is_file() or src_csv.stat().st_size < 10_000_000 or head.startswith(b"<"):
+              raise RuntimeError(f"Source CSV invalid or private (bytes={src_csv.stat().st_size if src_csv.is_file() else 0})")
           print("Source CSV ready bytes:", src_csv.stat().st_size)
 
           script_body = pathlib.Path("tasks/ibb_google_reverse_census.py").read_text(encoding="utf-8")
