@@ -1,0 +1,167 @@
+name: Ibb Google Maps Reverse Geocoding & 5m Nearby Census (Colab)
+
+on:
+  workflow_dispatch:
+    inputs:
+      batch_size:
+        description: "Points per batch"
+        required: false
+        default: "250"
+      concurrency:
+        description: "Concurrent Google Maps requests"
+        required: false
+        default: "10"
+      export_every:
+        description: "Sync intermediate XLSX/CSV/JSON to Drive every N points"
+        required: false
+        default: "2500"
+      max_batches:
+        description: "Max batches per run (0 = run until 100% finished)"
+        required: false
+        default: "0"
+  push:
+    branches: [main]
+    paths:
+      - "tasks/ibb_google_reverse_census.py"
+      - ".github/workflows/ibb_google_reverse_census.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ibb-google-reverse-census
+  cancel-in-progress: false
+
+jobs:
+  run-ibb-reverse-census:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Google Colab CLI
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade google-colab-cli google-auth google-api-python-client
+
+      - name: Configure Google ADC Credentials
+        env:
+          COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/gcloud" output
+          if [ -z "${COLAB_CREDENTIALS:-}" ]; then
+            echo "::error::COLAB_CREDENTIALS secret is missing."
+            exit 1
+          fi
+          python - <<'INNER'
+          import json, os, pathlib
+          raw = os.environ["COLAB_CREDENTIALS"]
+          data = json.loads(raw)
+          path = pathlib.Path.home() / ".config/gcloud/application_default_credentials.json"
+          path.write_text(raw, encoding="utf-8")
+          path.chmod(0o600)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write(f"GOOGLE_APPLICATION_CREDENTIALS={path}\n")
+          print("ADC configured successfully.")
+          INNER
+
+      - name: Launch & Monitor Reverse Geocoding Census on Google Colab
+        env:
+          GOOGLE_API_KEY: ${{ secrets.API_KEY }}
+          BATCH_SIZE: ${{ github.event.inputs.batch_size || '250' }}
+          CONCURRENCY: ${{ github.event.inputs.concurrency || '10' }}
+          EXPORT_EVERY: ${{ github.event.inputs.export_every || '2500' }}
+          MAX_BATCHES: ${{ github.event.inputs.max_batches || '0' }}
+          TARGET_DRIVE_FOLDER_ID: "171LM8hjZGooZfYWV6Z0mX8vlLWfYzX7A"
+          SOURCE_CSV_DRIVE_ID: "16_t3e0WUja1UW_n2ap6925kzFQX2Jbk9"
+        shell: bash
+        run: |
+          set -uo pipefail
+          SESSION="ibb-reverse-census-${GITHUB_RUN_ID}"
+          mkdir -p output
+          : > output/ibb_reverse_census.log
+
+          colab --auth=adc stop -s "$SESSION" >> output/ibb_reverse_census.log 2>&1 || true
+          if ! COLAB_CLI_ASSIGN_RETRIES=3 COLAB_CLI_RETRY_BACKOFF=15 colab --auth=adc new -s "$SESSION" >> output/ibb_reverse_census.log 2>&1; then
+            echo "::error::Failed to allocate Google Colab runtime."
+            cat output/ibb_reverse_census.log
+            exit 1
+          fi
+
+          colab --auth=adc drivemount -s "$SESSION" /content/drive >> output/ibb_reverse_census.log 2>&1 || true
+          colab --auth=adc upload -s "$SESSION" "$GOOGLE_APPLICATION_CREDENTIALS" /content/adc_creds.json >> output/ibb_reverse_census.log 2>&1
+          colab --auth=adc upload -s "$SESSION" tasks/ibb_google_reverse_census.py /content/ibb_google_reverse_census.py >> output/ibb_reverse_census.log 2>&1
+
+          python - <<'GEN'
+          import json, os
+          starter = f"""import os, subprocess, sys
+          os.makedirs("/content/ibb_reverse_census", exist_ok=True)
+          env = os.environ.copy()
+          env["GOOGLE_APPLICATION_CREDENTIALS"] = "/content/adc_creds.json"
+          env["GOOGLE_API_KEY"] = {json.dumps(os.environ.get("GOOGLE_API_KEY", ""))}
+          env["BATCH_SIZE"] = {json.dumps(os.environ.get("BATCH_SIZE", "250"))}
+          env["CONCURRENCY"] = {json.dumps(os.environ.get("CONCURRENCY", "10"))}
+          env["EXPORT_EVERY"] = {json.dumps(os.environ.get("EXPORT_EVERY", "2500"))}
+          env["MAX_BATCHES"] = {json.dumps(os.environ.get("MAX_BATCHES", "0"))}
+          env["TARGET_DRIVE_FOLDER_ID"] = "171LM8hjZGooZfYWV6Z0mX8vlLWfYzX7A"
+          env["SOURCE_CSV_DRIVE_ID"] = "16_t3e0WUja1UW_n2ap6925kzFQX2Jbk9"
+          logf = open("/content/ibb_reverse_census/run.log", "w", encoding="utf-8")
+          p = subprocess.Popen([sys.executable, "-u", "/content/ibb_google_reverse_census.py"], stdout=logf, stderr=subprocess.STDOUT, env=env, start_new_session=True)
+          open("/content/ibb_reverse_census/pid.txt", "w").write(str(p.pid))
+          print("STARTED_PID=" + str(p.pid))
+          """
+          open("/tmp/start_census.py", "w").write(starter)
+          GEN
+
+          cat <<'POLLER' > /tmp/poll_census.py
+          import os
+          pid_file = "/content/ibb_reverse_census/pid.txt"
+          log_file = "/content/ibb_reverse_census/run.log"
+          pid = int(open(pid_file).read().strip()) if os.path.exists(pid_file) else -1
+          alive = False
+          if pid > 0:
+              try:
+                  os.kill(pid, 0)
+                  alive = True
+              except OSError:
+                  alive = False
+          tail = ""
+          if os.path.exists(log_file):
+              lines = open(log_file, encoding="utf-8", errors="replace").readlines()
+              tail = "".join(lines[-25:])
+          print(f"STATE={'RUNNING' if alive else 'FINISHED'} PID={pid}")
+          print(tail)
+          POLLER
+
+          colab --auth=adc exec -s "$SESSION" --timeout 120 -f /tmp/start_census.py | tee -a output/ibb_reverse_census.log
+
+          for i in $(seq 1 110); do
+            sleep 180
+            OUT=$(colab --auth=adc exec -s "$SESSION" --timeout 120 -f /tmp/poll_census.py 2>&1 || true)
+            printf '%s
+' "$OUT" | tee -a output/ibb_reverse_census.log
+            if grep -q "STATE=FINISHED" <<<"$OUT"; then
+              echo "Colab census job finished!"
+              break
+            fi
+          done
+
+          colab --auth=adc download -s "$SESSION" /content/ibb_reverse_census/run.log output/colab_run.log >> output/ibb_reverse_census.log 2>&1 || true
+          colab --auth=adc stop -s "$SESSION" >> output/ibb_reverse_census.log 2>&1 || true
+
+      - name: Upload Execution Logs Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ibb-reverse-census-logs-${{ github.run_id }}
+          path: output/
+          retention-days: 14
