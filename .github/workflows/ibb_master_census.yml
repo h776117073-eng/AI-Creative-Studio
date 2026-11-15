@@ -1,0 +1,102 @@
+name: Ibb Master Census & Tile OCR (Colab to GitHub Actions)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "tasks/ibb_master_census.py"
+      - ".github/workflows/ibb_master_census.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ibb-master-census
+  cancel-in-progress: false
+
+jobs:
+  run-ibb-master-census:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install official Google Colab CLI
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade google-colab-cli google-auth
+          colab --help
+
+      - name: Configure Colab ADC credentials
+        env:
+          COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/gcloud" output
+          if [ -z "${COLAB_CREDENTIALS:-}" ]; then
+            echo "::error::COLAB_CREDENTIALS secret is missing."
+            printf '%s\n' "COLAB_CREDENTIALS secret is missing." > output/ibb_master_census.log
+            exit 1
+          fi
+          python - <<'INNER'
+          import json, os, pathlib
+          raw = os.environ["COLAB_CREDENTIALS"]
+          data = json.loads(raw)
+          allowed = {"authorized_user", "service_account", "external_account", "impersonated_service_account"}
+          if data.get("type") not in allowed:
+              raise SystemExit("COLAB_CREDENTIALS is not supported Google ADC JSON.")
+          path = pathlib.Path.home() / ".config/gcloud/application_default_credentials.json"
+          path.write_text(raw, encoding="utf-8")
+          path.chmod(0o600)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write(f"GOOGLE_APPLICATION_CREDENTIALS={path}\n")
+          print("Colab CLI ADC configured.")
+          INNER
+
+      - name: Run Ibb Master Census on Colab and export outputs
+        shell: bash
+        run: |
+          set -uo pipefail
+          SESSION="ibb-master-${GITHUB_RUN_ID}"
+          mkdir -p output
+          : > output/ibb_master_census.log
+          colab --auth=adc stop -s "$SESSION" >> output/ibb_master_census.log 2>&1 || true
+          if ! COLAB_CLI_ASSIGN_RETRIES=3 COLAB_CLI_RETRY_BACKOFF=15 colab --auth=adc new -s "$SESSION" >> output/ibb_master_census.log 2>&1; then
+            echo "::error::Colab runtime assignment failed."
+            tail -n 60 output/ibb_master_census.log
+            exit 1
+          fi
+          colab --auth=adc exec -s "$SESSION" --timeout 1800 -f tasks/ibb_master_census.py 2>&1 | tee -a output/ibb_master_census.log
+          EXEC_RC=${PIPESTATUS[0]}
+          if grep -qE "Traceback \(most recent call last\)|ModuleNotFoundError:|SyntaxError:" output/ibb_master_census.log; then
+            EXEC_RC=1
+          fi
+          colab --auth=adc download -s "$SESSION" "/content/ibb_master_census_work/الاستخراج_الكلي_محافظة_إب_النهائي.xlsx" "output/الاستخراج_الكلي_محافظة_إب_النهائي.xlsx" >> output/ibb_master_census.log 2>&1 || true
+          colab --auth=adc download -s "$SESSION" "/content/ibb_master_census_work/الاستخراج_الكلي_محافظة_إب_النهائي.csv" "output/الاستخراج_الكلي_محافظة_إب_النهائي.csv" >> output/ibb_master_census.log 2>&1 || true
+          colab --auth=adc download -s "$SESSION" "/content/ibb_master_census_work/الاستخراج_الكلي_محافظة_إب_النهائي.json" "output/الاستخراج_الكلي_محافظة_إب_النهائي.json" >> output/ibb_master_census.log 2>&1 || true
+          colab --auth=adc stop -s "$SESSION" >> output/ibb_master_census.log 2>&1 || true
+          ls -lh output/
+          for f in "output/الاستخراج_الكلي_محافظة_إب_النهائي.xlsx" "output/الاستخراج_الكلي_محافظة_إب_النهائي.csv" "output/الاستخراج_الكلي_محافظة_إب_النهائي.json"; do
+            if [ ! -s "$f" ]; then
+              echo "::error::Missing or empty output file: $f"
+              exit 1
+            fi
+          done
+          exit $EXEC_RC
+
+      - name: Upload Outputs to GitHub Actions Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ibb-master-census-output-${{ github.run_id }}
+          path: output/
+          retention-days: 30
