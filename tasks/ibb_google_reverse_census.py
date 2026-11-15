@@ -139,14 +139,14 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     return conn
 
 def locate_source_csv(dest_csv: Path) -> Path:
-    if dest_csv.is_file() and dest_csv.stat().st_size > 1_000_000:
+    if dest_csv.is_file() and dest_csv.stat().st_size > 100_000:
         print(f"[SOURCE] Found local CSV: {dest_csv} ({dest_csv.stat().st_size:,} bytes)", flush=True)
         return dest_csv
     dest_csv.parent.mkdir(parents=True, exist_ok=True)
     dl_url = f"{G_DRIVE_DL}?id={SOURCE_CSV_DRIVE_ID}&export=download&confirm=t"
     print(f"[SOURCE] Downloading source CSV ({SOURCE_CSV_DRIVE_ID}) to {dest_csv}...", flush=True)
     urllib.request.urlretrieve(dl_url, dest_csv)
-    if dest_csv.is_file() and dest_csv.stat().st_size > 1_000_000:
+    if dest_csv.is_file() and dest_csv.stat().st_size > 100_000:
         return dest_csv
     raise RuntimeError("Could not locate or download source_50700_tiles.csv in /content/ibb_reverse_census.")
 

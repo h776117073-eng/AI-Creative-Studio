@@ -113,7 +113,7 @@ jobs:
                   while not done:
                       _, done = dl.next_chunk()
               sa_file.unlink(missing_ok=True)
-          if not src_csv.is_file() or src_csv.stat().st_size < 1_000_000:
+          if not src_csv.is_file() or src_csv.stat().st_size < 100_000:
               host = "".join(["https://", "drive.", "usercontent.", "google.", "com/download"])
               url = f"{host}?id=16_t3e0WUja1UW_n2ap6925kzFQX2Jbk9&export=download&confirm=t"
               urllib.request.urlretrieve(url, src_csv)
@@ -145,6 +145,9 @@ jobs:
           colab --auth=adc upload -s "$SESSION" /tmp/source_50700_tiles.csv /content/ibb_reverse_census/source_50700_tiles.csv >> output/ibb_reverse_census.log 2>&1
           colab --auth=adc exec -s "$SESSION" --timeout 3600 -f /tmp/colab_census_bundle.py 2>&1 | tee -a output/ibb_reverse_census.log
           EXEC_RC=${PIPESTATUS[0]}
+          if grep -qE "Traceback \(most recent call last\)|RuntimeError:" output/ibb_reverse_census.log; then
+            EXEC_RC=1
+          fi
           colab --auth=adc download -s "$SESSION" /content/ibb_reverse_census/المطابقة_العكسية_إب_الشاملة.xlsx output/المطابقة_العكسية_إب_الشاملة.xlsx >> output/ibb_reverse_census.log 2>&1 || true
           colab --auth=adc download -s "$SESSION" /content/ibb_reverse_census/المطابقة_العكسية_إب_الشاملة.csv output/المطابقة_العكسية_إب_الشاملة.csv >> output/ibb_reverse_census.log 2>&1 || true
           colab --auth=adc download -s "$SESSION" /content/ibb_reverse_census/المطابقة_العكسية_إب_الشاملة.json output/المطابقة_العكسية_إب_الشاملة.json >> output/ibb_reverse_census.log 2>&1 || true
