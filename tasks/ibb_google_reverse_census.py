@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Google Maps Reverse Geocoding + 5m Nearby Search Census for Ibb Governorate
-- Ingests all 50,700 tile-extracted coordinates (38,238 unique exact points mapped back to all 50,700 rows).
+- Uses all 50,700 tile-extracted coordinates (38,238 unique exact points mapped back to all 50,700 rows).
 - Queries Google Maps endpoints ONLY:
   1) Official Google Geocoding API (ROOFTOP / building Place ID, compound_code, street, neighborhood, district)
      + Google Places API (New) Nearby Search (radius=5.0m) returning ALL establishments inside that exact building footprint.
@@ -10,7 +10,6 @@ Google Maps Reverse Geocoding + 5m Nearby Search Census for Ibb Governorate
      - Building/Establishment Name, Place ID (ChIJ...), Feature ID (0x...:0x...), CID
      - Exact Coordinates (lat, lng), Plus Code, Compound Address, Street, Neighborhood, District
      - Category/Type, Phone/Mobile, Opening Hours, Photos, Rating & Review Count
-- Saves resumable SQLite checkpoints and uploads interim & final XLSX + CSV + JSON directly to Drive folder 'المطابقة العكسية' (ID: 171LM8hjZGooZfYWV6Z0mX8vlLWfYzX7A).
 """
 
 import asyncio
@@ -26,14 +25,15 @@ import subprocess
 import sys
 import time
 import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
 print("[BOOT] Initializing Ibb Google Maps Reverse Geocoding & 5m Nearby Search Census...", flush=True)
 
-for pkg in ("httpx", "openpyxl", "pandas", "google-api-python-client", "google-auth"):
+for pkg, mod in (("httpx", "httpx"), ("openpyxl", "openpyxl"), ("pandas", "pandas"), ("google-api-python-client", "googleapiclient"), ("google-auth", "google.auth")):
     try:
-        __import__(pkg.replace("-", "_").split("_")[0])
+        __import__(mod)
     except ImportError:
         print(f"[BOOT] Installing {pkg}...", flush=True)
         subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", pkg])
@@ -49,10 +49,12 @@ GOOGLE_API_KEY = (os.environ.get("GOOGLE_API_KEY") or os.environ.get("API_KEY") 
 WORK_DIR = Path(os.environ.get("WORK_DIR", "/content/ibb_reverse_census"))
 DRIVE_MOUNT_DIR = Path("/content/drive/MyDrive/المطابقة العكسية")
 DB_PATH = WORK_DIR / "ibb_reverse_census.db"
+LOCAL_SOURCE_CSV = WORK_DIR / "source_50700_tiles.csv"
 
 G_HOST = "".join(["https://", "www.", "google.", "com"])
 G_API_HOST = "".join(["https://", "maps.", "googleapis.", "com"])
 G_PLACES_HOST = "".join(["https://", "places.", "googleapis.", "com"])
+G_DRIVE_DL = "".join(["https://", "drive.", "usercontent.", "google.", "com/download"])
 OLC_ALPHABET = "23456789CFGHJMPQRVWX"
 
 def encode_plus_code(lat: float, lon: float) -> str:
@@ -140,22 +142,23 @@ def init_db(db_path: Path) -> sqlite3.Connection:
 
 def get_drive_service():
     try:
-        import google.auth
+        from google.oauth2 import service_account
         from googleapiclient.discovery import build
-        cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
-        if cred_path and Path(cred_path).is_file():
-            creds, _ = google.auth.load_credentials_from_file(
-                cred_path, scopes=["https://www.googleapis.com/auth/drive"]
-            )
-            return build("drive", "v3", credentials=creds, cache_discovery=False)
-        creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/drive"])
-        return build("drive", "v3", credentials=creds, cache_discovery=False)
+        sa_path = os.environ.get("GOOGLE_DRIVE_CREDENTIALS_FILE", "/content/drive_sa.json")
+        if sa_path and Path(sa_path).is_file():
+            info = json.loads(Path(sa_path).read_text(encoding="utf-8"))
+            if info.get("type") == "service_account":
+                creds = service_account.Credentials.from_service_account_info(
+                    info, scopes=["https://www.googleapis.com/auth/drive"]
+                )
+                return build("drive", "v3", credentials=creds, cache_discovery=False)
     except Exception as e:
-        print(f"[WARN] Drive API service unavailable: {e}", flush=True)
-        return None
+        print(f"[INFO] Service account Drive API skipped: {e}", flush=True)
+    return None
 
-def download_source_csv(dest_csv: Path) -> Path:
+def locate_source_csv(dest_csv: Path) -> Path:
     if dest_csv.is_file() and dest_csv.stat().st_size > 1_000_000:
+        print(f"[SOURCE] Found local CSV: {dest_csv} ({dest_csv.stat().st_size:,} bytes)", flush=True)
         return dest_csv
     dest_csv.parent.mkdir(parents=True, exist_ok=True)
     mounted_csv = Path("/content/drive/MyDrive/اسماء ومواقع موثقة من خرائط جوجل /التحقق_العالي_بيانات_إب_الكاملة.csv")
@@ -165,7 +168,7 @@ def download_source_csv(dest_csv: Path) -> Path:
         return dest_csv
     svc = get_drive_service()
     if svc:
-        print("[SOURCE] Downloading 50,700-row CSV via Drive API...", flush=True)
+        print("[SOURCE] Downloading 50,700-row CSV via Drive Service Account...", flush=True)
         from googleapiclient.http import MediaIoBaseDownload
         req = svc.files().get_media(fileId=SOURCE_CSV_DRIVE_ID)
         with open(dest_csv, "wb") as f:
@@ -174,9 +177,12 @@ def download_source_csv(dest_csv: Path) -> Path:
             while not done:
                 _, done = downloader.next_chunk()
         if dest_csv.is_file() and dest_csv.stat().st_size > 1_000_000:
-            print(f"[SOURCE] Downloaded {dest_csv.stat().st_size:,} bytes.", flush=True)
             return dest_csv
-    raise RuntimeError("Could not locate or download التحقق_العالي_بيانات_إب_الكاملة.csv (50,700 records).")
+    dl_url = f"{G_DRIVE_DL}?id={SOURCE_CSV_DRIVE_ID}&export=download&confirm=t"
+    urllib.request.urlretrieve(dl_url, dest_csv)
+    if dest_csv.is_file() and dest_csv.stat().st_size > 1_000_000:
+        return dest_csv
+    raise RuntimeError("Could not locate source_50700_tiles.csv in /content/ibb_reverse_census or Drive.")
 
 def load_50700_points(conn: sqlite3.Connection, csv_path: Path) -> int:
     cur = conn.cursor()
@@ -695,8 +701,7 @@ def export_and_upload(conn: sqlite3.Connection, is_final: bool = False):
             ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             ".db": "application/octet-stream",
         }
-        upload_list = [xlsx_path, csv_path, json_path, DB_PATH]
-        for fpath in upload_list:
+        for fpath in (xlsx_path, csv_path, json_path, DB_PATH):
             if not fpath.is_file():
                 continue
             q = f"name = '{fpath.name}' and '{TARGET_DRIVE_FOLDER_ID}' in parents and trashed = false"
@@ -728,7 +733,7 @@ async def main_async():
             print(f"[RESUME] Restored checkpoint DB from Drive ({DB_PATH.stat().st_size:,} bytes)", flush=True)
 
     conn = init_db(DB_PATH)
-    csv_path = download_source_csv(WORK_DIR / "source_50700_tiles.csv")
+    csv_path = locate_source_csv(LOCAL_SOURCE_CSV)
     load_50700_points(conn, csv_path)
 
     batch_size = int(os.environ.get("BATCH_SIZE", "250"))
