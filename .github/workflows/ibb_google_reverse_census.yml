@@ -65,7 +65,7 @@ jobs:
           python - <<'INNER'
           import json, os, pathlib
           raw = os.environ["COLAB_CREDENTIALS"]
-          data = json.loads(raw)
+          json.loads(raw)
           path = pathlib.Path.home() / ".config/gcloud/application_default_credentials.json"
           path.write_text(raw, encoding="utf-8")
           path.chmod(0o600)
@@ -74,7 +74,7 @@ jobs:
           print("ADC configured successfully.")
           INNER
 
-      - name: Run Google Maps Reverse Geocoding & 5m Nearby Census on Colab
+      - name: Build Colab Task Bundle
         env:
           GOOGLE_API_KEY: ${{ secrets.API_KEY }}
           COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
@@ -82,10 +82,8 @@ jobs:
           CONCURRENCY: ${{ github.event.inputs.concurrency || '12' }}
           EXPORT_EVERY: ${{ github.event.inputs.export_every || '2000' }}
           MAX_BATCHES: ${{ github.event.inputs.max_batches || '0' }}
-        shell: bash
         run: |
-          set -uo pipefail
-          mkdir -p output
+          set -euo pipefail
           python - <<'WRAP'
           import base64, json, os, pathlib
           adc_b64 = base64.b64encode(os.environ["COLAB_CREDENTIALS"].encode("utf-8")).decode("ascii")
@@ -95,8 +93,7 @@ jobs:
           export_every = os.environ.get("EXPORT_EVERY", "2000")
           max_batches = os.environ.get("MAX_BATCHES", "0")
           script_body = pathlib.Path("tasks/ibb_google_reverse_census.py").read_text(encoding="utf-8")
-          preamble = "
-".join([
+          preamble = "\n".join([
               "import base64, os, pathlib",
               "os.makedirs('/content/ibb_reverse_census', exist_ok=True)",
               "cred_path = pathlib.Path('/content/adc_creds.json')",
@@ -110,11 +107,14 @@ jobs:
               "os.environ['TARGET_DRIVE_FOLDER_ID'] = '171LM8hjZGooZfYWV6Z0mX8vlLWfYzX7A'",
               "os.environ['SOURCE_CSV_DRIVE_ID'] = '16_t3e0WUja1UW_n2ap6925kzFQX2Jbk9'",
           ])
-          pathlib.Path("/tmp/colab_census_bundle.py").write_text(preamble + "
-" + script_body, encoding="utf-8")
+          pathlib.Path("/tmp/colab_census_bundle.py").write_text(preamble + "\n" + script_body, encoding="utf-8")
           print("Bundled Colab script bytes:", pathlib.Path("/tmp/colab_census_bundle.py").stat().st_size)
           WRAP
 
+      - name: Run Google Maps Reverse Geocoding & 5m Nearby Census on Colab
+        run: |
+          set -uo pipefail
+          mkdir -p output
           colab --auth=adc run --timeout 3600 /tmp/colab_census_bundle.py 2>&1 | tee output/ibb_reverse_census.log
 
       - name: Upload Execution Logs Artifact
