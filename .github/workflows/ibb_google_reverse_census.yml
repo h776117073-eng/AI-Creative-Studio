@@ -95,24 +95,27 @@ jobs:
           export_every = os.environ.get("EXPORT_EVERY", "2000")
           max_batches = os.environ.get("MAX_BATCHES", "0")
           script_body = pathlib.Path("tasks/ibb_google_reverse_census.py").read_text(encoding="utf-8")
-          preamble = f'''import base64, os, pathlib
-          os.makedirs("/content/ibb_reverse_census", exist_ok=True)
-          cred_path = pathlib.Path("/content/adc_creds.json")
-          cred_path.write_bytes(base64.b64decode({json.dumps(adc_b64)}))
-          os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(cred_path)
-          os.environ["GOOGLE_API_KEY"] = {json.dumps(api_key)}
-          os.environ["BATCH_SIZE"] = {json.dumps(batch_size)}
-          os.environ["CONCURRENCY"] = {json.dumps(concurrency)}
-          os.environ["EXPORT_EVERY"] = {json.dumps(export_every)}
-          os.environ["MAX_BATCHES"] = {json.dumps(max_batches)}
-          os.environ["TARGET_DRIVE_FOLDER_ID"] = "171LM8hjZGooZfYWV6Z0mX8vlLWfYzX7A"
-          os.environ["SOURCE_CSV_DRIVE_ID"] = "16_t3e0WUja1UW_n2ap6925kzFQX2Jbk9"
-          '''
-          pathlib.Path("/tmp/colab_census_bundle.py").write_text(preamble + "\n" + script_body, encoding="utf-8")
+          preamble = "
+".join([
+              "import base64, os, pathlib",
+              "os.makedirs('/content/ibb_reverse_census', exist_ok=True)",
+              "cred_path = pathlib.Path('/content/adc_creds.json')",
+              f"cred_path.write_bytes(base64.b64decode({json.dumps(adc_b64)}))",
+              "os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = str(cred_path)",
+              f"os.environ['GOOGLE_API_KEY'] = {json.dumps(api_key)}",
+              f"os.environ['BATCH_SIZE'] = {json.dumps(batch_size)}",
+              f"os.environ['CONCURRENCY'] = {json.dumps(concurrency)}",
+              f"os.environ['EXPORT_EVERY'] = {json.dumps(export_every)}",
+              f"os.environ['MAX_BATCHES'] = {json.dumps(max_batches)}",
+              "os.environ['TARGET_DRIVE_FOLDER_ID'] = '171LM8hjZGooZfYWV6Z0mX8vlLWfYzX7A'",
+              "os.environ['SOURCE_CSV_DRIVE_ID'] = '16_t3e0WUja1UW_n2ap6925kzFQX2Jbk9'",
+          ])
+          pathlib.Path("/tmp/colab_census_bundle.py").write_text(preamble + "
+" + script_body, encoding="utf-8")
           print("Bundled Colab script bytes:", pathlib.Path("/tmp/colab_census_bundle.py").stat().st_size)
           WRAP
 
-          colab --auth=adc run /tmp/colab_census_bundle.py 2>&1 | tee output/ibb_reverse_census.log
+          colab --auth=adc run --timeout 3600 /tmp/colab_census_bundle.py 2>&1 | tee output/ibb_reverse_census.log
 
       - name: Upload Execution Logs Artifact
         if: always()

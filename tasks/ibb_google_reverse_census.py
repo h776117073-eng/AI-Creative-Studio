@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
 Google Maps Reverse Geocoding + 5m Nearby Search Census for Ibb Governorate
-- Uses all 50,700 tile-extracted coordinates (38,238 unique exact points mapped back to all 50,700 records).
+- Ingests all 50,700 tile-extracted coordinates (38,238 unique exact points mapped back to all 50,700 rows).
 - Queries Google Maps endpoints ONLY:
   1) Official Google Geocoding API (ROOFTOP / building Place ID, compound_code, street, neighborhood, district)
-     + Official Google Places API (New) Nearby Search (radius=5.0m) returning ALL establishments inside that exact building footprint.
-  2) Direct Google Maps Web Reverse Geocoding + Zoom-21 (~5m radius) Spatial Viewport RPC + Place Details RPC (hl=ar, gl=YE)
+     + Google Places API (New) Nearby Search (radius=5.0m) returning ALL establishments inside that exact building footprint.
+  2) Direct Google Maps Web Reverse Geocoding + Zoom-21 (~5m radius) Spatial Viewport RPC (hl=ar, gl=YE)
      extracting every establishment inside that building footprint with:
      - Building/Establishment Name, Place ID (ChIJ...), Feature ID (0x...:0x...), CID
      - Exact Coordinates (lat, lng), Plus Code, Compound Address, Street, Neighborhood, District
      - Category/Type, Phone/Mobile, Opening Hours, Photos, Rating & Review Count
-- Saves resumable SQLite checkpoints and uploads final & interim XLSX + CSV + JSON directly to Google Drive folder 'المطابقة العكسية' (ID: 171LM8hjZGooZfYWV6Z0mX8vlLWfYzX7A).
+- Saves resumable SQLite checkpoints and uploads interim & final XLSX + CSV + JSON directly to Drive folder 'المطابقة العكسية' (ID: 171LM8hjZGooZfYWV6Z0mX8vlLWfYzX7A).
 """
 
 import asyncio
+import concurrent.futures
 import csv
 import json
 import math
@@ -28,12 +29,16 @@ import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 
-try:
-    import httpx
-except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "httpx", "openpyxl", "pandas", "google-api-python-client", "google-auth"])
-    import httpx
+print("[BOOT] Initializing Ibb Google Maps Reverse Geocoding & 5m Nearby Search Census...", flush=True)
 
+for pkg in ("httpx", "openpyxl", "pandas", "google-api-python-client", "google-auth"):
+    try:
+        __import__(pkg.replace("-", "_").split("_")[0])
+    except ImportError:
+        print(f"[BOOT] Installing {pkg}...", flush=True)
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", pkg])
+
+import httpx
 import openpyxl
 import pandas as pd
 
@@ -155,10 +160,12 @@ def download_source_csv(dest_csv: Path) -> Path:
     dest_csv.parent.mkdir(parents=True, exist_ok=True)
     mounted_csv = Path("/content/drive/MyDrive/اسماء ومواقع موثقة من خرائط جوجل /التحقق_العالي_بيانات_إب_الكاملة.csv")
     if mounted_csv.is_file():
+        print("[SOURCE] Copying 50,700-row CSV from mounted Drive...", flush=True)
         shutil.copy2(mounted_csv, dest_csv)
         return dest_csv
     svc = get_drive_service()
     if svc:
+        print("[SOURCE] Downloading 50,700-row CSV via Drive API...", flush=True)
         from googleapiclient.http import MediaIoBaseDownload
         req = svc.files().get_media(fileId=SOURCE_CSV_DRIVE_ID)
         with open(dest_csv, "wb") as f:
@@ -167,6 +174,7 @@ def download_source_csv(dest_csv: Path) -> Path:
             while not done:
                 _, done = downloader.next_chunk()
         if dest_csv.is_file() and dest_csv.stat().st_size > 1_000_000:
+            print(f"[SOURCE] Downloaded {dest_csv.stat().st_size:,} bytes.", flush=True)
             return dest_csv
     raise RuntimeError("Could not locate or download التحقق_العالي_بيانات_إب_الكاملة.csv (50,700 records).")
 
@@ -769,7 +777,6 @@ async def main_async():
     conn.close()
 
 def run_entrypoint():
-    # Attempt automatic Colab Drive mount if running inside Google Colab kernel
     try:
         from google.colab import drive
         if not os.path.ismount("/content/drive"):
@@ -783,15 +790,8 @@ def run_entrypoint():
         loop = None
 
     if loop and loop.is_running():
-        import nest_asyncio
-        try:
-            nest_asyncio.apply()
-            loop.run_until_complete(main_async())
-        except Exception:
-            # Run inside a dedicated thread with its own fresh event loop
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                pool.submit(lambda: asyncio.run(main_async())).result()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(lambda: asyncio.run(main_async())).result()
     else:
         asyncio.run(main_async())
 
