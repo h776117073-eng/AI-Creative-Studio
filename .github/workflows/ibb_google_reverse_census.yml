@@ -10,11 +10,11 @@ on:
       concurrency:
         description: "Concurrent Google Maps requests"
         required: false
-        default: "10"
+        default: "12"
       export_every:
         description: "Sync intermediate XLSX/CSV/JSON to Drive every N points"
         required: false
-        default: "2500"
+        default: "2000"
       max_batches:
         description: "Max batches per run (0 = run until 100% finished)"
         required: false
@@ -78,8 +78,8 @@ jobs:
         env:
           GOOGLE_API_KEY: ${{ secrets.API_KEY }}
           BATCH_SIZE: ${{ github.event.inputs.batch_size || '250' }}
-          CONCURRENCY: ${{ github.event.inputs.concurrency || '10' }}
-          EXPORT_EVERY: ${{ github.event.inputs.export_every || '2500' }}
+          CONCURRENCY: ${{ github.event.inputs.concurrency || '12' }}
+          EXPORT_EVERY: ${{ github.event.inputs.export_every || '2000' }}
           MAX_BATCHES: ${{ github.event.inputs.max_batches || '0' }}
           TARGET_DRIVE_FOLDER_ID: "171LM8hjZGooZfYWV6Z0mX8vlLWfYzX7A"
           SOURCE_CSV_DRIVE_ID: "16_t3e0WUja1UW_n2ap6925kzFQX2Jbk9"
@@ -103,23 +103,26 @@ jobs:
 
           python - <<'GEN'
           import json, os
-          starter = f"""import os, subprocess, sys
-          os.makedirs("/content/ibb_reverse_census", exist_ok=True)
-          env = os.environ.copy()
-          env["GOOGLE_APPLICATION_CREDENTIALS"] = "/content/adc_creds.json"
-          env["GOOGLE_API_KEY"] = {json.dumps(os.environ.get("GOOGLE_API_KEY", ""))}
-          env["BATCH_SIZE"] = {json.dumps(os.environ.get("BATCH_SIZE", "250"))}
-          env["CONCURRENCY"] = {json.dumps(os.environ.get("CONCURRENCY", "10"))}
-          env["EXPORT_EVERY"] = {json.dumps(os.environ.get("EXPORT_EVERY", "2500"))}
-          env["MAX_BATCHES"] = {json.dumps(os.environ.get("MAX_BATCHES", "0"))}
-          env["TARGET_DRIVE_FOLDER_ID"] = "171LM8hjZGooZfYWV6Z0mX8vlLWfYzX7A"
-          env["SOURCE_CSV_DRIVE_ID"] = "16_t3e0WUja1UW_n2ap6925kzFQX2Jbk9"
-          logf = open("/content/ibb_reverse_census/run.log", "w", encoding="utf-8")
-          p = subprocess.Popen([sys.executable, "-u", "/content/ibb_google_reverse_census.py"], stdout=logf, stderr=subprocess.STDOUT, env=env, start_new_session=True)
-          open("/content/ibb_reverse_census/pid.txt", "w").write(str(p.pid))
-          print("STARTED_PID=" + str(p.pid))
-          """
-          open("/tmp/start_census.py", "w").write(starter)
+          lines = [
+              "import os, subprocess, sys",
+              "os.makedirs('/content/ibb_reverse_census', exist_ok=True)",
+              "env = os.environ.copy()",
+              "env['GOOGLE_APPLICATION_CREDENTIALS'] = '/content/adc_creds.json'",
+              f"env['GOOGLE_API_KEY'] = {json.dumps(os.environ.get('GOOGLE_API_KEY', ''))}",
+              f"env['BATCH_SIZE'] = {json.dumps(os.environ.get('BATCH_SIZE', '250'))}",
+              f"env['CONCURRENCY'] = {json.dumps(os.environ.get('CONCURRENCY', '12'))}",
+              f"env['EXPORT_EVERY'] = {json.dumps(os.environ.get('EXPORT_EVERY', '2000'))}",
+              f"env['MAX_BATCHES'] = {json.dumps(os.environ.get('MAX_BATCHES', '0'))}",
+              "env['TARGET_DRIVE_FOLDER_ID'] = '171LM8hjZGooZfYWV6Z0mX8vlLWfYzX7A'",
+              "env['SOURCE_CSV_DRIVE_ID'] = '16_t3e0WUja1UW_n2ap6925kzFQX2Jbk9'",
+              "logf = open('/content/ibb_reverse_census/run.log', 'w', encoding='utf-8')",
+              "p = subprocess.Popen([sys.executable, '-u', '/content/ibb_google_reverse_census.py'], stdout=logf, stderr=subprocess.STDOUT, env=env, start_new_session=True)",
+              "open('/content/ibb_reverse_census/pid.txt', 'w').write(str(p.pid))",
+              "print('STARTED_PID=' + str(p.pid))",
+          ]
+          open("/tmp/start_census.py", "w").write("
+".join(lines) + "
+")
           GEN
 
           cat <<'POLLER' > /tmp/poll_census.py
@@ -144,7 +147,7 @@ jobs:
 
           colab --auth=adc exec -s "$SESSION" --timeout 120 -f /tmp/start_census.py | tee -a output/ibb_reverse_census.log
 
-          for i in $(seq 1 110); do
+          for i in $(seq 1 112); do
             sleep 180
             OUT=$(colab --auth=adc exec -s "$SESSION" --timeout 120 -f /tmp/poll_census.py 2>&1 || true)
             printf '%s

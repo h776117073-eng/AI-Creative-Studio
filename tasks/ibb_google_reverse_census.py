@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
 Google Maps Reverse Geocoding + 5m Nearby Search Census for Ibb Governorate
-- Uses all 50,700 tile-extracted coordinates (38,238 unique points mapped back to all 50,700 rows).
+- Uses all 50,700 tile-extracted coordinates (38,238 unique exact points mapped back to all 50,700 records).
 - Queries Google Maps endpoints ONLY:
-  1) Official Google Geocoding API (ROOFTOP / building place_id) + Google Places API Nearby Search (radius=5m) when GOOGLE_API_KEY / API_KEY is set.
-  2) Direct Google Maps Web Reverse Geocoding + Zoom-21 (~5m radius) Spatial Viewport RPC (hl=ar, gl=YE) extracting:
+  1) Official Google Geocoding API (ROOFTOP / building Place ID, compound_code, street, neighborhood, district)
+     + Official Google Places API (New) Nearby Search (radius=5.0m) returning ALL establishments inside that exact building footprint.
+  2) Direct Google Maps Web Reverse Geocoding + Zoom-21 (~5m radius) Spatial Viewport RPC + Place Details RPC (hl=ar, gl=YE)
+     extracting every establishment inside that building footprint with:
      - Building/Establishment Name, Place ID (ChIJ...), Feature ID (0x...:0x...), CID
      - Exact Coordinates (lat, lng), Plus Code, Compound Address, Street, Neighborhood, District
      - Category/Type, Phone/Mobile, Opening Hours, Photos, Rating & Review Count
-- Saves resumable SQLite checkpoints and uploads final & interim XLSX + CSV + JSON directly to Drive folder 'المطابقة العكسية' (ID: 171LM8hjZGooZfYWV6Z0mX8vlLWfYzX7A).
+- Saves resumable SQLite checkpoints and uploads final & interim XLSX + CSV + JSON directly to Google Drive folder 'المطابقة العكسية' (ID: 171LM8hjZGooZfYWV6Z0mX8vlLWfYzX7A).
 """
 
 import asyncio
@@ -338,6 +340,9 @@ def _walk_google_rpc_nodes(obj, found: list):
         strings = []
         photos = []
         phones = []
+        hours = []
+        rating_val = None
+        reviews_val = None
         for item in obj:
             if isinstance(item, str):
                 if re.match(r"^0x[0-9a-fA-F]+:0x[0-9a-fA-F]+$", item):
@@ -349,13 +354,21 @@ def _walk_google_rpc_nodes(obj, found: list):
                     if item not in photos and len(photos) < 5:
                         photos.append(item)
                 elif re.match(r"^(\+967|00967|04|7[01378]\d)\s*[\d\s\-]{6,}$", item.strip()):
-                    phones.append(item.strip())
+                    if item.strip() not in phones:
+                        phones.append(item.strip())
+                elif any(k in item for k in ("مفتوح", "مغلق", "يفتح", "يغلق", "على مدار", "24 ساعة", "Open", "Closed")):
+                    if len(item) <= 90 and item not in hours:
+                        hours.append(item)
                 elif 2 <= len(item) <= 140 and not item.startswith("http") and not item.startswith("/"):
                     strings.append(item)
             elif isinstance(item, list) and len(item) >= 4:
                 if item[0] is None and item[1] is None and isinstance(item[2], (int, float)) and isinstance(item[3], (int, float)):
                     if 13.5 <= float(item[2]) <= 14.7 and 43.5 <= float(item[3]) <= 44.8:
                         coords = (float(item[2]), float(item[3]))
+                elif len(item) >= 8 and isinstance(item[7], (int, float)) and 1.0 <= float(item[7]) <= 5.0:
+                    rating_val = float(item[7])
+                    if len(item) >= 9 and isinstance(item[8], int):
+                        reviews_val = int(item[8])
         if (has_hex or chij) and coords and strings:
             found.append({
                 "feature_id": hex_id if has_hex else "",
@@ -365,6 +378,9 @@ def _walk_google_rpc_nodes(obj, found: list):
                 "strings": strings,
                 "photos": photos,
                 "phones": phones,
+                "hours": hours,
+                "rating": rating_val,
+                "review_count": reviews_val,
             })
         for child in obj:
             if isinstance(child, (list, dict)):
@@ -470,9 +486,9 @@ async def query_google_maps_rpc_5m(client: httpx.AsyncClient, lat: float, lng: f
             "governorate": "محافظة إب",
             "phone": " | ".join(node["phones"]),
             "website": "",
-            "opening_hours": "",
-            "rating": None,
-            "review_count": None,
+            "opening_hours": " | ".join(node["hours"]),
+            "rating": node["rating"],
+            "review_count": node["review_count"],
             "photo_urls": " | ".join(node["photos"]),
             "google_maps_url": (
                 f"{G_HOST}/maps/place/?q=place_id:{node['place_id']}"
@@ -708,8 +724,8 @@ async def main_async():
     load_50700_points(conn, csv_path)
 
     batch_size = int(os.environ.get("BATCH_SIZE", "250"))
-    concurrency = int(os.environ.get("CONCURRENCY", "15" if GOOGLE_API_KEY else "10"))
-    export_every = int(os.environ.get("EXPORT_EVERY", "2500"))
+    concurrency = int(os.environ.get("CONCURRENCY", "15" if GOOGLE_API_KEY else "12"))
+    export_every = int(os.environ.get("EXPORT_EVERY", "2000"))
     max_batches = int(os.environ.get("MAX_BATCHES", "0"))
 
     print(f"[START] Mode={'OFFICIAL_GOOGLE_API' if GOOGLE_API_KEY else 'GOOGLE_MAPS_WEB_RPC_Z21'} | concurrency={concurrency} | batch={batch_size}", flush=True)
@@ -738,7 +754,7 @@ async def main_async():
             done_total = conn.execute("SELECT COUNT(*) FROM query_points WHERE status='done'").fetchone()[0]
             places_total = conn.execute("SELECT COUNT(*) FROM places").fetchone()[0]
             dt = time.monotonic() - t0
-            print(f"[BATCH {batch_num}] +{len(results)} pts in {dt:.1f}s | Total Done: {done_q if 'done_q' in locals() else done_total:,}/38,238 | Total Places: {places_total:,}", flush=True)
+            print(f"[BATCH {batch_num}] +{len(results)} pts in {dt:.1f}s | Total Done: {done_total:,}/38,238 | Total Places: {places_total:,}", flush=True)
 
             if processed_since_export >= export_every:
                 export_and_upload(conn, is_final=False)
