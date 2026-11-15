@@ -100,10 +100,10 @@ jobs:
 
           src_csv = pathlib.Path("/tmp/source_50700_tiles.csv")
           sa_file = pathlib.Path("/tmp/drive_sa.json")
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaIoBaseDownload
           if sa_file.is_file():
               from google.oauth2 import service_account
-              from googleapiclient.discovery import build
-              from googleapiclient.http import MediaIoBaseDownload
               creds = service_account.Credentials.from_service_account_file(str(sa_file), scopes=["https://www.googleapis.com/auth/drive.readonly"])
               svc = build("drive", "v3", credentials=creds, cache_discovery=False)
               req = svc.files().get_media(fileId="16_t3e0WUja1UW_n2ap6925kzFQX2Jbk9")
@@ -113,10 +113,27 @@ jobs:
                   while not done:
                       _, done = dl.next_chunk()
               sa_file.unlink(missing_ok=True)
-          if not src_csv.is_file() or src_csv.stat().st_size < 100_000:
+          if not src_csv.is_file() or src_csv.stat().st_size < 10_000_000:
+              try:
+                  import google.auth
+                  adc_creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/drive.readonly"])
+                  svc = build("drive", "v3", credentials=adc_creds, cache_discovery=False)
+                  req = svc.files().get_media(fileId="16_t3e0WUja1UW_n2ap6925kzFQX2Jbk9")
+                  with open(src_csv, "wb") as f:
+                      dl = MediaIoBaseDownload(f, req, chunksize=8*1024*1024)
+                      done = False
+                      while not done:
+                          _, done = dl.next_chunk()
+                  print("Downloaded source CSV via Colab ADC credentials.")
+              except Exception as e:
+                  print("ADC Drive fetch failed:", repr(e))
+          if not src_csv.is_file() or src_csv.stat().st_size < 10_000_000:
               host = "".join(["https://", "drive.", "usercontent.", "google.", "com/download"])
               url = f"{host}?id=16_t3e0WUja1UW_n2ap6925kzFQX2Jbk9&export=download&confirm=t"
               urllib.request.urlretrieve(url, src_csv)
+          head = src_csv.read_bytes()[:200].lstrip()
+          if src_csv.stat().st_size < 10_000_000 or head.startswith(b"<"):
+              raise RuntimeError(f"Source CSV invalid or private (bytes={src_csv.stat().st_size}, head={head[:80]!r})")
           print("Source CSV ready bytes:", src_csv.stat().st_size)
 
           script_body = pathlib.Path("tasks/ibb_google_reverse_census.py").read_text(encoding="utf-8")
