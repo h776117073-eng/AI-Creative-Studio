@@ -1,0 +1,152 @@
+name: Deep Visual White Map Tile OCR Pipeline (Colab + GitHub)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_scope:
+        description: 'Scan Scope: URBAN_ALL (8 Cities Z18-Z20) or GOVERNORATE_ALL (All 29 Regions)'
+        required: true
+        default: 'URBAN_ALL'
+        type: choice
+        options:
+          - URBAN_ALL
+          - GOVERNORATE_ALL
+      include_z20:
+        description: 'Download & Scan Zoom 20 Ultra-High-Res Urban Tiles into MBTiles'
+        required: true
+        default: true
+        type: boolean
+      accelerator:
+        description: 'Google Colab Runtime Accelerator'
+        required: true
+        default: 'none'
+        type: choice
+        options:
+          - none
+          - T4
+          - L4
+      timeout_seconds:
+        description: 'Max Colab Execution Timeout (seconds)'
+        required: true
+        default: '14400'
+  schedule:
+    - cron: '0 2 * * *'
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: white-map-tile-ocr-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  run-deep-tile-ocr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+
+    steps:
+      - name: Free Up Runner SSD Space (~65 GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h
+
+      - name: Checkout AI-Creative-Studio
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install Colab CLI & OCR Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tesseract-ocr tesseract-ocr-ara tesseract-ocr-eng libtesseract-dev libgl1
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade google-colab-cli google-auth google-api-python-client google-auth-httplib2 requests opencv-python-headless numpy pillow pytesseract pandas openpyxl tqdm scipy
+
+      - name: Configure Google ADC Credentials for Colab
+        env:
+          COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
+        run: |
+          mkdir -p "$HOME/.config/gcloud" output
+          if [ -z "${COLAB_CREDENTIALS:-}" ]; then
+            echo "COLAB_READY=false" >> "$GITHUB_ENV"
+          else
+            python - <<'PY'
+          import json, os, pathlib
+          raw = os.environ["COLAB_CREDENTIALS"]
+          target = pathlib.Path.home() / ".config/gcloud/application_default_credentials.json"
+          json.loads(raw)
+          target.write_text(raw, encoding="utf-8")
+          target.chmod(0o600)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
+              f.write(f"GOOGLE_APPLICATION_CREDENTIALS={target}\n")
+              f.write("COLAB_READY=true\n")
+          PY
+          fi
+
+      - name: Execute Deep Tile OCR Pipeline on Google Colab (with Runner Fallback)
+        env:
+          SCRIPT_PATH: "tasks/white_map_tile_ocr_pipeline.py"
+          COLAB_GPU: ${{ github.event.inputs.accelerator || 'none' }}
+          COLAB_TIMEOUT_SECONDS: ${{ github.event.inputs.timeout_seconds || '14400' }}
+          OCR_TARGET_SCOPE: ${{ github.event.inputs.target_scope || 'URBAN_ALL' }}
+          OCR_INCLUDE_Z20: ${{ github.event.inputs.include_z20 || 'true' }}
+          TARGET_DRIVE_FOLDER_ID: "1hXAsTJNXS_E_L6kYsNDUqszjZbSuq9aK"
+        run: |
+          set -euo pipefail
+          if [ "${COLAB_READY:-false}" = "true" ]; then
+            if ! python scripts/colab_bridge.py; then
+              OCR_WORK_DIR="$PWD/output/ibb_tile_ocr_work" python tasks/white_map_tile_ocr_pipeline.py
+            fi
+          else
+            OCR_WORK_DIR="$PWD/output/ibb_tile_ocr_work" python tasks/white_map_tile_ocr_pipeline.py
+          fi
+
+      - name: Publish Full Deliverables to Permanent GitHub Release (tile-ocr-z18-z20)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh release view tile-ocr-z18-z20 >/dev/null 2>&1; then
+            gh release create tile-ocr-z18-z20 \
+              --title "مخرجات التعرف الضوئي البصري العميق للخريطة البيضاء (Tile OCR Z18–Z20)" \
+              --notes "استخراج شامل للنصوص والمنشآت والإحداثيات ورموز Plus Code والأدلة المجاورة والارتفاعات من بلاطات الخريطة البيضاء."
+          fi
+          for dir in output output/ibb_tile_ocr_work/deliverables; do
+            [ -d "$dir" ] || continue
+            for f in "$dir"/*.{csv,json,geojson,xlsx,db,md,mbtiles}; do
+              [ -e "$f" ] || continue
+              gh release upload tile-ocr-z18-z20 "$f" --clobber
+            done
+          done
+
+      - name: Commit Summary & Compressed Dataset to Repository
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p data/tile_ocr
+          cp -f output/ibb_white_map_tile_ocr_summary.md data/tile_ocr/ 2>/dev/null || true
+          if [ -f output/ibb_white_map_tile_ocr_z18_z20.csv ]; then
+            gzip -c output/ibb_white_map_tile_ocr_z18_z20.csv > data/tile_ocr/ibb_white_map_tile_ocr_z18_z20.csv.gz
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/tile_ocr/
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(ocr): update White Map Z18-Z20 Tile OCR extracted entities & summary"
+            git push
+          fi
+
+      - name: Upload GitHub Actions Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: white-map-tile-ocr-${{ github.run_id }}
+          path: output/**
+          if-no-files-found: warn
+          retention-days: 30
