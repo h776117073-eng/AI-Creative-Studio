@@ -75,7 +75,7 @@ jobs:
             tail -n 60 output/ibb_master_census.log
             exit 1
           fi
-          colab --auth=adc exec -s "$SESSION" --timeout 1800 -f tasks/ibb_master_census.py 2>&1 | tee -a output/ibb_master_census.log
+          colab --auth=adc exec -s "$SESSION" --timeout 2400 -f tasks/ibb_master_census.py 2>&1 | tee -a output/ibb_master_census.log
           EXEC_RC=${PIPESTATUS[0]}
           if grep -qE "Traceback \(most recent call last\)|ModuleNotFoundError:|SyntaxError:" output/ibb_master_census.log; then
             EXEC_RC=1
@@ -83,6 +83,7 @@ jobs:
           colab --auth=adc download -s "$SESSION" "/content/ibb_master_census_work/الاستخراج_الكلي_محافظة_إب_النهائي.xlsx" "output/الاستخراج_الكلي_محافظة_إب_النهائي.xlsx" >> output/ibb_master_census.log 2>&1 || true
           colab --auth=adc download -s "$SESSION" "/content/ibb_master_census_work/الاستخراج_الكلي_محافظة_إب_النهائي.csv" "output/الاستخراج_الكلي_محافظة_إب_النهائي.csv" >> output/ibb_master_census.log 2>&1 || true
           colab --auth=adc download -s "$SESSION" "/content/ibb_master_census_work/الاستخراج_الكلي_محافظة_إب_النهائي.json" "output/الاستخراج_الكلي_محافظة_إب_النهائي.json" >> output/ibb_master_census.log 2>&1 || true
+          colab --auth=adc download -s "$SESSION" "/content/ibb_master_census_work/ibb_google_open_buildings.csv" "output/ibb_google_open_buildings.csv" >> output/ibb_master_census.log 2>&1 || true
           colab --auth=adc stop -s "$SESSION" >> output/ibb_master_census.log 2>&1 || true
           ls -lh output/
           for f in "output/الاستخراج_الكلي_محافظة_إب_النهائي.xlsx" "output/الاستخراج_الكلي_محافظة_إب_النهائي.csv" "output/الاستخراج_الكلي_محافظة_إب_النهائي.json"; do
