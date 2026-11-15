@@ -31,7 +31,7 @@ from pathlib import Path
 
 print("[BOOT] Initializing Ibb Google Maps Reverse Geocoding & 5m Nearby Search Census...", flush=True)
 
-for pkg, mod in (("httpx", "httpx"), ("openpyxl", "openpyxl"), ("pandas", "pandas"), ("google-api-python-client", "googleapiclient"), ("google-auth", "google.auth")):
+for pkg, mod in (("httpx", "httpx"), ("openpyxl", "openpyxl"), ("pandas", "pandas")):
     try:
         __import__(mod)
     except ImportError:
@@ -42,12 +42,10 @@ import httpx
 import openpyxl
 import pandas as pd
 
-TARGET_DRIVE_FOLDER_ID = os.environ.get("TARGET_DRIVE_FOLDER_ID", "171LM8hjZGooZfYWV6Z0mX8vlLWfYzX7A")
 SOURCE_CSV_DRIVE_ID = os.environ.get("SOURCE_CSV_DRIVE_ID", "16_t3e0WUja1UW_n2ap6925kzFQX2Jbk9")
 GOOGLE_API_KEY = (os.environ.get("GOOGLE_API_KEY") or os.environ.get("API_KEY") or "").strip()
 
 WORK_DIR = Path(os.environ.get("WORK_DIR", "/content/ibb_reverse_census"))
-DRIVE_MOUNT_DIR = Path("/content/drive/MyDrive/المطابقة العكسية")
 DB_PATH = WORK_DIR / "ibb_reverse_census.db"
 LOCAL_SOURCE_CSV = WORK_DIR / "source_50700_tiles.csv"
 
@@ -140,49 +138,17 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     conn.commit()
     return conn
 
-def get_drive_service():
-    try:
-        from google.oauth2 import service_account
-        from googleapiclient.discovery import build
-        sa_path = os.environ.get("GOOGLE_DRIVE_CREDENTIALS_FILE", "/content/drive_sa.json")
-        if sa_path and Path(sa_path).is_file():
-            info = json.loads(Path(sa_path).read_text(encoding="utf-8"))
-            if info.get("type") == "service_account":
-                creds = service_account.Credentials.from_service_account_info(
-                    info, scopes=["https://www.googleapis.com/auth/drive"]
-                )
-                return build("drive", "v3", credentials=creds, cache_discovery=False)
-    except Exception as e:
-        print(f"[INFO] Service account Drive API skipped: {e}", flush=True)
-    return None
-
 def locate_source_csv(dest_csv: Path) -> Path:
     if dest_csv.is_file() and dest_csv.stat().st_size > 1_000_000:
         print(f"[SOURCE] Found local CSV: {dest_csv} ({dest_csv.stat().st_size:,} bytes)", flush=True)
         return dest_csv
     dest_csv.parent.mkdir(parents=True, exist_ok=True)
-    mounted_csv = Path("/content/drive/MyDrive/اسماء ومواقع موثقة من خرائط جوجل /التحقق_العالي_بيانات_إب_الكاملة.csv")
-    if mounted_csv.is_file():
-        print("[SOURCE] Copying 50,700-row CSV from mounted Drive...", flush=True)
-        shutil.copy2(mounted_csv, dest_csv)
-        return dest_csv
-    svc = get_drive_service()
-    if svc:
-        print("[SOURCE] Downloading 50,700-row CSV via Drive Service Account...", flush=True)
-        from googleapiclient.http import MediaIoBaseDownload
-        req = svc.files().get_media(fileId=SOURCE_CSV_DRIVE_ID)
-        with open(dest_csv, "wb") as f:
-            downloader = MediaIoBaseDownload(f, req, chunksize=8 * 1024 * 1024)
-            done = False
-            while not done:
-                _, done = downloader.next_chunk()
-        if dest_csv.is_file() and dest_csv.stat().st_size > 1_000_000:
-            return dest_csv
     dl_url = f"{G_DRIVE_DL}?id={SOURCE_CSV_DRIVE_ID}&export=download&confirm=t"
+    print(f"[SOURCE] Downloading source CSV ({SOURCE_CSV_DRIVE_ID}) to {dest_csv}...", flush=True)
     urllib.request.urlretrieve(dl_url, dest_csv)
     if dest_csv.is_file() and dest_csv.stat().st_size > 1_000_000:
         return dest_csv
-    raise RuntimeError("Could not locate source_50700_tiles.csv in /content/ibb_reverse_census or Drive.")
+    raise RuntimeError("Could not locate or download source_50700_tiles.csv in /content/ibb_reverse_census.")
 
 def load_50700_points(conn: sqlite3.Connection, csv_path: Path) -> int:
     cur = conn.cursor()
@@ -685,52 +651,11 @@ def export_and_upload(conn: sqlite3.Connection, is_final: bool = False):
             summary_cat = df_clean.groupby("category").size().reset_index(name="عدد_المنشآت").sort_values("عدد_المنشآت", ascending=False)
             summary_cat.to_excel(writer, sheet_name="إحصائيات_الأنواع", index=False)
 
-    if DRIVE_MOUNT_DIR.parent.is_dir():
-        DRIVE_MOUNT_DIR.mkdir(parents=True, exist_ok=True)
-        for p in (csv_path, json_path, xlsx_path, DB_PATH):
-            if p.is_file():
-                shutil.copy2(p, DRIVE_MOUNT_DIR / p.name)
-        print(f"[DRIVE MOUNT] Synced files to {DRIVE_MOUNT_DIR}", flush=True)
-
-    svc = get_drive_service()
-    if svc:
-        from googleapiclient.http import MediaFileUpload
-        mime_map = {
-            ".csv": "text/csv",
-            ".json": "application/json",
-            ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            ".db": "application/octet-stream",
-        }
-        for fpath in (xlsx_path, csv_path, json_path, DB_PATH):
-            if not fpath.is_file():
-                continue
-            q = f"name = '{fpath.name}' and '{TARGET_DRIVE_FOLDER_ID}' in parents and trashed = false"
-            existing = svc.files().list(q=q, fields="files(id,name)").execute().get("files", [])
-            media = MediaFileUpload(str(fpath), mimetype=mime_map.get(fpath.suffix, "application/octet-stream"), resumable=True)
-            if existing:
-                fid = existing[0]["id"]
-                svc.files().update(fileId=fid, media_body=media).execute()
-                print(f"[DRIVE API] Updated {fpath.name} (id={fid})", flush=True)
-            else:
-                meta = {"name": fpath.name, "parents": [TARGET_DRIVE_FOLDER_ID]}
-                created = svc.files().create(body=meta, media_body=media, fields="id").execute()
-                print(f"[DRIVE API] Uploaded {fpath.name} (id={created.get('id')})", flush=True)
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+    print(f"[LOCAL SAVE] Saved outputs to {WORK_DIR}: {csv_path.name}, {json_path.name}, {xlsx_path.name}, {DB_PATH.name}", flush=True)
 
 async def main_async():
     WORK_DIR.mkdir(parents=True, exist_ok=True)
-    svc = get_drive_service()
-    if svc and not DB_PATH.is_file():
-        q = f"name = 'ibb_reverse_census.db' and '{TARGET_DRIVE_FOLDER_ID}' in parents and trashed = false"
-        found = svc.files().list(q=q, fields="files(id,size)").execute().get("files", [])
-        if found:
-            from googleapiclient.http import MediaIoBaseDownload
-            req = svc.files().get_media(fileId=found[0]["id"])
-            with open(DB_PATH, "wb") as f:
-                dl = MediaIoBaseDownload(f, req, chunksize=8 * 1024 * 1024)
-                done = False
-                while not done:
-                    _, done = dl.next_chunk()
-            print(f"[RESUME] Restored checkpoint DB from Drive ({DB_PATH.stat().st_size:,} bytes)", flush=True)
 
     conn = init_db(DB_PATH)
     csv_path = locate_source_csv(LOCAL_SOURCE_CSV)
@@ -782,12 +707,6 @@ async def main_async():
     conn.close()
 
 def run_entrypoint():
-    try:
-        from google.colab import drive
-        if not os.path.ismount("/content/drive"):
-            drive.mount("/content/drive", force_remount=False)
-    except Exception as e:
-        print(f"[INFO] Colab drive.mount skipped/unavailable: {e}", flush=True)
 
     try:
         loop = asyncio.get_running_loop()

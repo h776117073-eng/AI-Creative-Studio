@@ -12,7 +12,7 @@ on:
         required: false
         default: "12"
       export_every:
-        description: "Sync intermediate XLSX/CSV/JSON to Drive every N points"
+        description: "Save intermediate XLSX/CSV/JSON locally every N points"
         required: false
         default: "2000"
       max_batches:
@@ -52,7 +52,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install --upgrade google-colab-cli google-auth google-api-python-client
 
-      - name: Configure Colab ADC & Optional Drive Service Account
+      - name: Configure Colab ADC & Optional Source Fetch Credentials
         env:
           COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
           GOOGLE_DRIVE_CREDENTIALS: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
@@ -74,10 +74,10 @@ jobs:
               env.write(f"GOOGLE_APPLICATION_CREDENTIALS={path}\n")
           sa_raw = os.environ.get("GOOGLE_DRIVE_CREDENTIALS", "").strip()
           if sa_raw:
-              sa_path = pathlib.Path("output/drive_sa.json")
+              sa_path = pathlib.Path("/tmp/drive_sa.json")
               sa_path.write_text(sa_raw, encoding="utf-8")
               sa_path.chmod(0o600)
-              print("GOOGLE_DRIVE_CREDENTIALS configured.")
+              print("Optional Drive credentials configured for source CSV fetch.")
           print("ADC configured successfully.")
           INNER
 
@@ -91,7 +91,7 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'WRAP'
-          import base64, json, os, pathlib, urllib.request
+          import json, os, pathlib, urllib.request
           api_key = os.environ.get("GOOGLE_API_KEY", "")
           batch_size = os.environ.get("BATCH_SIZE", "250")
           concurrency = os.environ.get("CONCURRENCY", "12")
@@ -99,14 +99,12 @@ jobs:
           max_batches = os.environ.get("MAX_BATCHES", "0")
 
           src_csv = pathlib.Path("/tmp/source_50700_tiles.csv")
-          sa_file = pathlib.Path("output/drive_sa.json")
-          sa_b64 = ""
+          sa_file = pathlib.Path("/tmp/drive_sa.json")
           if sa_file.is_file():
-              sa_b64 = base64.b64encode(sa_file.read_bytes()).decode("ascii")
               from google.oauth2 import service_account
               from googleapiclient.discovery import build
               from googleapiclient.http import MediaIoBaseDownload
-              creds = service_account.Credentials.from_service_account_file(str(sa_file), scopes=["https://www.googleapis.com/auth/drive"])
+              creds = service_account.Credentials.from_service_account_file(str(sa_file), scopes=["https://www.googleapis.com/auth/drive.readonly"])
               svc = build("drive", "v3", credentials=creds, cache_discovery=False)
               req = svc.files().get_media(fileId="16_t3e0WUja1UW_n2ap6925kzFQX2Jbk9")
               with open(src_csv, "wb") as f:
@@ -114,6 +112,7 @@ jobs:
                   done = False
                   while not done:
                       _, done = dl.next_chunk()
+              sa_file.unlink(missing_ok=True)
           if not src_csv.is_file() or src_csv.stat().st_size < 1_000_000:
               host = "".join(["https://", "drive.", "usercontent.", "google.", "com/download"])
               url = f"{host}?id=16_t3e0WUja1UW_n2ap6925kzFQX2Jbk9&export=download&confirm=t"
@@ -122,22 +121,15 @@ jobs:
 
           script_body = pathlib.Path("tasks/ibb_google_reverse_census.py").read_text(encoding="utf-8")
           preamble = [
-              "import base64, os, pathlib",
+              "import os",
               "os.makedirs('/content/ibb_reverse_census', exist_ok=True)",
               f"os.environ['GOOGLE_API_KEY'] = {json.dumps(api_key)}",
               f"os.environ['BATCH_SIZE'] = {json.dumps(batch_size)}",
               f"os.environ['CONCURRENCY'] = {json.dumps(concurrency)}",
               f"os.environ['EXPORT_EVERY'] = {json.dumps(export_every)}",
               f"os.environ['MAX_BATCHES'] = {json.dumps(max_batches)}",
-              "os.environ['TARGET_DRIVE_FOLDER_ID'] = '171LM8hjZGooZfYWV6Z0mX8vlLWfYzX7A'",
               "os.environ['SOURCE_CSV_DRIVE_ID'] = '16_t3e0WUja1UW_n2ap6925kzFQX2Jbk9'",
           ]
-          if sa_b64:
-              preamble.extend([
-                  "sa_p = pathlib.Path('/content/drive_sa.json')",
-                  f"sa_p.write_bytes(base64.b64decode({json.dumps(sa_b64)}))",
-                  "os.environ['GOOGLE_DRIVE_CREDENTIALS_FILE'] = str(sa_p)",
-              ])
           pathlib.Path("/tmp/colab_census_bundle.py").write_text("\n".join(preamble) + "\n" + script_body, encoding="utf-8")
           print("Bundled Colab script bytes:", pathlib.Path("/tmp/colab_census_bundle.py").stat().st_size)
           WRAP
@@ -149,23 +141,24 @@ jobs:
           SESSION="ibb-census-${GITHUB_RUN_ID}"
           colab --auth=adc stop -s "$SESSION" >> output/ibb_reverse_census.log 2>&1 || true
           COLAB_CLI_ASSIGN_RETRIES=3 COLAB_CLI_RETRY_BACKOFF=15 colab --auth=adc new -s "$SESSION" >> output/ibb_reverse_census.log 2>&1
-          colab --auth=adc exec -s "$SESSION" "mkdir -p /content/ibb_reverse_census" >> output/ibb_reverse_census.log 2>&1
+          echo "import os; os.makedirs('/content/ibb_reverse_census', exist_ok=True)" | colab --auth=adc exec -s "$SESSION" >> output/ibb_reverse_census.log 2>&1
           colab --auth=adc upload -s "$SESSION" /tmp/source_50700_tiles.csv /content/ibb_reverse_census/source_50700_tiles.csv >> output/ibb_reverse_census.log 2>&1
-          colab --auth=adc upload -s "$SESSION" /tmp/colab_census_bundle.py /content/colab_census_bundle.py >> output/ibb_reverse_census.log 2>&1
-          colab --auth=adc exec -s "$SESSION" --timeout 3600 -f /content/colab_census_bundle.py 2>&1 | tee -a output/ibb_reverse_census.log
+          colab --auth=adc exec -s "$SESSION" --timeout 3600 -f /tmp/colab_census_bundle.py 2>&1 | tee -a output/ibb_reverse_census.log
+          EXEC_RC=${PIPESTATUS[0]}
           colab --auth=adc download -s "$SESSION" /content/ibb_reverse_census/المطابقة_العكسية_إب_الشاملة.xlsx output/المطابقة_العكسية_إب_الشاملة.xlsx >> output/ibb_reverse_census.log 2>&1 || true
           colab --auth=adc download -s "$SESSION" /content/ibb_reverse_census/المطابقة_العكسية_إب_الشاملة.csv output/المطابقة_العكسية_إب_الشاملة.csv >> output/ibb_reverse_census.log 2>&1 || true
           colab --auth=adc download -s "$SESSION" /content/ibb_reverse_census/المطابقة_العكسية_إب_الشاملة.json output/المطابقة_العكسية_إب_الشاملة.json >> output/ibb_reverse_census.log 2>&1 || true
           colab --auth=adc download -s "$SESSION" /content/ibb_reverse_census/المطابقة_العكسية_إب_مرحلي.xlsx output/المطابقة_العكسية_إب_مرحلي.xlsx >> output/ibb_reverse_census.log 2>&1 || true
           colab --auth=adc download -s "$SESSION" /content/ibb_reverse_census/المطابقة_العكسية_إب_مرحلي.csv output/المطابقة_العكسية_إب_مرحلي.csv >> output/ibb_reverse_census.log 2>&1 || true
+          colab --auth=adc download -s "$SESSION" /content/ibb_reverse_census/المطابقة_العكسية_إب_مرحلي.json output/المطابقة_العكسية_إب_مرحلي.json >> output/ibb_reverse_census.log 2>&1 || true
           colab --auth=adc download -s "$SESSION" /content/ibb_reverse_census/ibb_reverse_census.db output/ibb_reverse_census.db >> output/ibb_reverse_census.log 2>&1 || true
           colab --auth=adc stop -s "$SESSION" >> output/ibb_reverse_census.log 2>&1 || true
-          rm -f output/drive_sa.json
+          exit $EXEC_RC
 
       - name: Upload Outputs & Checkpoint Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ibb-reverse-census-results-${{ github.run_id }}
+          name: ibb-reverse-census-final-${{ github.run_id }}
           path: output/
-          retention-days: 14
+          retention-days: 30
