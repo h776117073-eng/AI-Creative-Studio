@@ -768,5 +768,32 @@ async def main_async():
     export_and_upload(conn, is_final=(rem == 0))
     conn.close()
 
+def run_entrypoint():
+    # Attempt automatic Colab Drive mount if running inside Google Colab kernel
+    try:
+        from google.colab import drive
+        if not os.path.ismount("/content/drive"):
+            drive.mount("/content/drive", force_remount=False)
+    except Exception as e:
+        print(f"[INFO] Colab drive.mount skipped/unavailable: {e}", flush=True)
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        import nest_asyncio
+        try:
+            nest_asyncio.apply()
+            loop.run_until_complete(main_async())
+        except Exception:
+            # Run inside a dedicated thread with its own fresh event loop
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                pool.submit(lambda: asyncio.run(main_async())).result()
+    else:
+        asyncio.run(main_async())
+
 if __name__ == "__main__":
-    asyncio.run(main_async())
+    run_entrypoint()
