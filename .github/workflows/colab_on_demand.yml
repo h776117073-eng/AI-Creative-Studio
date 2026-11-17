@@ -70,7 +70,7 @@ concurrency:
 jobs:
   run-colab-task:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 55
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
