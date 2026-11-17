@@ -1,0 +1,23 @@
+name: Build rigged character assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      accelerator:
+        description: Google Colab GPU accelerator
+        required: true
+        type: choice
+        options: ["T4", "L4", "A100", "H100"]
+        default: "T4"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    uses: ./.github/workflows/colab_on_demand.yml
+    with:
+      script_path: notebooks/CHARACTER_3D_ASSETS_v1.ipynb
+      accelerator: ${{ inputs.accelerator }}
+      timeout_seconds: 2400
+    secrets: inherit
