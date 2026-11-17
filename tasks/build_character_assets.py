@@ -326,7 +326,16 @@ def main() -> None:
     # Install the remaining TripoSR dependencies first, then compile torchmcubes
     # without PEP-517 build isolation so it sees Colab's preinstalled CUDA PyTorch.
     requirements = (TRIPOSR / "requirements.txt").read_text(encoding="utf-8").splitlines()
-    requirements = [line for line in requirements if not line.strip().startswith("git+https://github.com/tatsy/torchmcubes")]
+    requirements = [
+        line for line in requirements
+        if not line.strip().startswith("git+https://github.com/tatsy/torchmcubes")
+        and not line.strip().startswith("Pillow==")
+        and not line.strip().startswith("xatlas==")
+        and line.strip() != "gradio"
+    ]
+    # The upstream pins Pillow 10.1 and xatlas 0.0.9 predate the Colab
+    # Python 3.13 runtime. Install their Python 3.13 wheels explicitly.
+    run([sys.executable,"-m","pip","install","-q","Pillow>=11.0,<13","xatlas>=0.0.11"])
     filtered_requirements = WORK / "triposr-requirements-no-torchmcubes.txt"
     filtered_requirements.write_text("\n".join(requirements) + "\n", encoding="utf-8")
     run([sys.executable,"-m","pip","install","-q","-r",str(filtered_requirements)])
