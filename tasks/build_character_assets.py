@@ -321,6 +321,16 @@ def main() -> None:
     blender=install_blender()
     if not TRIPOSR.exists():
         run(["git","clone","--depth","1","https://github.com/VAST-AI-Research/TripoSR.git",str(TRIPOSR)])
+    # Colab is headless: force ModernGL texture baking to use EGL rather than X11.
+    bake_py = TRIPOSR / "tsr" / "bake_texture.py"
+    bake_src = bake_py.read_text(encoding="utf-8")
+    x11_call = "moderngl.create_context(standalone=True)"
+    egl_call = "moderngl.create_context(standalone=True, backend='egl')"
+    if x11_call in bake_src:
+        bake_py.write_text(bake_src.replace(x11_call, egl_call), encoding="utf-8")
+    elif egl_call not in bake_src:
+        raise RuntimeError("Could not locate ModernGL standalone context call for EGL patch.")
+    os.environ.setdefault("EGL_PLATFORM", "surfaceless")
     run([sys.executable,"-m","pip","install","-q","--upgrade","setuptools"])
     # torchmcubes' pyproject dynamically reads the installed torch version.
     # Install the remaining TripoSR dependencies first, then compile torchmcubes
