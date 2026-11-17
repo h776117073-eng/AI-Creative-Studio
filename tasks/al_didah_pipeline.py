@@ -225,10 +225,10 @@ def analyze(video,m,ss):
                     key=(tid,j); old=last.get(key); vx=vy=speed=ax=ay=None
                     if old and 0<ix-old["frame"]<=2:
                         dt=(ix-old["frame"])/m["fps"]; vx=(p["x"]-old["x"])/dt; vy=(p["y"]-old["y"])/dt; speed=math.hypot(vx,vy)
-                        if old.get("vx") is not None: ax=(vx-old["vx"])/dt; ay=(vy-old["vy"])/dt
+                        if old.get("vx") is not None and old.get("vy") is not None: ax=(vx-old["vx"])/dt; ay=(vy-old["vy"])/dt
                     oldsm=smooth.get(key); sx=p["x"] if oldsm is None else .55*p["x"]+.45*oldsm[0]; sy=p["y"] if oldsm is None else .55*p["y"]+.45*oldsm[1]; smooth[key]=(sx,sy)
                     motion.append({"frame":ix,"time":ix/m["fps"],"scene_id":sid,"track_id":tid,"joint":NAMES[j],"x":p["x"],"y":p["y"],"confidence":p["confidence"],"vx_px_s":vx,"vy_px_s":vy,"speed_px_s":speed,"ax_px_s2":ax,"ay_px_s2":ay,"smooth_x":sx,"smooth_y":sy,"observed":True})
-                    last[key]={"frame":ix,"x":p["x"],"y":p["y"],"vx":vx}
+                    last[key]={"frame":ix,"x":p["x"],"y":p["y"],"vx":vx,"vy":vy}
             lines.append(json.dumps({"frame":ix,"time":ix/m["fps"],"scene_id":sid,"persons":persons,"detection_count":len(persons)},separators=(",",":")))
             if sid not in key_saved and persons:
                 cv2.imwrite(str(KF/f"scene_{sid:03d}_first_detection.jpg"),fr,[cv2.IMWRITE_JPEG_QUALITY,94]); key_saved.add(sid)
