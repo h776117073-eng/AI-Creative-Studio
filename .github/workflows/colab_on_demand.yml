@@ -135,8 +135,8 @@ jobs:
         env:
           TASK_CODE: ${{ inputs.task_code }}
           SCRIPT_PATH: ${{ inputs.script_path }}
-          COLAB_GPU: ${{ inputs.accelerator || 'none' }}
-          COLAB_TIMEOUT_SECONDS: ${{ inputs.timeout_seconds || 900 }}
+          COLAB_GPU: ${{ inputs.accelerator || 'T4' }}
+          COLAB_TIMEOUT_SECONDS: ${{ inputs.timeout_seconds || 1800 }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
