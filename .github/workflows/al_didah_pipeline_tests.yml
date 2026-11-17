@@ -1,0 +1,26 @@
+name: AL-DIDAH pipeline static validation
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tasks/al_didah_pipeline.py"
+      - "tasks/current_task.py"
+      - "tasks/test_al_didah_pipeline.py"
+      - ".github/workflows/al_didah_pipeline_tests.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  static-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: python -m pip install -q numpy opencv-python-headless scipy
+      - name: Compile and run tracking tests
+        run: |
+          python -m py_compile tasks/al_didah_pipeline.py tasks/current_task.py
+          python -m unittest discover -s tasks -p 'test_*.py' -v
