@@ -327,9 +327,28 @@ def main() -> None:
     x11_call = "moderngl.create_context(standalone=True)"
     egl_call = "moderngl.create_context(standalone=True, backend='egl')"
     if x11_call in bake_src:
-        bake_py.write_text(bake_src.replace(x11_call, egl_call), encoding="utf-8")
+        bake_src = bake_src.replace(x11_call, egl_call)
     elif egl_call not in bake_src:
         raise RuntimeError("Could not locate ModernGL standalone context call for EGL patch.")
+    # Upstream TripoSR currently creates the UV-atlas sample grid on CPU, while
+    # scene_code is on CUDA. Move both the sample coordinates and returned RGB
+    # to explicit devices before grid_sample / NumPy conversion.
+    cpu_positions = "positions = torch.tensor(positions_texture.reshape(-1, 4)[:, :-1])"
+    gpu_positions = (
+        "positions = torch.as_tensor(positions_texture.reshape(-1, 4)[:, :-1], "
+        "device=scene_code.device, dtype=scene_code.dtype)"
+    )
+    cpu_colors = 'queried_grid["color"].numpy()'
+    safe_colors = 'queried_grid["color"].detach().float().cpu().numpy()'
+    if cpu_positions in bake_src:
+        bake_src = bake_src.replace(cpu_positions, gpu_positions)
+    elif gpu_positions not in bake_src:
+        raise RuntimeError("Could not locate TripoSR CPU UV-sample tensor creation.")
+    if cpu_colors in bake_src:
+        bake_src = bake_src.replace(cpu_colors, safe_colors)
+    elif safe_colors not in bake_src:
+        raise RuntimeError("Could not locate TripoSR GPU-to-NumPy texture conversion.")
+    bake_py.write_text(bake_src, encoding="utf-8")
     os.environ.setdefault("EGL_PLATFORM", "surfaceless")
     run([sys.executable,"-m","pip","install","-q","--upgrade","setuptools"])
     # torchmcubes' pyproject dynamically reads the installed torch version.
