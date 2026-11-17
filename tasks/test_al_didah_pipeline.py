@@ -37,6 +37,6 @@ class StaticTests(unittest.TestCase):
         self.assertIn('pose_overlay_preview_6fps.mp4',s)
         self.assertIn('overlay_stride',s)
         self.assertIn('RSS_peak_MB',s)
-    def test_release_version(self): self.assertIn('al-didah-production-v2',SCRIPT.read_text(encoding='utf-8'))
+    def test_publish_stages_are_instrumented(self):\n        s=SCRIPT.read_text(encoding='utf-8')\n        for marker in ['Publish stage 1/5','Publish stage 2/5','Publish stage 3/5','Publish stage 4/5','Publish stage 5/5']:\n            self.assertIn(marker,s)\n        main=s[s.index('def main():'): ]\n        self.assertNotIn('contact()',main)\n        self.assertIn('compresslevel=1',s)\n    def test_release_version(self): self.assertIn('al-didah-production-v2',SCRIPT.read_text(encoding='utf-8'))
 
 if __name__=='__main__': unittest.main(verbosity=2)
