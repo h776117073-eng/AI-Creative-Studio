@@ -305,8 +305,34 @@ def analyze(video,m,ss):
     cat=[]
     for tid,c in catalog.items():
         cat.append({"track_id":tid,"frames_detected":c["frames"],"first_frame":c["first"],"last_frame":c["last"],"duration_detected_sec":(c["last"]-c["first"])/m["fps"],"scene_ids":",".join(map(str,sorted(c["scene"]))),"mean_bbox_area":c["area"]/c["frames"],"mean_detection_confidence":c["conf"]/c["frames"],"mean_valid_keypoints":c["kp"]/c["frames"]})
-    cat.sort(key=lambda x:x["frames_detected"],reverse=True);pd.DataFrame(cat).to_csv(OUT/"track_catalog.csv",index=False)
-    total=m["frames"]; q={"source_frames":total,"processed_frames":fi,"all_frames_processed":fi==total,"frame_coverage":fi/max(1,total),"source_fps":m["fps"],"pose_model":"YOLO11n-Pose","imgsz":IMGSZ,"confidence":CONF,"detections":det_total,"frames_with_detection":frame_hits,"detection_frame_coverage":frame_hits/max(1,fi),"mean_valid_keypoints_per_detection":kpt_valid/max(1,det_total),"keypoint_valid_ratio":kpt_valid/max(1,kpt_total),"tracks":len(cat),"camera_samples":len(cams),"velocity_gap_limit_frames":2,"camera_method":"background Lucas-Kanade + RANSAC affine proxy","notes":["Anime poses may be missed by a human COCO-17 model.","Track IDs are shot-scoped and can split at occlusions/cuts.","Speed peaks are not asserted to be impacts.","2D poses are not 3D rig animation."]}
+    # Add transparent per-track QA flags; these are candidate filters, not identity verification.
+    for row in cat:
+        span=max(1,int(row["last_frame"])-int(row["first_frame"])+1)
+        occupancy=float(row["frames_detected"])/span
+        kp_ratio=float(row["mean_valid_keypoints"])/17.0
+        conf=float(row["mean_detection_confidence"])
+        frame_count=int(row["frames_detected"])
+        candidate=bool(frame_count>=24 and kp_ratio>=0.70 and conf>=0.25 and occupancy>=0.35)
+        score=(0.25*min(frame_count/48.0,1.0))+(0.30*kp_ratio)+(0.25*conf)+(0.20*min(occupancy,1.0))
+        row["span_frames"]=span
+        row["detection_occupancy"]=occupancy
+        row["keypoint_completeness"]=kp_ratio
+        row["candidate_score_heuristic"]=score
+        row["candidate_for_manual_review"]=candidate
+        row["candidate_status"]="candidate_requires_visual_identity_review" if candidate else "not_qualified_by_heuristic"
+    cat.sort(key=lambda x:(x["candidate_for_manual_review"],x["candidate_score_heuristic"],x["frames_detected"]),reverse=True)
+    pd.DataFrame(cat).to_csv(OUT/"track_catalog.csv",index=False)
+    candidates=[x for x in cat if x["candidate_for_manual_review"]]
+    pd.DataFrame(candidates).to_csv(OUT/"track_quality_candidates.csv",index=False)
+    (OUT/"track_assignment_policy.json").write_text(json.dumps({
+        "status":"manual_identity_review_required",
+        "automatic_character_assignment":False,
+        "candidate_count":len(candidates),
+        "candidate_track_ids":[x["track_id"] for x in candidates],
+        "filter":{"min_detected_frames":24,"min_mean_keypoints":11.9,"min_detection_confidence":0.25,"min_detection_occupancy":0.35},
+        "warning":"These filters rank pose-track continuity only. They do not prove that a track is either requested character. Do not automatically map tracks to character reference images."
+    },indent=2),encoding="utf-8")
+    total=m["frames"]; q={"source_frames":total,"processed_frames":fi,"all_frames_processed":fi==total,"frame_coverage":fi/max(1,total),"source_fps":m["fps"],"pose_model":"YOLO11n-Pose","imgsz":IMGSZ,"confidence":CONF,"detections":det_total,"frames_with_detection":frame_hits,"detection_frame_coverage":frame_hits/max(1,fi),"mean_valid_keypoints_per_detection":kpt_valid/max(1,det_total),"keypoint_valid_ratio":kpt_valid/max(1,kpt_total),"tracks":len(cat),"tracks_candidate_for_manual_review":len(candidates),"camera_samples":len(cams),"velocity_gap_limit_frames":2,"camera_method":"background Lucas-Kanade + RANSAC affine proxy","notes":["Anime poses may be missed by a human COCO-17 model.","Track IDs are shot-scoped and can split at occlusions/cuts.","Speed peaks are not asserted to be impacts.","2D poses are not 3D rig animation.","Track candidate filters are heuristic only; identity mapping requires visual review."]}
     (OUT/"motion_quality.json").write_text(json.dumps(q,indent=2),encoding="utf-8")
     log(f"Full frame processing: {fi}/{total}; detections={det_total}; coverage={q['detection_frame_coverage']:.3f}; tracks={len(cat)}")
     return q,cat
@@ -378,7 +404,8 @@ def main():
     log("Stage: full-frame analysis returned; extracting audio")
     audio(video)
     log("Stage: audio complete; building provisional track map and manifests")
-    assignment={"status":"provisional_requires_visual_review","warning":"Map track IDs to the intended supplied characters after inspecting track_crops and overlay.","assignments":[{"track_id":x["track_id"],"character_id":f"CHAR_{i+1:02d}","provisional":True,"frames_detected":x["frames_detected"]} for i,x in enumerate(cat[:2])]}
+    policy=json.loads((OUT/"track_assignment_policy.json").read_text(encoding="utf-8"))
+    assignment={"status":"manual_identity_review_required","automatic_assignment":False,"character_ids":["CHAR_01","CHAR_02"],"candidate_track_ids":policy.get("candidate_track_ids",[]),"candidate_report":"track_quality_candidates.csv","reason":"Pose-track ranking cannot identify a requested character from still-image similarity alone; manual visual confirmation is required."}
     (OUT/"character_track_assignment.json").write_text(json.dumps(assignment,indent=2),encoding="utf-8")
     (OUT/"character_manifest.json").write_text(json.dumps(char_manifest,indent=2),encoding="utf-8")
     q["elapsed_seconds_before_publish"]=round(time.monotonic()-t,2);(OUT/"motion_quality.json").write_text(json.dumps(q,indent=2),encoding="utf-8")
