@@ -144,7 +144,7 @@ def rig_with_motius(glb: pathlib.Path, fbx: pathlib.Path, blender: pathlib.Path)
         "mesh_names": list(result.mesh_names),
         "joint_names": list(result.joint_names),
         "warnings": [str(x) for x in (result.warnings or [])],
-        "metadata": result.metadata,
+        "metadata": json.loads(json.dumps(result.metadata, default=str)),
     }
     if not fbx.is_file() or fbx.stat().st_size < 1000:
         raise RuntimeError("Motius returned without a valid FBX file.")
