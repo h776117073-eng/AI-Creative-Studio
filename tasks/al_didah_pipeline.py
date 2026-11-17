@@ -11,8 +11,8 @@ CHAR_IDS=["1uY_3X4RZceENv7ns6BV0PGVVzcVlyiaO","1snzt4jR2YiPoebpRjKa8sCqxAmW1KgtE
 CHAR_URLS=[f"https://raw.githubusercontent.com/{OWNER}/{REPO}/main/data/al_didah/character_1.jpg",f"https://raw.githubusercontent.com/{OWNER}/{REPO}/main/data/al_didah/character_2.jpg"]
 VIDEO_FALLBACK="https://youtu.be/d_qGO4GrbQM"
 IMGSZ=960; CONF=.10; KP_CONF=.12; BATCH=8; MAX_GAP=12; CAMERA_STEP=2
-BASE=Path("/content/al_didah_v2"); INP=BASE/"inputs"; OUT=BASE/"outputs"; KF=OUT/"keyframes"; CROPS=OUT/"track_crops"
-for p in (INP,OUT,KF,CROPS): p.mkdir(parents=True,exist_ok=True)
+BASE=Path("/content/al_didah_v2"); INP=BASE/"inputs"; OUT=BASE/"outputs"; KF=OUT/"keyframes"; CROPS=OUT/"track_crops"; CHAR_DIR=OUT/"character_assets"
+for p in (INP,OUT,KF,CROPS,CHAR_DIR): p.mkdir(parents=True,exist_ok=True)
 NAMES=["nose","left_eye","right_eye","left_ear","right_ear","left_shoulder","right_shoulder","left_elbow","right_elbow","left_wrist","right_wrist","left_hip","right_hip","left_knee","right_knee","left_ankle","right_ankle"]
 EDGES=[(5,6),(5,7),(7,9),(6,8),(8,10),(5,11),(6,12),(11,12),(11,13),(13,15),(12,14),(14,16),(0,5),(0,6),(1,2),(1,3),(2,4)]
 
@@ -301,7 +301,8 @@ def publish():
     for p in sorted(OUT.rglob("*")):
         if p.is_file() and p.name!="SHA256SUMS.json":inv.append({"path":str(p.relative_to(OUT)),"bytes":p.stat().st_size,"sha256":digest(p)})
     (OUT/"SHA256SUMS.json").write_text(json.dumps(inv,indent=2),encoding="utf-8")
-    hand={"project":"AL-DIDAH","version":2,"all_frames_processed":True,"video_metadata":json.loads((OUT/"video_metadata.json").read_text()),"quality":json.loads((OUT/"motion_quality.json").read_text()),"character_assignment":"character_track_assignment.json (provisional; human review required)","outputs":[x["path"] for x in inv]+["SHA256SUMS.json"],"limitations":["This is inverse analysis, not recovery of the original authoring source code.","No hidden 3D, fingers or source rigs are recovered from MP4.","Final anime render still requires character turnaround, rigging, key animation and compositing."]}
+    quality=json.loads((OUT/"motion_quality.json").read_text())
+    hand={"project":"AL-DIDAH","version":2,"all_frames_processed":bool(quality.get("all_frames_processed",False)),"video_metadata":json.loads((OUT/"video_metadata.json").read_text()),"quality":quality,"character_assignment":"character_track_assignment.json (provisional; human review required)","outputs":[x["path"] for x in inv]+["SHA256SUMS.json"],"limitations":["This is inverse analysis, not recovery of the original authoring source code.","No hidden 3D, fingers or source rigs are recovered from MP4.","Final anime render still requires character turnaround, rigging, key animation and compositing."]}
     (OUT/"production_handoff.json").write_text(json.dumps(hand,indent=2),encoding="utf-8")
     zpath=BASE/"AL-DIDAH-production-v2.zip"
     with zipfile.ZipFile(zpath,"w",zipfile.ZIP_DEFLATED,compresslevel=6) as z:
@@ -325,7 +326,10 @@ def main():
     t=time.monotonic();log("=== AL-DIDAH v2 full-frame run ===");install()
     video,chars=inputs();m=probe(video);(OUT/"video_metadata.json").write_text(json.dumps(m,indent=2))
     ss=scenes(video,m);char_manifest=prep_chars(chars)
-    q,cat=analyze(video,m,ss);audio(video);contact()
+    q,cat=analyze(video,m,ss)
+    if not q.get("all_frames_processed") or q.get("processed_frames") != q.get("source_frames"):
+        raise RuntimeError("Incomplete frame analysis: refusing to publish a partial release.")
+    audio(video);contact()
     assignment={"status":"provisional_requires_visual_review","warning":"Map track IDs to the intended supplied characters after inspecting track_crops and overlay.","assignments":[{"track_id":x["track_id"],"character_id":f"CHAR_{i+1:02d}","provisional":True,"frames_detected":x["frames_detected"]} for i,x in enumerate(cat[:2])]}
     (OUT/"character_track_assignment.json").write_text(json.dumps(assignment,indent=2),encoding="utf-8")
     (OUT/"character_manifest.json").write_text(json.dumps(char_manifest,indent=2),encoding="utf-8")
