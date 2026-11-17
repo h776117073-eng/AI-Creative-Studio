@@ -333,27 +333,36 @@ def publish():
     import requests
     token=os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN")
     if not token: raise RuntimeError("GitHub token unavailable for Release publishing.")
+    log("Publish stage 1/5: inventory and checksums")
     inv=[]
     for p in sorted(OUT.rglob("*")):
         if p.is_file() and p.name!="SHA256SUMS.json":inv.append({"path":str(p.relative_to(OUT)),"bytes":p.stat().st_size,"sha256":digest(p)})
+    total_bytes=sum(x["bytes"] for x in inv)
+    log(f"Publish inventory: {len(inv)} files / {total_bytes/1024/1024:.1f} MB")
     (OUT/"SHA256SUMS.json").write_text(json.dumps(inv,indent=2),encoding="utf-8")
     quality=json.loads((OUT/"motion_quality.json").read_text())
     hand={"project":"AL-DIDAH","version":2,"all_frames_processed":bool(quality.get("all_frames_processed",False)),"video_metadata":json.loads((OUT/"video_metadata.json").read_text()),"quality":quality,"character_assignment":"character_track_assignment.json (provisional; human review required)","outputs":[x["path"] for x in inv]+["SHA256SUMS.json"],"limitations":["This is inverse analysis, not recovery of the original authoring source code.","No hidden 3D, fingers or source rigs are recovered from MP4.","Final anime render still requires character turnaround, rigging, key animation and compositing."]}
     (OUT/"production_handoff.json").write_text(json.dumps(hand,indent=2),encoding="utf-8")
     zpath=BASE/"AL-DIDAH-production-v2.zip"
-    with zipfile.ZipFile(zpath,"w",zipfile.ZIP_DEFLATED,compresslevel=6) as z:
+    log("Publish stage 2/5: building release archive")
+    with zipfile.ZipFile(zpath,"w",zipfile.ZIP_DEFLATED,compresslevel=1) as z:
         for p in OUT.rglob("*"):
             if p.is_file():z.write(p,Path("outputs")/p.relative_to(OUT))
+    log(f"Publish archive ready: {zpath.stat().st_size/1024/1024:.1f} MB")
     api=f"https://api.github.com/repos/{OWNER}/{REPO}";h={"Authorization":f"Bearer {token}","Accept":"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"}
+    log("Publish stage 3/5: resolving GitHub release")
     r=requests.get(api+f"/releases/tags/{TAG}",headers=h,timeout=40)
     if r.status_code==404:r=requests.post(api+"/releases",headers=h,json={"tag_name":TAG,"name":"AL-DIDAH Full-Frame Motion Analysis v2","body":"Full source-frame analysis with shot-scoped tracks, per-joint curves, camera-motion proxy, character reference masters and QA overlay."},timeout=60)
     r.raise_for_status();rel=r.json(); upurl=rel["upload_url"].split("{")[0]
+    log(f"Publish release ready: {rel['html_url']}")
     for a in rel.get("assets",[]):
         if a["name"]==zpath.name:
             d=requests.delete(api+f"/releases/assets/{a['id']}",headers=h,timeout=30)
             if d.status_code not in (204,404):d.raise_for_status()
+    log("Publish stage 4/5: uploading release asset")
     with open(zpath,"rb") as f:u=requests.post(upurl+"?name="+zpath.name,headers={**h,"Content-Type":"application/zip"},data=f,timeout=1200)
     u.raise_for_status()
+    log(f"Publish stage 5/5: asset uploaded ({u.json().get('size')} bytes)")
     receipt={"release":rel["html_url"],"asset":u.json()["browser_download_url"],"bytes":u.json()["size"],"tag":TAG}
     (OUT/"release_receipt.json").write_text(json.dumps(receipt,indent=2),encoding="utf-8")
     log(f"GitHub Release uploaded: {receipt['asset']}")
@@ -362,15 +371,20 @@ def main():
     t=time.monotonic();log("=== AL-DIDAH v2 full-frame run ===");install()
     video,chars=inputs();m=probe(video);(OUT/"video_metadata.json").write_text(json.dumps(m,indent=2))
     ss=scenes(video,m);char_manifest=prep_chars(chars)
+    log("Stage: full-frame analysis starting")
     q,cat=analyze(video,m,ss)
     if not q.get("all_frames_processed") or q.get("processed_frames") != q.get("source_frames"):
         raise RuntimeError("Incomplete frame analysis: refusing to publish a partial release.")
-    audio(video);contact()
+    log("Stage: full-frame analysis returned; extracting audio")
+    audio(video)
+    log("Stage: audio complete; building provisional track map and manifests")
     assignment={"status":"provisional_requires_visual_review","warning":"Map track IDs to the intended supplied characters after inspecting track_crops and overlay.","assignments":[{"track_id":x["track_id"],"character_id":f"CHAR_{i+1:02d}","provisional":True,"frames_detected":x["frames_detected"]} for i,x in enumerate(cat[:2])]}
     (OUT/"character_track_assignment.json").write_text(json.dumps(assignment,indent=2),encoding="utf-8")
     (OUT/"character_manifest.json").write_text(json.dumps(char_manifest,indent=2),encoding="utf-8")
     q["elapsed_seconds_before_publish"]=round(time.monotonic()-t,2);(OUT/"motion_quality.json").write_text(json.dumps(q,indent=2),encoding="utf-8")
-    publish();log(f"=== COMPLETED in {time.monotonic()-t:.1f}s ===")
+    log("Stage: manifests ready; skipping optional contact-sheet montage to keep Colab post-processing lean")
+    publish()
+    log(f"=== COMPLETED in {time.monotonic()-t:.1f}s ===")
 
 if __name__=="__main__":
     try:main()
