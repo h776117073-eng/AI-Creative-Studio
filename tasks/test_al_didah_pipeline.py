@@ -9,7 +9,7 @@ class StaticTests(unittest.TestCase):
     def test_syntax(self): ast.parse(SCRIPT.read_text(encoding='utf-8'))
     def test_all_frames_and_tracking(self):
         s=SCRIPT.read_text(encoding='utf-8')
-        self.assertIn('TARGET_FPS = 24.0',s) if 'TARGET_FPS = 24.0' in s else self.assertIn('frame_idx+=1',s)
+        self.assertIn('fi+=1',s)
         self.assertIn('linear_sum_assignment',s)
         self.assertIn('MAX_GAP=12',s)
         self.assertNotIn('detection_index',s)
