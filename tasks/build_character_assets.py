@@ -129,7 +129,7 @@ def rig_with_motius(glb: pathlib.Path, fbx: pathlib.Path, blender: pathlib.Path)
     run([sys.executable, "-m", "pip", "install", "-q", "--no-deps", "-e", str(WORK / "Motius")])
     run([sys.executable, "-m", "pip", "install", "-q", "numpy>=2.1,<3", "scipy>=1.14",
          "trimesh>=4", "omegaconf>=2.3", "pydantic>=2", "PyYAML>=6", "imageio>=2.31", "mmengine>=0.7",
-         "huggingface_hub>=0.20", "requests>=2.31", "Pillow>=10"])
+         "huggingface_hub>=0.20,<1.0", "requests>=2.31", "Pillow>=10"])
     sys.path.insert(0, str(WORK / "Motius"))
     from motius.motion import auto_rig_character
     result = auto_rig_character(
@@ -199,23 +199,48 @@ for obj in meshes:
         max_influences=max(max_influences,len(influences))
 if total_vertices==0 or weighted_vertices/total_vertices < 0.90:
     raise RuntimeError("Insufficient skin weights: %.3f"%(weighted_vertices/max(1,total_vertices)))
-# Deformation smoke test: rotate an arm bone and compare the evaluated mesh bounds.
+# Deformation smoke test: measure actual per-vertex displacement, not the
+# character's global bounding box (which can stay unchanged after a local bend).
 scene.frame_set(1); bpy.context.view_layer.update()
-deps=bpy.context.evaluated_depsgraph_get()
-def bounds():
-    coords=[]
+def sample_deformed_vertices():
+    depsgraph=bpy.context.evaluated_depsgraph_get()
+    sampled={}
     for obj in meshes:
-        eo=obj.evaluated_get(deps); matw=eo.matrix_world
-        step=max(1, len(eo.data.vertices)//2500)
-        coords.extend([matw @ eo.data.vertices[idx].co for idx in range(0, len(eo.data.vertices), step)])
-    return [min(v[i] for v in coords) for i in range(3)]+[max(v[i] for v in coords) for i in range(3)]
-base=bounds()
-bone_name="L_Elbow" if "L_Elbow" in rig.pose.bones else "L_Shoulder"
-pb=rig.pose.bones[bone_name]; pb.rotation_mode="XYZ"; pb.rotation_euler[1]=math.radians(15)
-bpy.context.view_layer.update(); moved=bounds()
-deformation=max(abs(a-b) for a,b in zip(base,moved))
-pb.rotation_euler=(0,0,0); bpy.context.view_layer.update()
-if deformation < 1e-5: raise RuntimeError("Armature deformation smoke test did not move mesh vertices.")
+        eo=obj.evaluated_get(depsgraph)
+        verts=eo.data.vertices
+        step=max(1, len(verts)//2500)
+        indices=range(0, len(verts), step)
+        sampled[obj.name]=np.asarray(
+            [tuple(eo.matrix_world @ verts[idx].co) for idx in indices],
+            dtype=np.float64
+        )
+    return sampled
+base=sample_deformed_vertices()
+deformation=0.0
+tested_bones=[]
+# Bone-local Y is generally the long axis of a Blender bone (twist), so test
+# bend axes X and Z for both elbow and shoulder; reset after each isolated pose.
+for bone_name in ("L_Elbow", "L_Shoulder"):
+    if bone_name not in rig.pose.bones:
+        continue
+    pb=rig.pose.bones[bone_name]
+    pb.rotation_mode="XYZ"
+    for axis in (0, 2):
+        pb.rotation_euler=(0.0, 0.0, 0.0)
+        pb.rotation_euler[axis]=math.radians(20.0)
+        bpy.context.view_layer.update()
+        moved=sample_deformed_vertices()
+        delta=max(
+            float(np.linalg.norm(moved[name]-base[name], axis=1).max())
+            for name in base
+        )
+        deformation=max(deformation, delta)
+        tested_bones.append({"bone":bone_name,"axis":"XYZ"[axis],"max_vertex_delta":delta})
+        pb.rotation_euler=(0.0, 0.0, 0.0)
+        bpy.context.view_layer.update()
+if deformation < 1e-5:
+    raise RuntimeError("Armature deformation smoke test did not move mesh vertices.")
+
 # Pack image, render a neutral front orthographic preview.
 img.pack()
 scene.render.engine="BLENDER_EEVEE_NEXT"
