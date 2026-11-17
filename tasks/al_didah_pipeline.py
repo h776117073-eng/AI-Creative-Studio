@@ -269,7 +269,7 @@ def analyze(video,m,ss):
             batches.append(fr);idxs.append(fi);sids.append(sid);grays.append(gray)
             if len(batches)==BATCH:
                 rr=model.predict(source=batches,imgsz=IMGSZ,conf=CONF,iou=.55,device=0,verbose=False,save=False,batch=BATCH)
-                batch_done(rr,batches,idxs,sids,grays);bar.update(len(batches));del rr;del rr;batches=[];idxs=[];sids=[];grays=[]
+                batch_done(rr,batches,idxs,sids,grays);bar.update(len(batches));del rr;batches=[];idxs=[];sids=[];grays=[]
             fi+=1
         if batches:
             rr=model.predict(source=batches,imgsz=IMGSZ,conf=CONF,iou=.55,device=0,verbose=False,save=False,batch=len(batches))
