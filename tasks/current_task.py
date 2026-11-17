@@ -1,4 +1,4 @@
-"""GitHub Actions entry point: bootstrap the repository on Colab and run AL-DIDAH v2.4 bounded-memory full-frame run."""
+"""GitHub Actions entry point: bootstrap the repository on Colab and run AL-DIDAH v2.5 instrumented release run."""
 import pathlib
 import subprocess
 import sys
