@@ -200,6 +200,10 @@ def analyze(video,m,ss):
     raw=OUT/"pose_tracks.jsonl"; raw.unlink(missing_ok=True)
     motion_csv=OUT/"motion_curves.csv"; motion_csv.unlink(missing_ok=True)
     motion_columns=["frame","time","scene_id","track_id","joint","x","y","confidence","vx_px_s","vy_px_s","speed_px_s","ax_px_s2","ay_px_s2","smooth_x","smooth_y","observed"]
+    motion_file=open(motion_csv,"w",newline="",encoding="utf-8")
+    motion_writer=csv.DictWriter(motion_file,fieldnames=motion_columns)
+    motion_writer.writeheader(); motion_file.flush()
+    progress_path=OUT/"analysis_progress.json"
     active={}; catalog=defaultdict(lambda:{"frames":0,"first":None,"last":None,"area":0.,"conf":0.,"kp":0,"scene":set(),"best":-1})
     cams=[]; nextid=1; fi=0; sp=0; prevgray=None; prevsid=None; batches=[]; idxs=[]; sids=[]; grays=[]; frame_hits=0; det_total=0; kpt_valid=0; kpt_total=0; key_saved=set()
     bar=tqdm(total=m["frames"],desc="24fps full-frame analysis")
@@ -251,9 +255,10 @@ def analyze(video,m,ss):
         with open(raw,"a",encoding="utf-8") as f: f.write("\n".join(lines)+"\n")
         # Stream pose measurements to disk per batch; never retain all per-joint rows in RAM.
         if motion_chunk:
-            pd.DataFrame.from_records(motion_chunk,columns=motion_columns).to_csv(
-                motion_csv,mode="a",header=not motion_csv.exists(),index=False
-            )
+            motion_writer.writerows(motion_chunk)
+            motion_file.flush()
+        with open(progress_path,"w",encoding="utf-8") as pf:
+            json.dump({"last_frame":int(ids[-1]),"processed_frames":int(ids[-1])+1,"source_frames":int(m["frames"]),"progress":float((int(ids[-1])+1)/max(1,int(m["frames"])))},pf)
         del motion_chunk
     last={}; smooth={}
     try:
@@ -264,16 +269,20 @@ def analyze(video,m,ss):
             batches.append(fr);idxs.append(fi);sids.append(sid);grays.append(gray)
             if len(batches)==BATCH:
                 rr=model.predict(source=batches,imgsz=IMGSZ,conf=CONF,iou=.55,device=0,verbose=False,save=False,batch=BATCH)
-                batch_done(rr,batches,idxs,sids,grays);bar.update(len(batches));batches=[];idxs=[];sids=[];grays=[]
+                batch_done(rr,batches,idxs,sids,grays);bar.update(len(batches));del rr;del rr;batches=[];idxs=[];sids=[];grays=[]
             fi+=1
         if batches:
             rr=model.predict(source=batches,imgsz=IMGSZ,conf=CONF,iou=.55,device=0,verbose=False,save=False,batch=len(batches))
             batch_done(rr,batches,idxs,sids,grays);bar.update(len(batches))
-    finally: cap.release();wr.release();bar.close()
+    finally:
+        cap.release(); wr.release(); bar.close()
+        motion_file.flush(); motion_file.close()
+    try: del rr
+    except Exception: pass
+    if torch.cuda.is_available(): torch.cuda.empty_cache()
+    gc.collect()
     with open(raw,"rb") as a,gzip.open(OUT/"pose_tracks.jsonl.gz","wb",compresslevel=6) as b: shutil.copyfileobj(a,b)
     raw.unlink(missing_ok=True)
-    if not motion_csv.exists():
-        pd.DataFrame(columns=motion_columns).to_csv(motion_csv,index=False)
     pd.DataFrame.from_records(cams).to_csv(OUT/"camera_motion.csv",index=False)
     gc.collect()
     cat=[]
