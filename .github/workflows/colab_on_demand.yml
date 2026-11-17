@@ -9,7 +9,7 @@ on:
         type: string
         default: ""
       script_path:
-        description: "Optional Python file inside the repository"
+        description: "Optional Python or notebook file inside the repository"
         required: false
         type: string
         default: ""
@@ -39,7 +39,7 @@ on:
           r = subprocess.run(["nvidia-smi"], capture_output=True, text=True)
           print(r.stdout or r.stderr or "nvidia-smi unavailable; runtime may be CPU-only")
       script_path:
-        description: "Optional Python file in the repository, e.g. tasks/current_task.py"
+        description: "Optional Python or notebook file in the repository, e.g. notebooks/AL_DIDAH_Anime_Production.ipynb"
         required: false
         type: string
         default: ""
@@ -58,12 +58,10 @@ on:
   push:
     branches: [main]
     paths:
-      - "tasks/**"
-      - "scripts/colab_bridge.py"
-      - ".github/workflows/colab_on_demand.yml"
+      - "tasks/current_task.py"
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: colab-on-demand-${{ github.ref }}
@@ -139,6 +137,7 @@ jobs:
           SCRIPT_PATH: ${{ inputs.script_path }}
           COLAB_GPU: ${{ inputs.accelerator || 'none' }}
           COLAB_TIMEOUT_SECONDS: ${{ inputs.timeout_seconds || 900 }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           python scripts/colab_bridge.py

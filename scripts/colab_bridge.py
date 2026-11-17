@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Run a repository Python task on a remote Google Colab VM using Google's Colab CLI.
+"""Run a repository Python task or Jupyter notebook on a remote Google Colab VM using Google's Colab CLI.
 
-This is intentionally a headless CLI adapter, not the browser-bound Colab MCP
-server. GitHub Actions runners have no local Colab browser session to attach to.
-Credentials are read from GOOGLE_APPLICATION_CREDENTIALS and never logged.
+Includes a background heartbeat thread to prevent 30s silence timeouts on long-running stages
+and forwards GH_TOKEN (when present in the runner environment) for GitHub Release publishing.
 """
 from __future__ import annotations
 
 import json
 import os
 import pathlib
+import shlex
 import shutil
 import subprocess
 import sys
@@ -31,6 +31,51 @@ def utc_now() -> str:
 def write_result(lines: list[str]) -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     RESULT_FILE.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def notebook_to_python(nb_path: pathlib.Path) -> str:
+    nb = json.loads(nb_path.read_text(encoding="utf-8"))
+    blocks: list[str] = [
+        "import json, os, shlex, subprocess, sys",
+        "_ns = {'__name__': '__main__'}",
+    ]
+    for idx, cell in enumerate(nb.get("cells", [])):
+        if cell.get("cell_type") != "code":
+            continue
+        src = "".join(cell.get("source", []))
+        py_lines: list[str] = []
+        for line in src.splitlines():
+            s = line.lstrip()
+            if s.startswith("%pip "):
+                args = [a for a in shlex.split(s[5:]) if a != "-q"]
+                py_lines.append(f"subprocess.run([sys.executable, '-m', 'pip'] + {args!r}, check=True)")
+            elif s.startswith("!"):
+                py_lines.append(f"subprocess.run({s[1:]!r}, shell=True, check=True)")
+            else:
+                py_lines.append(line)
+        cell_code = "\n".join(py_lines)
+        if cell_code.strip():
+            blocks.append(f"print('\\n=== EXECUTING CELL {idx} ===', flush=True)")
+            blocks.append(f"exec(compile({cell_code!r}, 'cell_{idx}', 'exec'), _ns)")
+    blocks.append("print('\\n=== ALL CELLS COMPLETED SUCCESSFULLY ===', flush=True)")
+    return "\n".join(blocks)
+
+
+def wrap_with_heartbeat_and_env(inner_code: str, gh_token: str) -> str:
+    env_setup = f"os.environ['GH_TOKEN'] = {gh_token!r}\n" if gh_token else ""
+    return (
+        "import os, sys, threading\n"
+        + env_setup
+        + "_stop_hb = threading.Event()\n"
+        + "def _hb():\n"
+        + "    while not _stop_hb.wait(15):\n"
+        + "        print('[heartbeat] still running...', flush=True)\n"
+        + "threading.Thread(target=_hb, daemon=True).start()\n"
+        + "try:\n"
+        + "\n".join("    " + ln for ln in inner_code.splitlines())
+        + "\nfinally:\n"
+        + "    _stop_hb.set()\n"
+    )
 
 
 def main() -> int:
@@ -61,22 +106,28 @@ def main() -> int:
             candidate = (ROOT / requested_path).resolve()
             if candidate == ROOT or ROOT not in candidate.parents:
                 raise ValueError("script_path must resolve to a file inside this repository.")
-            if not candidate.is_file() or candidate.suffix.lower() != ".py":
-                raise FileNotFoundError(f"script_path must name an existing .py file: {requested_path}")
-            task_script = candidate
+            if not candidate.is_file() or candidate.suffix.lower() not in {".py", ".ipynb"}:
+                raise FileNotFoundError(f"script_path must name an existing .py or .ipynb file: {requested_path}")
+            if candidate.suffix.lower() == ".ipynb":
+                raw_code = notebook_to_python(candidate)
+            else:
+                raw_code = candidate.read_text(encoding="utf-8")
             task_label = str(candidate.relative_to(ROOT))
         elif inline_code.strip():
-            fd, temp_name = tempfile.mkstemp(prefix="colab_inline_", suffix=".py", dir=OUTPUT_DIR)
-            os.close(fd)
-            temp_script = pathlib.Path(temp_name)
-            temp_script.write_text(inline_code, encoding="utf-8")
-            task_script = temp_script
+            raw_code = inline_code
             task_label = "workflow_dispatch.task_code"
         elif DEFAULT_SCRIPT.is_file():
-            task_script = DEFAULT_SCRIPT
+            raw_code = DEFAULT_SCRIPT.read_text(encoding="utf-8")
             task_label = "tasks/current_task.py"
         else:
             raise FileNotFoundError("No task_code or script_path was supplied and tasks/current_task.py is missing.")
+
+        gh_token = os.environ.get("GH_TOKEN", "").strip() or os.environ.get("GITHUB_TOKEN", "").strip()
+        wrapped_code = wrap_with_heartbeat_and_env(raw_code, gh_token)
+        fd, temp_name = tempfile.mkstemp(prefix="colab_task_", suffix=".py", dir=OUTPUT_DIR)
+        os.close(fd)
+        temp_script = pathlib.Path(temp_name)
+        temp_script.write_text(wrapped_code, encoding="utf-8")
 
         timeout = int(os.environ.get("COLAB_TIMEOUT_SECONDS", "900"))
         if timeout < 30:
@@ -89,7 +140,7 @@ def main() -> int:
             if gpu not in allowed:
                 raise ValueError("COLAB_GPU must be one of none, T4, L4, A100, or H100.")
             command.extend(["--gpu", allowed[gpu]])
-        command.append(str(task_script))
+        command.append(str(temp_script))
 
         log.extend([
             f"Task: {task_label}",
@@ -114,6 +165,9 @@ def main() -> int:
             )
             stdout = proc.stdout or ""
             stderr = proc.stderr or ""
+            if gh_token:
+                stdout = stdout.replace(gh_token, "***")
+                stderr = stderr.replace(gh_token, "***")
             if stdout:
                 print("===== Colab stdout / CLI output =====", flush=True)
                 print(stdout, end="" if stdout.endswith("\n") else "\n", flush=True)
@@ -131,6 +185,9 @@ def main() -> int:
         except subprocess.TimeoutExpired as exc:
             out = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
             err = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+            if gh_token:
+                out = out.replace(gh_token, "***")
+                err = err.replace(gh_token, "***")
             log.extend(["RESULT: TIMEOUT", f"Timeout after {timeout} seconds.", out, err])
             raise RuntimeError(f"Colab execution exceeded {timeout} seconds.") from exc
 
