@@ -322,9 +322,18 @@ def main() -> None:
     if not TRIPOSR.exists():
         run(["git","clone","--depth","1","https://github.com/VAST-AI-Research/TripoSR.git",str(TRIPOSR)])
     run([sys.executable,"-m","pip","install","-q","--upgrade","setuptools"])
-    run([sys.executable,"-m","pip","install","-q","-r","requirements.txt"],cwd=TRIPOSR)
-    # Reinstall CUDA-compatible torchmcubes after dependencies, as upstream recommends.
-    run([sys.executable,"-m","pip","install","-q","--upgrade","git+https://github.com/tatsy/torchmcubes.git"])
+    # torchmcubes' pyproject dynamically reads the installed torch version.
+    # Install the remaining TripoSR dependencies first, then compile torchmcubes
+    # without PEP-517 build isolation so it sees Colab's preinstalled CUDA PyTorch.
+    requirements = (TRIPOSR / "requirements.txt").read_text(encoding="utf-8").splitlines()
+    requirements = [line for line in requirements if not line.strip().startswith("git+https://github.com/tatsy/torchmcubes")]
+    filtered_requirements = WORK / "triposr-requirements-no-torchmcubes.txt"
+    filtered_requirements.write_text("\\n".join(requirements) + "\\n", encoding="utf-8")
+    run([sys.executable,"-m","pip","install","-q","-r",str(filtered_requirements)])
+    run([sys.executable,"-m","pip","install","-q","cmake>=3.24","ninja","scikit-build-core>=1.0","pybind11>=2.10"])
+    run([sys.executable,"-m","pip","install","-q","--no-build-isolation","git+https://github.com/tatsy/torchmcubes.git"])
+    import torchmcubes
+    log("torchmcubes import verified after build against Colab PyTorch.")
     from PIL import Image
     names=[
         ("CHAR_01","Character 01 — black suit and red tie",inputs/"char_01.jpg"),
