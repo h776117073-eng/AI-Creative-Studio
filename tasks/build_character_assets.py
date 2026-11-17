@@ -328,7 +328,7 @@ def main() -> None:
     requirements = (TRIPOSR / "requirements.txt").read_text(encoding="utf-8").splitlines()
     requirements = [line for line in requirements if not line.strip().startswith("git+https://github.com/tatsy/torchmcubes")]
     filtered_requirements = WORK / "triposr-requirements-no-torchmcubes.txt"
-    filtered_requirements.write_text("\\n".join(requirements) + "\\n", encoding="utf-8")
+    filtered_requirements.write_text("\n".join(requirements) + "\n", encoding="utf-8")
     run([sys.executable,"-m","pip","install","-q","-r",str(filtered_requirements)])
     run([sys.executable,"-m","pip","install","-q","cmake>=3.24","ninja","scikit-build-core>=1.0","pybind11>=2.10"])
     run([sys.executable,"-m","pip","install","-q","--no-build-isolation","git+https://github.com/tatsy/torchmcubes.git"])
