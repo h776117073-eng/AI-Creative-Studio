@@ -20,6 +20,12 @@ class StaticTests(unittest.TestCase):
         s=SCRIPT.read_text(encoding='utf-8')
         self.assertIn('"vx":vx,"vy":vy',s)
         self.assertIn('old.get("vx") is not None and old.get("vy") is not None',s)
+    def test_motion_rows_are_streamed(self):
+        s=SCRIPT.read_text(encoding='utf-8')
+        self.assertIn('motion_writer.writerows(motion_chunk)',s)
+        self.assertIn('analysis_progress.json',s)
+        self.assertNotIn('motion=[]',s)
+        self.assertNotIn('pd.DataFrame(motion)',s)
     def test_release_version(self): self.assertIn('al-didah-production-v2',SCRIPT.read_text(encoding='utf-8'))
 
 if __name__=='__main__': unittest.main(verbosity=2)
