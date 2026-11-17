@@ -129,7 +129,7 @@ def rig_with_motius(glb: pathlib.Path, fbx: pathlib.Path, blender: pathlib.Path)
     run([sys.executable, "-m", "pip", "install", "-q", "--no-deps", "-e", str(WORK / "Motius")])
     run([sys.executable, "-m", "pip", "install", "-q", "numpy>=2.1,<3", "scipy>=1.14",
          "trimesh>=4", "omegaconf>=2.3", "pydantic>=2", "PyYAML>=6", "imageio>=2.31", "mmengine>=0.7",
-         "requests>=2.31", "Pillow>=10"])
+         "huggingface_hub>=0.20", "requests>=2.31", "Pillow>=10"])
     sys.path.insert(0, str(WORK / "Motius"))
     from motius.motion import auto_rig_character
     result = auto_rig_character(
@@ -206,7 +206,8 @@ def bounds():
     coords=[]
     for obj in meshes:
         eo=obj.evaluated_get(deps); matw=eo.matrix_world
-        coords.extend([matw @ v.co for v in eo.data.vertices[::max(1,len(eo.data.vertices)//2500)]])
+        step=max(1, len(eo.data.vertices)//2500)
+        coords.extend([matw @ eo.data.vertices[idx].co for idx in range(0, len(eo.data.vertices), step)])
     return [min(v[i] for v in coords) for i in range(3)]+[max(v[i] for v in coords) for i in range(3)]
 base=bounds()
 bone_name="L_Elbow" if "L_Elbow" in rig.pose.bones else "L_Shoulder"
