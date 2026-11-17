@@ -128,7 +128,7 @@ def rig_with_motius(glb: pathlib.Path, fbx: pathlib.Path, blender: pathlib.Path)
         run(["git", "clone", "--depth", "1", "https://github.com/ZeyuLing/Motius.git", str(WORK / "Motius")])
     run([sys.executable, "-m", "pip", "install", "-q", "--no-deps", "-e", str(WORK / "Motius")])
     run([sys.executable, "-m", "pip", "install", "-q", "numpy>=2.1,<3", "scipy>=1.14",
-         "trimesh>=4", "omegaconf>=2.3", "pydantic>=2", "PyYAML>=6", "imageio>=2.31",
+         "trimesh>=4", "omegaconf>=2.3", "pydantic>=2", "PyYAML>=6", "imageio>=2.31", "mmengine>=0.7",
          "requests>=2.31", "Pillow>=10"])
     sys.path.insert(0, str(WORK / "Motius"))
     from motius.motion import auto_rig_character
