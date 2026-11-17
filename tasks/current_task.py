@@ -1,5 +1,4 @@
 """GitHub Actions entry point: bootstrap the repository on Colab and run AL-DIDAH v2."""
-from __future__ import annotations
 import pathlib
 import subprocess
 import sys
