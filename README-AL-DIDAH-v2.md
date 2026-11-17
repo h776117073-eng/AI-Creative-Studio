@@ -25,7 +25,7 @@ The workflow requires repository secret `COLAB_CREDENTIALS` with Google ADC JSON
 - `motion_curves.csv`: per-track per-joint measurements and derivatives.
 - `camera_motion.csv`: background camera-motion estimates.
 - `track_catalog.csv`, `track_crops/`, `keyframes/`.
-- `full_frame_pose_overlay.mp4`.
+- `pose_overlay_preview_6fps.mp4`.
 - Character reference originals, transparent masters and preview.
 - Video/scene metadata, audio, quality report and SHA-256 inventory.
 
