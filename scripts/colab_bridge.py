@@ -61,8 +61,13 @@ def notebook_to_python(nb_path: pathlib.Path) -> str:
     return "\n".join(blocks)
 
 
-def wrap_with_heartbeat_and_env(inner_code: str, gh_token: str) -> str:
-    env_setup = f"os.environ['GH_TOKEN'] = {gh_token!r}\n" if gh_token else ""
+def wrap_with_heartbeat_and_env(inner_code: str, forwarded_env: dict[str, str]) -> str:
+    # Secrets are injected into the ephemeral Colab script, never printed to logs.
+    env_setup = "".join(
+        f"os.environ[{key!r}] = {value!r}\n"
+        for key, value in forwarded_env.items()
+        if value
+    )
     return (
         "import os, sys, threading\n"
         + env_setup
@@ -122,8 +127,13 @@ def main() -> int:
         else:
             raise FileNotFoundError("No task_code or script_path was supplied and tasks/current_task.py is missing.")
 
-        gh_token = os.environ.get("GH_TOKEN", "").strip() or os.environ.get("GITHUB_TOKEN", "").strip()
-        wrapped_code = wrap_with_heartbeat_and_env(raw_code, gh_token)
+        forwarded_env = {
+            "GH_TOKEN": os.environ.get("GH_TOKEN", "").strip() or os.environ.get("GITHUB_TOKEN", "").strip(),
+            "CHAR_01_IMAGE_B64": os.environ.get("CHAR_01_IMAGE_B64", "").strip(),
+            "CHAR_02_IMAGE_B64": os.environ.get("CHAR_02_IMAGE_B64", "").strip(),
+        }
+        wrapped_code = wrap_with_heartbeat_and_env(raw_code, forwarded_env)
+        redaction_values = [value for value in forwarded_env.values() if value]
         fd, temp_name = tempfile.mkstemp(prefix="colab_task_", suffix=".py", dir=OUTPUT_DIR)
         os.close(fd)
         temp_script = pathlib.Path(temp_name)
@@ -165,9 +175,9 @@ def main() -> int:
             )
             stdout = proc.stdout or ""
             stderr = proc.stderr or ""
-            if gh_token:
-                stdout = stdout.replace(gh_token, "***")
-                stderr = stderr.replace(gh_token, "***")
+            for secret_value in redaction_values:
+                stdout = stdout.replace(secret_value, "***REDACTED***")
+                stderr = stderr.replace(secret_value, "***REDACTED***")
             if stdout:
                 print("===== Colab stdout / CLI output =====", flush=True)
                 print(stdout, end="" if stdout.endswith("\n") else "\n", flush=True)
@@ -185,9 +195,9 @@ def main() -> int:
         except subprocess.TimeoutExpired as exc:
             out = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
             err = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
-            if gh_token:
-                out = out.replace(gh_token, "***")
-                err = err.replace(gh_token, "***")
+            for secret_value in redaction_values:
+                out = out.replace(secret_value, "***REDACTED***")
+                err = err.replace(secret_value, "***REDACTED***")
             log.extend(["RESULT: TIMEOUT", f"Timeout after {timeout} seconds.", out, err])
             raise RuntimeError(f"Colab execution exceeded {timeout} seconds.") from exc
 
