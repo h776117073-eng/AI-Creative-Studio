@@ -10,7 +10,7 @@ VIDEO_ID="1ygz0hzQNH70VsP8-2DCSFO9OFPg7JB4_"
 CHAR_IDS=["1uY_3X4RZceENv7ns6BV0PGVVzcVlyiaO","1snzt4jR2YiPoebpRjKa8sCqxAmW1KgtE"]
 CHAR_URLS=[f"https://raw.githubusercontent.com/{OWNER}/{REPO}/main/data/al_didah/character_1.jpg",f"https://raw.githubusercontent.com/{OWNER}/{REPO}/main/data/al_didah/character_2.jpg"]
 VIDEO_FALLBACK="https://youtu.be/d_qGO4GrbQM"
-IMGSZ=960; CONF=.10; KP_CONF=.12; BATCH=8; MAX_GAP=12; CAMERA_STEP=2
+IMGSZ=960; CONF=.10; KP_CONF=.12; BATCH=8; MAX_GAP=12; CAMERA_STEP=4
 BASE=Path("/content/al_didah_v2"); INP=BASE/"inputs"; OUT=BASE/"outputs"; KF=OUT/"keyframes"; CROPS=OUT/"track_crops"; CHAR_DIR=OUT/"character_assets"
 for p in (INP,OUT,KF,CROPS,CHAR_DIR): p.mkdir(parents=True,exist_ok=True)
 NAMES=["nose","left_eye","right_eye","left_ear","right_ear","left_shoulder","right_shoulder","left_elbow","right_elbow","left_wrist","right_wrist","left_hip","right_hip","left_knee","right_knee","left_ankle","right_ankle"]
@@ -195,9 +195,12 @@ def analyze(video,m,ss):
     from tqdm import tqdm
     model=YOLO("yolo11n-pose.pt"); cap=cv2.VideoCapture(str(video))
     if not cap.isOpened(): raise RuntimeError("Could not reopen source video.")
-    overlay=OUT/"full_frame_pose_overlay.mp4"; wr=cv2.VideoWriter(str(overlay),cv2.VideoWriter_fourcc(*"mp4v"),m["fps"],(m["width"],m["height"]))
+    overlay=OUT/"pose_overlay_preview_6fps.mp4"
+    overlay_fps=min(6.0,float(m["fps"])); overlay_stride=max(1,int(round(float(m["fps"])/overlay_fps)))
+    wr=cv2.VideoWriter(str(overlay),cv2.VideoWriter_fourcc(*"mp4v"),overlay_fps,(m["width"],m["height"]))
     if not wr.isOpened(): raise RuntimeError("VideoWriter not available.")
-    raw=OUT/"pose_tracks.jsonl"; raw.unlink(missing_ok=True)
+    pose_gz_path=OUT/"pose_tracks.jsonl.gz"; pose_gz_path.unlink(missing_ok=True)
+    pose_gz=gzip.open(pose_gz_path,"wt",encoding="utf-8",compresslevel=3)
     motion_csv=OUT/"motion_curves.csv"; motion_csv.unlink(missing_ok=True)
     motion_columns=["frame","time","scene_id","track_id","joint","x","y","confidence","vx_px_s","vy_px_s","speed_px_s","ax_px_s2","ay_px_s2","smooth_x","smooth_y","observed"]
     motion_file=open(motion_csv,"w",newline="",encoding="utf-8")
@@ -218,6 +221,11 @@ def analyze(video,m,ss):
         for res,fr,ix,sid,sg in zip(results,ims,ids,scene_ids,small_grays):
             if prevsid is not None and sid!=prevsid: active.clear(); prevgray=None
             ds=detections(res,fr); ds,nextid=associate(ds,active,nextid,ix,sid)
+            if ix % 24 == 0:
+                live_ids=set(active.keys())
+                stale_keys=[key for key in last.keys() if key[0] not in live_ids]
+                for stale_key in stale_keys:
+                    last.pop(stale_key,None); smooth.pop(stale_key,None)
             persons=[]; boxes=[]
             if ds: frame_hits+=1
             for d in ds:
@@ -239,26 +247,33 @@ def analyze(video,m,ss):
             lines.append(json.dumps({"frame":ix,"time":ix/m["fps"],"scene_id":sid,"persons":persons,"detection_count":len(persons)},separators=(",",":")))
             if sid not in key_saved and persons:
                 cv2.imwrite(str(KF/f"scene_{sid:03d}_first_detection.jpg"),fr,[cv2.IMWRITE_JPEG_QUALITY,94]); key_saved.add(sid)
-            ov=fr.copy()
-            for person in persons:
-                x1,y1,x2,y2=map(int,person["bbox"]); cv2.rectangle(ov,(x1,y1),(x2,y2),(255,180,0),2); cv2.putText(ov,f"ID {person['track_id']}",(x1,max(20,y1-5)),cv2.FONT_HERSHEY_SIMPLEX,.6,(255,180,0),2)
-                points=person["keypoints"]
-                for a,b in EDGES:
-                    if points[a] and points[b]: cv2.line(ov,(int(points[a]["x"]),int(points[a]["y"])),(int(points[b]["x"]),int(points[b]["y"])),(20,230,255),2,cv2.LINE_AA)
-                for p in points:
-                    if p: cv2.circle(ov,(int(p["x"]),int(p["y"])),3,(50,255,80),-1)
-            wr.write(ov)
+            if ix % overlay_stride == 0:
+                ov=fr.copy()
+                for person in persons:
+                    x1,y1,x2,y2=map(int,person["bbox"]); cv2.rectangle(ov,(x1,y1),(x2,y2),(255,180,0),2); cv2.putText(ov,f"ID {person['track_id']}",(x1,max(20,y1-5)),cv2.FONT_HERSHEY_SIMPLEX,.6,(255,180,0),2)
+                    points=person["keypoints"]
+                    for a,b in EDGES:
+                        if points[a] and points[b]: cv2.line(ov,(int(points[a]["x"]),int(points[a]["y"])),(int(points[b]["x"]),int(points[b]["y"])),(20,230,255),2,cv2.LINE_AA)
+                    for p in points:
+                        if p: cv2.circle(ov,(int(p["x"]),int(p["y"])),3,(50,255,80),-1)
+                wr.write(ov); del ov
             if ix%CAMERA_STEP==0:
                 if prevgray is not None and prevsid==sid: cams.append({"frame":ix,"time":ix/m["fps"],"scene_id":sid,**camera(prevgray,sg,[[z*.5 for z in b] for b in boxes])})
                 else: cams.append({"frame":ix,"time":ix/m["fps"],"scene_id":sid,"dx":None,"dy":None,"scale":None,"rotation_deg":None,"inliers":0,"status":"scene_start"})
             prevgray=sg.copy(); prevsid=sid
-        with open(raw,"a",encoding="utf-8") as f: f.write("\n".join(lines)+"\n")
+        pose_gz.write("\n".join(lines)+"\n"); pose_gz.flush()
         # Stream pose measurements to disk per batch; never retain all per-joint rows in RAM.
         if motion_chunk:
             motion_writer.writerows(motion_chunk)
             motion_file.flush()
         with open(progress_path,"w",encoding="utf-8") as pf:
             json.dump({"last_frame":int(ids[-1]),"processed_frames":int(ids[-1])+1,"source_frames":int(m["frames"]),"progress":float((int(ids[-1])+1)/max(1,int(m["frames"])))},pf)
+        if int(ids[-1]) % 1000 < BATCH:
+            import resource
+            rss_mb=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024
+            gpu_mem_mb=(torch.cuda.memory_allocated()/1024**2) if torch.cuda.is_available() else 0
+            log(f"Checkpoint frame={int(ids[-1])+1}/{int(m['frames'])}; RSS_peak_MB={rss_mb:.1f}; CUDA_allocated_MB={gpu_mem_mb:.1f}; live_tracks={len(active)}")
+            gc.collect()
         del motion_chunk
     last={}; smooth={}
     try:
@@ -277,12 +292,14 @@ def analyze(video,m,ss):
     finally:
         cap.release(); wr.release(); bar.close()
         motion_file.flush(); motion_file.close()
+        pose_gz.flush(); pose_gz.close()
     try: del rr
     except Exception: pass
-    if torch.cuda.is_available(): torch.cuda.empty_cache()
+    try: del model
+    except Exception: pass
+    if torch.cuda.is_available():
+        torch.cuda.synchronize(); torch.cuda.empty_cache()
     gc.collect()
-    with open(raw,"rb") as a,gzip.open(OUT/"pose_tracks.jsonl.gz","wb",compresslevel=6) as b: shutil.copyfileobj(a,b)
-    raw.unlink(missing_ok=True)
     pd.DataFrame.from_records(cams).to_csv(OUT/"camera_motion.csv",index=False)
     gc.collect()
     cat=[]
