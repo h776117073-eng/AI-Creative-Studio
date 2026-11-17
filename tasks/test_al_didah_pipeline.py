@@ -44,6 +44,13 @@ class StaticTests(unittest.TestCase):
         main=s[s.index('def main():'): ]
         self.assertNotIn('contact()',main)
         self.assertIn('compresslevel=1',s)
+    def test_track_candidates_do_not_claim_identity(self):
+        s=SCRIPT.read_text(encoding='utf-8')
+        self.assertIn('track_quality_candidates.csv',s)
+        self.assertIn('manual_identity_review_required',s)
+        self.assertIn('automatic_character_assignment',s)
+        self.assertIn('"automatic_assignment":False',s)
+        self.assertIn('candidate_for_manual_review',s)
     def test_release_version(self): self.assertIn('al-didah-production-v2',SCRIPT.read_text(encoding='utf-8'))
 
 if __name__=='__main__': unittest.main(verbosity=2)
