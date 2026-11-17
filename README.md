@@ -91,3 +91,15 @@ For the long, multi-speaker Arabic dubbing task, use the notebook below. It runs
 The final video is written as `Billionaire Granny Takes Home Fainted Pregnant Woman - Arabic Dub.mp4`, along with Arabic subtitles, `progress.json`, `progress.log`, and `quality_report.json`.
 
 **Scope note:** this pipeline creates an Arabic multi-speaker *audio dub* and aligns utterance timings. It does not implement face tracking and mouth animation, so its quality report explicitly marks visual lip-sync as not performed. It is not certified as Netflix-level without human language/voice review and a separate visual lip-sync pass.
+
+
+## Two-character 3D assets — single-image reconstruction and rigging
+
+- **[Open the CHARACTER_3D_ASSETS_v1 Colab notebook](https://colab.research.google.com/github/h776117073-eng/AI-Creative-Studio/blob/main/notebooks/CHARACTER_3D_ASSETS_v1.ipynb)**
+- **Workflow:** [Build rigged character assets](../../actions/workflows/build_character_assets.yml)
+
+Run the workflow from GitHub Actions and select T4 or a higher Colab accelerator. It reconstructs each private reference image locally with TripoSR, bakes an albedo texture, converts the mesh through Blender, and applies the local Motius SMPL22 template rig with capsule skin weights. The outputs include rigged GLB, FBX, editable BLEND, preview PNGs, per-character QA JSON, a COCO-17/SMPL22 mapping contract, SHA256 manifest, and a ZIP bundle published as a GitHub Release.
+
+The portraits are passed to Colab as repository Actions secrets and are not included in public Git commits or release assets. The local rigging path does not send the portraits to the public Make-It-Animatable service.
+
+**Limitations:** single-front-view reconstruction hallucinates unseen rear/side geometry; face, fingers, cloth and hair are not separately rigged. The deterministic template rig is a structural baseline, not a production-deformation guarantee. Inspect the previews and bend tests before animation. The mapping contract does not automatically identify these characters in the reverse-analysis video's existing tracks.
