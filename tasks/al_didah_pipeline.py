@@ -190,7 +190,7 @@ def prep_chars(paths):
     return arr
 
 def analyze(video,m,ss):
-    import cv2,numpy as np,torch
+    import cv2,numpy as np,torch,pandas as pd,gc,csv
     from ultralytics import YOLO
     from tqdm import tqdm
     model=YOLO("yolo11n-pose.pt"); cap=cv2.VideoCapture(str(video))
@@ -198,8 +198,10 @@ def analyze(video,m,ss):
     overlay=OUT/"full_frame_pose_overlay.mp4"; wr=cv2.VideoWriter(str(overlay),cv2.VideoWriter_fourcc(*"mp4v"),m["fps"],(m["width"],m["height"]))
     if not wr.isOpened(): raise RuntimeError("VideoWriter not available.")
     raw=OUT/"pose_tracks.jsonl"; raw.unlink(missing_ok=True)
+    motion_csv=OUT/"motion_curves.csv"; motion_csv.unlink(missing_ok=True)
+    motion_columns=["frame","time","scene_id","track_id","joint","x","y","confidence","vx_px_s","vy_px_s","speed_px_s","ax_px_s2","ay_px_s2","smooth_x","smooth_y","observed"]
     active={}; catalog=defaultdict(lambda:{"frames":0,"first":None,"last":None,"area":0.,"conf":0.,"kp":0,"scene":set(),"best":-1})
-    motion=[]; cams=[]; nextid=1; fi=0; sp=0; prevgray=None; prevsid=None; batches=[]; idxs=[]; sids=[]; grays=[]; frame_hits=0; det_total=0; kpt_valid=0; kpt_total=0; key_saved=set()
+    cams=[]; nextid=1; fi=0; sp=0; prevgray=None; prevsid=None; batches=[]; idxs=[]; sids=[]; grays=[]; frame_hits=0; det_total=0; kpt_valid=0; kpt_total=0; key_saved=set()
     bar=tqdm(total=m["frames"],desc="24fps full-frame analysis")
     def sid_of(i):
         nonlocal sp
@@ -208,6 +210,7 @@ def analyze(video,m,ss):
     def batch_done(results,ims,ids,scene_ids,small_grays):
         nonlocal nextid,prevgray,prevsid,frame_hits,det_total,kpt_valid,kpt_total
         lines=[]
+        motion_chunk=[]
         for res,fr,ix,sid,sg in zip(results,ims,ids,scene_ids,small_grays):
             if prevsid is not None and sid!=prevsid: active.clear(); prevgray=None
             ds=detections(res,fr); ds,nextid=associate(ds,active,nextid,ix,sid)
@@ -227,7 +230,7 @@ def analyze(video,m,ss):
                         dt=(ix-old["frame"])/m["fps"]; vx=(p["x"]-old["x"])/dt; vy=(p["y"]-old["y"])/dt; speed=math.hypot(vx,vy)
                         if old.get("vx") is not None and old.get("vy") is not None: ax=(vx-old["vx"])/dt; ay=(vy-old["vy"])/dt
                     oldsm=smooth.get(key); sx=p["x"] if oldsm is None else .55*p["x"]+.45*oldsm[0]; sy=p["y"] if oldsm is None else .55*p["y"]+.45*oldsm[1]; smooth[key]=(sx,sy)
-                    motion.append({"frame":ix,"time":ix/m["fps"],"scene_id":sid,"track_id":tid,"joint":NAMES[j],"x":p["x"],"y":p["y"],"confidence":p["confidence"],"vx_px_s":vx,"vy_px_s":vy,"speed_px_s":speed,"ax_px_s2":ax,"ay_px_s2":ay,"smooth_x":sx,"smooth_y":sy,"observed":True})
+                    motion_chunk.append({"frame":ix,"time":ix/m["fps"],"scene_id":sid,"track_id":tid,"joint":NAMES[j],"x":p["x"],"y":p["y"],"confidence":p["confidence"],"vx_px_s":vx,"vy_px_s":vy,"speed_px_s":speed,"ax_px_s2":ax,"ay_px_s2":ay,"smooth_x":sx,"smooth_y":sy,"observed":True})
                     last[key]={"frame":ix,"x":p["x"],"y":p["y"],"vx":vx,"vy":vy}
             lines.append(json.dumps({"frame":ix,"time":ix/m["fps"],"scene_id":sid,"persons":persons,"detection_count":len(persons)},separators=(",",":")))
             if sid not in key_saved and persons:
@@ -246,6 +249,12 @@ def analyze(video,m,ss):
                 else: cams.append({"frame":ix,"time":ix/m["fps"],"scene_id":sid,"dx":None,"dy":None,"scale":None,"rotation_deg":None,"inliers":0,"status":"scene_start"})
             prevgray=sg.copy(); prevsid=sid
         with open(raw,"a",encoding="utf-8") as f: f.write("\n".join(lines)+"\n")
+        # Stream pose measurements to disk per batch; never retain all per-joint rows in RAM.
+        if motion_chunk:
+            pd.DataFrame.from_records(motion_chunk,columns=motion_columns).to_csv(
+                motion_csv,mode="a",header=not motion_csv.exists(),index=False
+            )
+        del motion_chunk
     last={}; smooth={}
     try:
         while True:
@@ -263,9 +272,10 @@ def analyze(video,m,ss):
     finally: cap.release();wr.release();bar.close()
     with open(raw,"rb") as a,gzip.open(OUT/"pose_tracks.jsonl.gz","wb",compresslevel=6) as b: shutil.copyfileobj(a,b)
     raw.unlink(missing_ok=True)
-    import pandas as pd
-    pd.DataFrame(motion).to_csv(OUT/"motion_curves.csv",index=False)
-    pd.DataFrame(cams).to_csv(OUT/"camera_motion.csv",index=False)
+    if not motion_csv.exists():
+        pd.DataFrame(columns=motion_columns).to_csv(motion_csv,index=False)
+    pd.DataFrame.from_records(cams).to_csv(OUT/"camera_motion.csv",index=False)
+    gc.collect()
     cat=[]
     for tid,c in catalog.items():
         cat.append({"track_id":tid,"frames_detected":c["frames"],"first_frame":c["first"],"last_frame":c["last"],"duration_detected_sec":(c["last"]-c["first"])/m["fps"],"scene_ids":",".join(map(str,sorted(c["scene"]))),"mean_bbox_area":c["area"]/c["frames"],"mean_detection_confidence":c["conf"]/c["frames"],"mean_valid_keypoints":c["kp"]/c["frames"]})
