@@ -331,6 +331,7 @@ def main() -> None:
         if not line.strip().startswith("git+https://github.com/tatsy/torchmcubes")
         and not line.strip().startswith("Pillow==")
         and not line.strip().startswith("xatlas==")
+        and line.strip() != "rembg"
         and line.strip() != "gradio"
     ]
     # The upstream pins Pillow 10.1 and xatlas 0.0.9 predate the Colab
@@ -339,6 +340,9 @@ def main() -> None:
     filtered_requirements = WORK / "triposr-requirements-no-torchmcubes.txt"
     filtered_requirements.write_text("\n".join(requirements) + "\n", encoding="utf-8")
     run([sys.executable,"-m","pip","install","-q","-r",str(filtered_requirements)])
+    # TripoSR imports rembg at startup; the package's base install leaves ONNX Runtime optional.
+    # Use the CPU extra for background removal while the 3D model inference remains on CUDA.
+    run([sys.executable,"-m","pip","install","-q","--upgrade","rembg[cpu]>=2.0.87","Pillow>=11.0,<13.0"])
     run([sys.executable,"-m","pip","install","-q","cmake>=3.24","ninja","scikit-build-core>=1.0","pybind11>=2.10"])
     run([sys.executable,"-m","pip","install","-q","--no-build-isolation","git+https://github.com/tatsy/torchmcubes.git"])
     import torchmcubes
