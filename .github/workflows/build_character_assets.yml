@@ -9,6 +9,10 @@ on:
         type: choice
         options: ["T4", "L4", "A100", "H100"]
         default: "T4"
+  push:
+    branches: ["main"]
+    paths:
+      - "tasks/build_character_assets.py"
 
 permissions:
   contents: write
@@ -18,6 +22,6 @@ jobs:
     uses: ./.github/workflows/colab_on_demand.yml
     with:
       script_path: notebooks/CHARACTER_3D_ASSETS_v1.ipynb
-      accelerator: ${{ inputs.accelerator }}
+      accelerator: ${{ inputs.accelerator || 'T4' }}
       timeout_seconds: 2400
     secrets: inherit
