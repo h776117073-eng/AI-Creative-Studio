@@ -429,6 +429,7 @@ def main() -> None:
         # GLB sanity check: valid GLB magic, length field, and JSON chunk.
         raw=rigged_glb.read_bytes()
         # GLB v2 header: magic[0:4], version[4:8], total byte length[8:12].
+        # This validation is intentionally strict: reject truncated or malformed exports.
         # The previous check mistakenly compared the version field (2) to the
         # file size, causing every otherwise valid GLB to fail validation.
         glb_version = int.from_bytes(raw[4:8], "little") if len(raw) >= 8 else None
