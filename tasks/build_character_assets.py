@@ -154,7 +154,7 @@ def postprocess_fbx(fbx: pathlib.Path, texture: pathlib.Path, out_glb: pathlib.P
                     blend: pathlib.Path, preview: pathlib.Path, qa_json: pathlib.Path,
                     blender: pathlib.Path) -> dict:
     py = r'''
-import bpy, json, sys, math
+import bpy, json, sys, math, numpy as np
 from pathlib import Path
 fbx, texture_path, glb, blend, preview, qa_path = sys.argv[sys.argv.index("--")+1:]
 bpy.ops.object.select_all(action="SELECT"); bpy.ops.object.delete(use_global=False)
