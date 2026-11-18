@@ -428,8 +428,16 @@ def main() -> None:
                 raise RuntimeError(f"Missing/empty expected output: {p}")
         # GLB sanity check: valid GLB magic, length field, and JSON chunk.
         raw=rigged_glb.read_bytes()
-        if raw[:4]!=b"glTF" or int.from_bytes(raw[4:8],"little")!=len(raw):
-            raise RuntimeError(f"{char_id} GLB header/length validation failed.")
+        # GLB v2 header: magic[0:4], version[4:8], total byte length[8:12].
+        # The previous check mistakenly compared the version field (2) to the
+        # file size, causing every otherwise valid GLB to fail validation.
+        glb_version = int.from_bytes(raw[4:8], "little") if len(raw) >= 8 else None
+        declared_length = int.from_bytes(raw[8:12], "little") if len(raw) >= 12 else None
+        if raw[:4] != b"glTF" or glb_version != 2 or declared_length != len(raw):
+            raise RuntimeError(
+                f"{char_id} GLB validation failed: magic={raw[:4]!r}, "
+                f"version={glb_version}, declared_length={declared_length}, actual_length={len(raw)}."
+            )
         results.append({"character_id":char_id,"label":label,"source":"single uploaded front-view image",
                         "rig_method":"Motius local template + capsule skin weights",
                         "tripo_source_mesh_vertices":None,"motius":motius,"qa":qa,
