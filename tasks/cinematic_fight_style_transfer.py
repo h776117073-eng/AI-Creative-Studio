@@ -94,7 +94,6 @@ def extract_clip_and_frames(source_video, work_dir):
     audio_path = work_dir / "clip_audio.m4a"
     orig_clip = work_dir / "IpMan_Original_Clip.mp4"
 
-    # Extract trimmed original clip (for reference & side-by-side)
     run_cmd([
         "ffmpeg", "-y", "-ss", START_TIME, "-t", str(DURATION_SECONDS),
         "-i", str(source_video),
@@ -103,14 +102,12 @@ def extract_clip_and_frames(source_video, work_dir):
         str(orig_clip), "-loglevel", "error",
     ])
 
-    # Extract audio
     run_cmd([
         "ffmpeg", "-y", "-ss", START_TIME, "-t", str(DURATION_SECONDS),
         "-i", str(source_video), "-vn", "-c:a", "aac",
         str(audio_path), "-loglevel", "error",
     ])
 
-    # Extract raw PNG frames
     run_cmd([
         "ffmpeg", "-y", "-ss", START_TIME, "-t", str(DURATION_SECONDS),
         "-i", str(source_video),
@@ -137,6 +134,29 @@ def load_first_available_pipe(pipe_cls, model_candidates, **kwargs):
             print(f"⚠️ Could not load {model_id}: {exc}", flush=True)
             last_err = exc
     raise RuntimeError(f"All model candidates failed: {last_err}")
+
+
+def configure_pipeline_memory(pipe, device):
+    if hasattr(pipe, "enable_vae_slicing"):
+        try:
+            pipe.enable_vae_slicing()
+        except Exception as exc:
+            print(f"⚠️ enable_vae_slicing skipped: {exc}", flush=True)
+    elif hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_slicing"):
+        try:
+            pipe.vae.enable_slicing()
+        except Exception as exc:
+            print(f"⚠️ vae.enable_slicing skipped: {exc}", flush=True)
+
+    if device == "cuda":
+        if hasattr(pipe, "enable_model_cpu_offload"):
+            try:
+                pipe.enable_model_cpu_offload()
+                return pipe
+            except Exception as exc:
+                print(f"⚠️ enable_model_cpu_offload skipped: {exc}", flush=True)
+        return pipe.to(device)
+    return pipe.to(device)
 
 
 def render_style(style_name, raw_images, canny_frames, pose_frames, audio_path, work_dir, device):
@@ -196,7 +216,6 @@ def render_style(style_name, raw_images, canny_frames, pose_frames, audio_path, 
             motion_adapter=adapter,
             controlnet=[cn_canny, cn_pose],
             torch_dtype=dtype,
-            safety_checker=None,
         )
         mode_used = "AnimateDiffVideoToVideoControlNetPipeline"
     except Exception as exc:
@@ -210,7 +229,6 @@ def render_style(style_name, raw_images, canny_frames, pose_frames, audio_path, 
                 model_candidates,
                 motion_adapter=adapter,
                 torch_dtype=dtype,
-                safety_checker=None,
             )
             mode_used = "AnimateDiffVideoToVideoPipeline"
         except Exception as exc2:
@@ -230,20 +248,13 @@ def render_style(style_name, raw_images, canny_frames, pose_frames, audio_path, 
     pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(
         pipe.scheduler.config, beta_schedule="linear", steps_offset=1
     )
-    if device == "cuda":
-        pipe.enable_vae_slicing()
-        try:
-            pipe.enable_model_cpu_offload()
-        except Exception:
-            pipe = pipe.to(device)
-    else:
-        pipe = pipe.to(device)
+    pipe = configure_pipeline_memory(pipe, device)
 
     out_frames_dir = work_dir / f"out_frames_{style_name}"
     out_frames_dir.mkdir(parents=True, exist_ok=True)
     all_output_frames = []
     call_params = set(inspect.signature(pipe.__call__).parameters.keys())
-    print(f"🔧 Pipeline: {mode_used} | Model: {used_model}", flush=True)
+    print(f"🔧 Pipeline: {mode_used} | Model: {used_model} | Params: {sorted(call_params)}", flush=True)
 
     if mode_used in ("AnimateDiffVideoToVideoControlNetPipeline", "AnimateDiffVideoToVideoPipeline"):
         for start_idx in range(0, len(raw_images), CHUNK_SIZE):
