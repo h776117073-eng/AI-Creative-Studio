@@ -19,6 +19,9 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
+# Prevent Colab secret vault timeout on headless runs
+os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
+
 REPO_OWNER = "h776117073-eng"
 REPO_NAME = "AI-Creative-Studio"
 OUTPUT_SUBDIR = "output/cinematic_fight_transfer"
@@ -94,7 +97,6 @@ def extract_clip_and_frames(source_video, work_dir):
     audio_path = work_dir / "clip_audio.m4a"
     orig_clip = work_dir / "IpMan_Original_Clip.mp4"
 
-    # Extract trimmed original clip (for reference & side-by-side)
     run_cmd([
         "ffmpeg", "-y", "-ss", START_TIME, "-t", str(DURATION_SECONDS),
         "-i", str(source_video),
@@ -103,14 +105,12 @@ def extract_clip_and_frames(source_video, work_dir):
         str(orig_clip), "-loglevel", "error",
     ])
 
-    # Extract audio
     run_cmd([
         "ffmpeg", "-y", "-ss", START_TIME, "-t", str(DURATION_SECONDS),
         "-i", str(source_video), "-vn", "-c:a", "aac",
         str(audio_path), "-loglevel", "error",
     ])
 
-    # Extract raw PNG frames
     run_cmd([
         "ffmpeg", "-y", "-ss", START_TIME, "-t", str(DURATION_SECONDS),
         "-i", str(source_video),
@@ -139,26 +139,23 @@ def load_first_available_pipe(pipe_cls, model_candidates, **kwargs):
     raise RuntimeError(f"All model candidates failed: {last_err}")
 
 
-def configure_pipeline_memory(pipe, device):
+def enable_memory_optimizations(pipe, device):
+    if device != "cuda":
+        return pipe.to(device)
     if hasattr(pipe, "enable_vae_slicing"):
         pipe.enable_vae_slicing()
     elif hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_slicing"):
         pipe.vae.enable_slicing()
-
-    if hasattr(pipe, "enable_vae_tiling"):
-        pipe.enable_vae_tiling()
-    elif hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_tiling"):
-        pipe.vae.enable_tiling()
-
-    if device == "cuda":
-        if hasattr(pipe, "enable_model_cpu_offload"):
-            try:
-                pipe.enable_model_cpu_offload()
-                return pipe
-            except Exception as exc:
-                print(f"⚠️ enable_model_cpu_offload fallback ({exc}), using .to('cuda')", flush=True)
-        return pipe.to(device)
-    return pipe.to(device)
+    if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_tiling"):
+        try:
+            pipe.vae.enable_tiling()
+        except Exception:
+            pass
+    try:
+        pipe.enable_model_cpu_offload()
+    except Exception:
+        pipe = pipe.to(device)
+    return pipe
 
 
 def render_style(style_name, raw_images, canny_frames, pose_frames, audio_path, work_dir, device):
@@ -243,19 +240,20 @@ def render_style(style_name, raw_images, canny_frames, pose_frames, audio_path, 
                 model_candidates,
                 controlnet=cn_canny,
                 torch_dtype=dtype,
+                safety_checker=None,
             )
             mode_used = "StableDiffusionControlNetImg2ImgPipeline"
 
     pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(
         pipe.scheduler.config, beta_schedule="linear", steps_offset=1
     )
-    pipe = configure_pipeline_memory(pipe, device)
+    pipe = enable_memory_optimizations(pipe, device)
 
     out_frames_dir = work_dir / f"out_frames_{style_name}"
     out_frames_dir.mkdir(parents=True, exist_ok=True)
     all_output_frames = []
     call_params = set(inspect.signature(pipe.__call__).parameters.keys())
-    print(f"🔧 Pipeline: {mode_used} | Model: {used_model}", flush=True)
+    print(f"🔧 Pipeline: {mode_used} | Model: {used_model} | Call params: {sorted(call_params)}", flush=True)
 
     if mode_used in ("AnimateDiffVideoToVideoControlNetPipeline", "AnimateDiffVideoToVideoPipeline"):
         for start_idx in range(0, len(raw_images), CHUNK_SIZE):
