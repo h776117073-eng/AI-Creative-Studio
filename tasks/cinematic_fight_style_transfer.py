@@ -6,10 +6,8 @@ extracts raw frames, transforms them into both Anime and Disney/Pixar cinematic 
 with temporal consistency (AnimateDiff + ControlNet), creates a side-by-side comparison,
 and uploads all resulting videos directly to GitHub (h776117073-eng/AI-Creative-Studio).
 """
-from __future__ import annotations
 
 import base64
-import glob
 import inspect
 import json
 import os
@@ -37,12 +35,12 @@ OUTPUT_WIDTH = 512
 CHUNK_SIZE = 16
 
 
-def run_cmd(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
+def run_cmd(cmd, check=True):
     print(f"$ {' '.join(cmd)}", flush=True)
     return subprocess.run(cmd, check=check)
 
 
-def install_dependencies() -> None:
+def install_dependencies():
     print("📦 Installing dependencies...", flush=True)
     pkgs = [
         "diffusers>=0.30.0",
@@ -60,7 +58,7 @@ def install_dependencies() -> None:
     run_cmd([sys.executable, "-m", "pip", "install", "-q", "--upgrade", *pkgs])
 
 
-def download_fight_scene(work_dir: pathlib.Path) -> tuple[pathlib.Path, str]:
+def download_fight_scene(work_dir):
     video_path = work_dir / "source_fight.mp4"
     for url in YOUTUBE_URLS:
         print(f"⬇️ Trying YouTube URL: {url}", flush=True)
@@ -90,9 +88,7 @@ def download_fight_scene(work_dir: pathlib.Path) -> tuple[pathlib.Path, str]:
     raise RuntimeError("Failed to download fight scene from all YouTube candidate URLs.")
 
 
-def extract_clip_and_frames(
-    source_video: pathlib.Path, work_dir: pathlib.Path
-) -> tuple[list[pathlib.Path], pathlib.Path, pathlib.Path]:
+def extract_clip_and_frames(source_video, work_dir):
     raw_dir = work_dir / "raw_frames"
     raw_dir.mkdir(parents=True, exist_ok=True)
     audio_path = work_dir / "clip_audio.m4a"
@@ -129,7 +125,7 @@ def extract_clip_and_frames(
     return frames, audio_path, orig_clip
 
 
-def load_first_available_pipe(pipe_cls, model_candidates: list[str], **kwargs):
+def load_first_available_pipe(pipe_cls, model_candidates, **kwargs):
     last_err = None
     for model_id in model_candidates:
         try:
@@ -143,15 +139,7 @@ def load_first_available_pipe(pipe_cls, model_candidates: list[str], **kwargs):
     raise RuntimeError(f"All model candidates failed: {last_err}")
 
 
-def render_style(
-    style_name: str,
-    raw_images: list,
-    canny_frames: list,
-    pose_frames: list,
-    audio_path: pathlib.Path,
-    work_dir: pathlib.Path,
-    device: str,
-) -> tuple[pathlib.Path, str]:
+def render_style(style_name, raw_images, canny_frames, pose_frames, audio_path, work_dir, device):
     import torch
     from diffusers import ControlNetModel, EulerAncestralDiscreteScheduler, MotionAdapter
 
@@ -190,7 +178,6 @@ def render_style(
         )
         strength = 0.62
 
-    # Try AnimateDiff + ControlNet Video-to-Video first for best temporal consistency
     pipe = None
     mode_used = "unknown"
     used_model = ""
@@ -323,7 +310,6 @@ def render_style(
     ])
     print(f"🎉 Rendered {out_mp4.name} ({out_mp4.stat().st_size / 1024:.1f} KB)", flush=True)
 
-    # Free GPU VRAM before next style
     del pipe
     if device == "cuda":
         torch.cuda.empty_cache()
@@ -331,12 +317,7 @@ def render_style(
     return out_mp4, f"{mode_used} ({used_model})"
 
 
-def create_comparison_video(
-    orig_mp4: pathlib.Path,
-    anime_mp4: pathlib.Path,
-    disney_mp4: pathlib.Path,
-    work_dir: pathlib.Path,
-) -> pathlib.Path:
+def create_comparison_video(orig_mp4, anime_mp4, disney_mp4, work_dir):
     comp_mp4 = work_dir / "IpMan_Fight_Comparison_Original_Anime_Disney.mp4"
     run_cmd([
         "ffmpeg", "-y",
@@ -357,7 +338,7 @@ def create_comparison_video(
     return comp_mp4
 
 
-def github_upload_file(local_path: pathlib.Path, repo_path: str, commit_msg: str) -> str:
+def github_upload_file(local_path, repo_path, commit_msg):
     token = os.environ.get("GH_TOKEN", "").strip()
     if not token:
         raise RuntimeError("GH_TOKEN is not set in environment; cannot upload to GitHub.")
@@ -370,7 +351,6 @@ def github_upload_file(local_path: pathlib.Path, repo_path: str, commit_msg: str
         "User-Agent": "AI-Creative-Studio-Colab-Pipeline",
     }
 
-    # Check if file exists to grab SHA
     sha = None
     req_get = urllib.request.Request(api_url, headers=headers, method="GET")
     try:
@@ -399,7 +379,7 @@ def github_upload_file(local_path: pathlib.Path, repo_path: str, commit_msg: str
         return html_url
 
 
-def main() -> None:
+def main():
     t0 = time.time()
     install_dependencies()
 
