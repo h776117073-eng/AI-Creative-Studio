@@ -94,6 +94,7 @@ def extract_clip_and_frames(source_video, work_dir):
     audio_path = work_dir / "clip_audio.m4a"
     orig_clip = work_dir / "IpMan_Original_Clip.mp4"
 
+    # Extract trimmed original clip (for reference & side-by-side)
     run_cmd([
         "ffmpeg", "-y", "-ss", START_TIME, "-t", str(DURATION_SECONDS),
         "-i", str(source_video),
@@ -102,12 +103,14 @@ def extract_clip_and_frames(source_video, work_dir):
         str(orig_clip), "-loglevel", "error",
     ])
 
+    # Extract audio
     run_cmd([
         "ffmpeg", "-y", "-ss", START_TIME, "-t", str(DURATION_SECONDS),
         "-i", str(source_video), "-vn", "-c:a", "aac",
         str(audio_path), "-loglevel", "error",
     ])
 
+    # Extract raw PNG frames
     run_cmd([
         "ffmpeg", "-y", "-ss", START_TIME, "-t", str(DURATION_SECONDS),
         "-i", str(source_video),
@@ -138,15 +141,14 @@ def load_first_available_pipe(pipe_cls, model_candidates, **kwargs):
 
 def configure_pipeline_memory(pipe, device):
     if hasattr(pipe, "enable_vae_slicing"):
-        try:
-            pipe.enable_vae_slicing()
-        except Exception as exc:
-            print(f"⚠️ enable_vae_slicing skipped: {exc}", flush=True)
+        pipe.enable_vae_slicing()
     elif hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_slicing"):
-        try:
-            pipe.vae.enable_slicing()
-        except Exception as exc:
-            print(f"⚠️ vae.enable_slicing skipped: {exc}", flush=True)
+        pipe.vae.enable_slicing()
+
+    if hasattr(pipe, "enable_vae_tiling"):
+        pipe.enable_vae_tiling()
+    elif hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_tiling"):
+        pipe.vae.enable_tiling()
 
     if device == "cuda":
         if hasattr(pipe, "enable_model_cpu_offload"):
@@ -154,7 +156,7 @@ def configure_pipeline_memory(pipe, device):
                 pipe.enable_model_cpu_offload()
                 return pipe
             except Exception as exc:
-                print(f"⚠️ enable_model_cpu_offload skipped: {exc}", flush=True)
+                print(f"⚠️ enable_model_cpu_offload fallback ({exc}), using .to('cuda')", flush=True)
         return pipe.to(device)
     return pipe.to(device)
 
@@ -241,7 +243,6 @@ def render_style(style_name, raw_images, canny_frames, pose_frames, audio_path, 
                 model_candidates,
                 controlnet=cn_canny,
                 torch_dtype=dtype,
-                safety_checker=None,
             )
             mode_used = "StableDiffusionControlNetImg2ImgPipeline"
 
@@ -254,7 +255,7 @@ def render_style(style_name, raw_images, canny_frames, pose_frames, audio_path, 
     out_frames_dir.mkdir(parents=True, exist_ok=True)
     all_output_frames = []
     call_params = set(inspect.signature(pipe.__call__).parameters.keys())
-    print(f"🔧 Pipeline: {mode_used} | Model: {used_model} | Params: {sorted(call_params)}", flush=True)
+    print(f"🔧 Pipeline: {mode_used} | Model: {used_model}", flush=True)
 
     if mode_used in ("AnimateDiffVideoToVideoControlNetPipeline", "AnimateDiffVideoToVideoPipeline"):
         for start_idx in range(0, len(raw_images), CHUNK_SIZE):
