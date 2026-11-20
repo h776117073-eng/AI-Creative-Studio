@@ -63,6 +63,8 @@ class StaticTests(unittest.TestCase):
         self.assertNotIn(r"for obj in imported:\n",blender_source)
         self.assertNotIn('root.location +=',blender_source)
         self.assertIn('1.0-float(xy[1])/height',blender_source)
+        self.assertIn('if scene.world is None:',blender_source)
+        self.assertNotIn('scene.world.color=',blender_source.split('if scene.world is None:',1)[0])
 
     def test_release_version(self): self.assertIn('al-didah-production-v2',SCRIPT.read_text(encoding='utf-8'))
 
