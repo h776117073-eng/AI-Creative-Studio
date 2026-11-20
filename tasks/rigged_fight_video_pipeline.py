@@ -761,6 +761,46 @@ def publish_pose_cache(data_path,selection_path,source_sha):
   log(f"Persisted reusable pose cache asset: {res.json().get('name')}.")
  return release.get("html_url")
 
+def publish_blender_checkpoint(frame_dir, qa_file, run_error=None):
+ """Publish recoverable Blender scene and any rendered frames even if later stages fail."""
+ token=os.getenv("GH_TOKEN","").strip() or os.getenv("GITHUB_TOKEN","").strip()
+ blend=frame_dir/"rigged_fight_scene.blend"
+ frames=sorted(frame_dir.glob("frame_*.png"))
+ if not blend.is_file():
+  log("No Blender scene checkpoint exists; cannot publish a Blender recovery point.")
+  return None
+ if not token:
+  log("GH_TOKEN missing; cannot publish Blender checkpoint.")
+  return None
+ api=f"https://api.github.com/repos/{OWNER}/{REPO}"
+ headers={"Authorization":f"Bearer {token}","Accept":"application/vnd.github+json",
+          "X-GitHub-Api-Version":"2022-11-28"}
+ tag="rigged-fight-blender-checkpoint-"+datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+ payload={"tag_name":tag,"name":"Blender render checkpoint — "+tag,
+          "body":"Recoverable rigged Blender scene saved before rendering, plus available IK QA and any successfully rendered PNG frames. This is an intermediate checkpoint, not the final MP4.",
+          "draft":False,"prerelease":True}
+ response=requests.post(api+"/releases",headers=headers,json=payload,timeout=60)
+ response.raise_for_status()
+ release=response.json()
+ files=[blend]
+ if qa_file.is_file(): files.append(qa_file)
+ frame_zip=frame_dir/"partial_render_frames.zip"
+ if frames:
+  with zipfile.ZipFile(frame_zip,"w",zipfile.ZIP_DEFLATED,compresslevel=1) as archive:
+   for path in frames: archive.write(path,arcname=path.name)
+  files.append(frame_zip)
+ receipt=[]
+ for path in files:
+  upload=release["upload_url"].split("{",1)[0]
+  with path.open("rb") as stream:
+   res=requests.post(upload+"?name="+path.name,headers={**headers,"Content-Type":"application/octet-stream"},
+                     data=stream,timeout=(60,1200))
+  res.raise_for_status()
+  item=res.json()
+  receipt.append({"name":item["name"],"size":item["size"],"url":item["browser_download_url"]})
+ log("BLENDER_CHECKPOINT_RELEASE "+json.dumps({"url":release["html_url"],"rendered_png_count":len(frames),"assets":receipt,"error":str(run_error) if run_error else None}))
+ return {"url":release["html_url"],"assets":receipt,"rendered_png_count":len(frames)}
+
 def main():
  t0=time.time()
  log("=== Rigged fight video production: audit -> retarget -> render -> audio -> compression -> QA ===")
@@ -831,9 +871,18 @@ def main():
  frame_dir=OUT/"rendered_frames"; frame_dir.mkdir(parents=True,exist_ok=True)
  blender_py=WORK/"render_rigged_fight.py"; blender_py.write_text(BLENDER_SCRIPT,encoding="utf-8")
  blender_qa=OUT/"blender_ik_qa.json"
- run([str(blender),"--background","--factory-startup","--python-exit-code","1","--python",str(blender_py),"--",
-      str(assets["CHAR_01"]),str(assets["CHAR_02"]),str(data_path),str(frame_dir),str(blender_qa),
-      str(FPS_OUT),str(RENDER_WIDTH),str(RENDER_HEIGHT),str(ORTHO_WIDTH)],timeout=2400)
+ try:
+  run([str(blender),"--background","--factory-startup","--python-exit-code","1","--python",str(blender_py),"--",
+       str(assets["CHAR_01"]),str(assets["CHAR_02"]),str(data_path),str(frame_dir),str(blender_qa),
+       str(FPS_OUT),str(RENDER_WIDTH),str(RENDER_HEIGHT),str(ORTHO_WIDTH)],timeout=2400)
+ except Exception as blender_error:
+  try:
+   publish_blender_checkpoint(frame_dir,blender_qa,blender_error)
+  except Exception as checkpoint_error:
+   log(f"Blender checkpoint upload failed: {type(checkpoint_error).__name__}: {checkpoint_error}")
+  raise
+ # Publish an early recovery point before FFmpeg/audio/encoding steps.
+ publish_blender_checkpoint(frame_dir,blender_qa)
  if not blender_qa.exists(): raise RuntimeError("Blender did not produce the IK QA report.")
  with blender_qa.open(encoding="utf-8") as f: bqa=json.load(f)
  if not all((frame_dir/f"frame_{i:05d}.png").is_file() for i in range(1,len(render_frames)+1)):
