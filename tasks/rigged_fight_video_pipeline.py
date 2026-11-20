@@ -245,6 +245,59 @@ def choose_segment(rows,candidate_ids,fps,total_frames,width):
          "source_start_seconds":start/fps,"duration_seconds":length/fps,"fps":fps,
          "coverage":coverage,"motion_score":motion,"selection_score":score,"assignment_basis":"screen-left/screen-right only; visual identity is not established"},frames
 
+def fresh_pose_tracks(video,source_fps):
+ """Re-run higher-capacity pose tracking when the previous v2 tracks do not overlap."""
+ from ultralytics import YOLO
+ import numpy as np
+ log("Previous analysis contains no eligible two-person overlap; starting YOLO11x-Pose + BoT-SORT on the exact reference video at 12 FPS.")
+ model=YOLO("yolo11x-pose.pt")
+ rows={}; counts={}; frame_idx=0
+ stream=model.track(source=str(video),stream=True,persist=True,tracker="botsort.yaml",
+                    vid_stride=2,imgsz=960,conf=0.12,iou=0.45,classes=[0],device=0,
+                    verbose=False,max_det=12)
+ for result in stream:
+  persons={}
+  boxes=result.boxes
+  if boxes is not None and boxes.id is not None and result.keypoints is not None:
+   ids=boxes.id.detach().cpu().numpy().astype(int)
+   xyxy=boxes.xyxy.detach().cpu().numpy()
+   kxy=result.keypoints.xy.detach().cpu().numpy()
+   kconf=(result.keypoints.conf.detach().cpu().numpy() if result.keypoints.conf is not None
+          else np.ones(kxy.shape[:2],dtype=np.float32))
+   for i,tid in enumerate(ids):
+    points=[{"x":float(kxy[i,j,0]),"y":float(kxy[i,j,1]),"confidence":float(kconf[i,j])} for j in range(17)]
+    valid=int((kconf[i]>=CONF_MIN).sum())
+    if valid<MIN_KEYPOINTS: continue
+    p={"track_id":int(tid),"bbox":[float(x) for x in xyxy[i]],"keypoints":points,
+       "_valid":valid,"_scene":0}
+    persons[int(tid)]=p; counts[int(tid)]=counts.get(int(tid),0)+1
+  if persons: rows[frame_idx]=(0,persons)
+  frame_idx+=1
+  if frame_idx%200==0: log(f"Fresh pose tracking: {frame_idx} sampled frames, {len(counts)} IDs so far.")
+ if not rows: raise RuntimeError("YOLO11x-Pose + BoT-SORT produced no usable tracked people.")
+ candidates=sorted(counts,key=counts.get,reverse=True)
+ log(f"Fresh tracking completed: {frame_idx} sampled frames, {len(candidates)} track IDs, top counts={[(x,counts[x]) for x in candidates[:10]]}.")
+ return rows,candidates,source_fps/2.0
+
+def upsample_retarget_2x(frames):
+ """Convert 12 FPS retarget poses to 24 FPS with linear in-betweening."""
+ import copy
+ result=[]
+ def midpoint(a,b):
+  out=copy.deepcopy(a)
+  for ci in range(2):
+   aa=a["actors"][ci]; bb=b["actors"][ci]; oo=out["actors"][ci]
+   for name in aa["joints"]:
+    oo["joints"][name]=[(aa["joints"][name][k]+bb["joints"][name][k])*.5 for k in (0,1)]
+   oo["bbox"]=[(aa["bbox"][k]+bb["bbox"][k])*.5 for k in range(4)]
+   oo["yaw"]=(aa["yaw"]+bb["yaw"])*.5
+   oo["target_height_world"]=(aa.get("target_height_world",0)+bb.get("target_height_world",0))*.5
+  return out
+ for i,frame in enumerate(frames):
+  result.append(copy.deepcopy(frame))
+  result.append(midpoint(frame,frames[i+1]) if i+1<len(frames) else copy.deepcopy(frame))
+ return result
+
 def normalize_person(p):
  kps=p.get("keypoints") or []
  points=[]
@@ -532,9 +585,22 @@ def main():
  candidate_ids=read_candidates(catalog)
  rows,candidate_ids=read_track_data(pose,candidate_ids)
  log(f"Pose audit: candidate IDs={candidate_ids[:12]}; frames with people={len(rows)}; distinct visible tracks={len({t for _,ps in rows.values() for t in ps})}.")
- segment,raw_frames=choose_segment(rows,candidate_ids,actual_fps,int(meta["frames"]),int(meta["width"]))
+ tracking_fps=float(actual_fps)
+ try:
+  segment,raw_frames=choose_segment(rows,candidate_ids,tracking_fps,int(meta["frames"]),int(meta["width"]))
+  tracking_source="AL-DIDAH v2 pose_tracks.jsonl.gz"
+ except RuntimeError as previous:
+  log(f"AL-DIDAH tracks did not provide a continuous pair: {previous}")
+  rows,candidate_ids,tracking_fps=fresh_pose_tracks(video,float(actual_fps))
+  segment,raw_frames=choose_segment(rows,candidate_ids,tracking_fps,int(meta["frames"]),int(meta["width"]))
+  tracking_source="fresh YOLO11x-Pose + BoT-SORT on source video (12 FPS sample)"
  fps=float(actual_fps); width=int(meta["width"]); height=int(meta["height"])
  render_frames=make_retarget_frames(raw_frames,width,height)
+ if tracking_fps<fps-0.1:
+  render_frames=upsample_retarget_2x(render_frames)
+  segment["tracking_fps"]=tracking_fps
+  segment["source_start_frame"]=int(round(segment["source_start_seconds"]*fps))
+ segment["tracking_source"]=tracking_source
  # Fix output duration to the exact frame count; the audio is extracted from the same source interval.
  for rec in render_frames:
   for actor in rec["actors"]:
