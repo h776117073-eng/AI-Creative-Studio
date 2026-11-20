@@ -201,7 +201,7 @@ def choose_segment(rows,candidate_ids,fps,total_frames,width):
    for f in sf:
     for tid,p in rows[f][1].items(): bt.setdefault(tid,set()).add(f)
    ranked=sorted(bt,key=lambda tid:len(bt[tid]),reverse=True)[:12]
-   overlaps=sorted((len(bt[x]&bt[y]),x,y) for x,y in combinations(ranked,2),reverse=True)[:5]
+   overlaps=sorted([(len(bt[x]&bt[y]),x,y) for x,y in combinations(ranked,2)],reverse=True)[:5]
    diagnostics.append({"scene":scene,"frames":len(sf),"tracks":len(bt),"top_track_counts":{str(t):len(bt[t]) for t in ranked[:8]},"top_pair_overlaps":overlaps})
   log("No eligible segment. Track diagnostics: "+json.dumps(diagnostics[:20]))
   raise RuntimeError("No sufficiently continuous two-person pose window was found; track diagnostics were logged. No arbitrary video was substituted.")
