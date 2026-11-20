@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ONE: High School Heroes (2025) - Automated Colab Pipeline
-Downloads E01-E08 via aria2c, fetches Arabic subtitles from SubtitleCat/OpenSubtitles,
+Downloads E01-E08 via direct HTTP (downloadwella.com), fetches Arabic subtitles from SubtitleCat,
 compresses to 480p HEVC 10-bit (CRF 29) + Opus 48k with Cairo font,
 and uploads directly to GitHub Releases (Zero Google Drive).
 """
@@ -12,6 +12,7 @@ import json
 import shutil
 import requests
 import subprocess
+from bs4 import BeautifulSoup
 from urllib.parse import quote, urljoin
 
 GITHUB_OWNER = os.environ.get("GITHUB_OWNER", "h776117073-eng")
@@ -44,23 +45,49 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"
 }
 
-TRACKERS = (
-    "&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce"
-    "&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce"
-    "&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce"
-    "&tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce"
-)
-
-EPISODE_MAGNETS = [
-    (1, "magnet:?xt=urn:btih:eb11bfabae177f63548e05a6e126e1f5797fb867&dn=ONE_High_School_Heroes_E01" + TRACKERS),
-    (2, "magnet:?xt=urn:btih:b7ca9b52aba2b4f8b4c119520a39a7b34365e5fc&dn=ONE_High_School_Heroes_E02" + TRACKERS),
-    (3, "magnet:?xt=urn:btih:a263e102510be8b390ccfd2ddd2585a5ffde0b2c&dn=ONE_High_School_Heroes_E03" + TRACKERS),
-    (4, "magnet:?xt=urn:btih:cdcaf79b76f3390775328370c162eda932c7e519&dn=ONE_High_School_Heroes_E04" + TRACKERS),
-    (5, "magnet:?xt=urn:btih:d03b8fcb27da289e796c552dce0ebe5e27ecb31d&dn=ONE_High_School_Heroes_E05" + TRACKERS),
-    (6, "magnet:?xt=urn:btih:ad055db5fe494833cf3a73aa0ed95b305bdb243d&dn=ONE_High_School_Heroes_E06" + TRACKERS),
-    (7, "magnet:?xt=urn:btih:1ebca836704756b237a218f2a676669090f9d4cd&dn=ONE_High_School_Heroes_E07" + TRACKERS),
-    (8, "magnet:?xt=urn:btih:84fe54ee8562f0dd4241ee36524ee9df3e133936&dn=ONE_High_School_Heroes_E08" + TRACKERS),
+EPISODE_PAGES = [
+    (1, "https://downloadwella.com/hkzxnn7rf6it/One.High.School.Heroes.S01E01.(NKIRI.COM).mkv.html"),
+    (2, "https://downloadwella.com/69l051z6hpx6/One.High.School.Heroes.S01E02.(NKIRI.COM).mkv.html"),
+    (3, "https://downloadwella.com/4mxdmxs5geeu/One.High.School.Heroes.S01E03.(NKIRI.COM).mkv.html"),
+    (4, "https://downloadwella.com/m9cazxiijjjz/One.High.School.Heroes.S01E04.(NKIRI.COM).mkv.html"),
+    (5, "https://downloadwella.com/1vhxq8l0gtge/One.High.School.Heroes.S01E05.(NKIRI.COM).mkv.html"),
+    (6, "https://downloadwella.com/u7ws0o5s2y51/One.High.School.Heroes.S01E06.(NKIRI.COM).mkv.html"),
+    (7, "https://downloadwella.com/dz7537wbkgm8/One.High.School.Heroes.S01E07.(NKIRI.COM).mkv.html"),
+    (8, "https://downloadwella.com/lcwqri6nmquf/One.High.School.Heroes.S01E08.(NKIRI.COM).mkv.html"),
 ]
+
+
+def resolve_downloadwella(page_url: str) -> str:
+    sess = requests.Session()
+    sess.headers.update(HEADERS)
+    r = sess.get(page_url, timeout=30)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+    form = soup.find("form", attrs={"method": re.compile(r"post", re.I)})
+    if not form:
+        raise RuntimeError(f"No POST form found on {page_url}")
+    data = {}
+    for inp in form.find_all("input"):
+        name = inp.get("name")
+        if name:
+            data[name] = inp.get("value", "")
+    data.setdefault("op", "download2")
+    action = form.get("action") or page_url
+    post_url = urljoin(page_url, action)
+    pr = sess.post(post_url, data=data, headers={"Referer": page_url}, allow_redirects=False, timeout=30)
+    if pr.status_code in (301, 302, 303, 307, 308):
+        loc = pr.headers.get("Location", "")
+        if loc:
+            return urljoin(post_url, loc)
+    if pr.status_code == 200:
+        links = re.findall(r"https?://[^\s\"'<>]+\.mkv", pr.text)
+        if links:
+            return links[0]
+        psoup = BeautifulSoup(pr.text, "html.parser")
+        for a in psoup.find_all("a", href=True):
+            if ".mkv" in a["href"].lower() or "/d/" in a["href"].lower():
+                return urljoin(post_url, a["href"])
+    raise RuntimeError(f"Could not resolve direct MKV link from {page_url} (status {pr.status_code})")
 
 
 def get_or_create_release():
@@ -113,6 +140,7 @@ def download_subtitlecat_arabic_subs():
             timeout=15,
         )
         if r.status_code != 200:
+            print(f"SubtitleCat search returned {r.status_code}", flush=True)
             return
         pages = re.findall(r'href="(subs/[^"]+)"', r.text)
         found_eps = {}
@@ -134,9 +162,10 @@ def download_subtitlecat_arabic_subs():
                     with open(out_srt, "wb") as f:
                         f.write(sr.content)
                     found_eps[ep] = out_srt
-                    print(f"Downloaded Arabic sub E{ep:02d}: {out_srt}", flush=True)
+                    print(f"Downloaded Arabic sub E{ep:02d}: {out_srt} ({len(sr.content)} bytes)", flush=True)
             if len(found_eps) == 8:
                 break
+        print(f"Total Arabic subtitles fetched from SubtitleCat: {len(found_eps)}/8", flush=True)
     except Exception as e:
         print(f"SubtitleCat error: {e}", flush=True)
 
@@ -219,7 +248,7 @@ def main():
     uploaded = []
     errors = []
 
-    for ep_num, magnet in EPISODE_MAGNETS:
+    for ep_num, page_url in EPISODE_PAGES:
         asset_name = f"01_ONE_High_School_Heroes_2025_S01E{ep_num:02d}_480p_AR.mkv"
         out_file = os.path.join(OUT_DIR, asset_name)
 
@@ -230,49 +259,45 @@ def main():
 
         ep_raw_dir = os.path.join(RAW_DIR, f"ep_{ep_num:02d}")
         os.makedirs(ep_raw_dir, exist_ok=True)
-        print(f"\n[E{ep_num:02d}/08] Downloading via aria2c...", flush=True)
-        subprocess.run(
-            [
-                "aria2c",
-                "--seed-time=0",
-                "--bt-stop-timeout=300",
-                "--summary-interval=30",
-                "--max-connection-per-server=16",
-                "--split=16",
-                "--min-split-size=1M",
-                "--bt-max-peers=120",
-                "--dir",
-                ep_raw_dir,
-                magnet,
-            ],
-            check=False,
-        )
+        raw_file = os.path.join(ep_raw_dir, f"S01E{ep_num:02d}.mkv")
 
-        vids = [
-            f
-            for f in glob.glob(os.path.join(ep_raw_dir, "**", "*.*"), recursive=True)
-            if f.lower().endswith((".mkv", ".mp4", ".avi")) and os.path.getsize(f) > 50 * 1024 * 1024
-        ]
-        if not vids:
-            msg = f"E{ep_num:02d}: no video file downloaded (no seeders/timeout)"
-            print(msg, flush=True)
-            errors.append(msg)
-            shutil.rmtree(ep_raw_dir, ignore_errors=True)
-            continue
-
-        vid = vids[0]
-        embedded_srt = os.path.join(SUBS_DIR, f"embedded_E{ep_num:02d}.srt")
-        ext_srt = os.path.join(SUBS_DIR, f"S01E{ep_num:02d}_ar.srt")
-        if extract_embedded_arabic_sub(vid, embedded_srt):
-            sub_to_use = embedded_srt
-        elif os.path.exists(ext_srt):
-            sub_to_use = ext_srt
-        else:
-            sub_to_use = None
-
-        print(f"[E{ep_num:02d}/08] Compressing {os.path.basename(vid)} | sub: {os.path.basename(sub_to_use) if sub_to_use else 'none'}", flush=True)
         try:
-            compress_episode(vid, out_file, sub_to_use)
+            print(f"\n[E{ep_num:02d}/08] Resolving direct link from {page_url}...", flush=True)
+            direct_url = resolve_downloadwella(page_url)
+            print(f"[E{ep_num:02d}/08] Downloading via aria2c...", flush=True)
+            subprocess.run(
+                [
+                    "aria2c",
+                    "-x", "16",
+                    "-s", "16",
+                    "-k", "1M",
+                    "--max-tries=5",
+                    "--retry-wait=3",
+                    f"--user-agent={HEADERS['User-Agent']}",
+                    "--dir", ep_raw_dir,
+                    "--out", f"S01E{ep_num:02d}.mkv",
+                    direct_url,
+                ],
+                check=False,
+            )
+            if not os.path.exists(raw_file) or os.path.getsize(raw_file) < 20 * 1024 * 1024:
+                raise RuntimeError(f"Downloaded file missing or too small: {raw_file}")
+
+            raw_mb = os.path.getsize(raw_file) / (1024 * 1024)
+            embedded_srt = os.path.join(SUBS_DIR, f"embedded_E{ep_num:02d}.srt")
+            ext_srt = os.path.join(SUBS_DIR, f"S01E{ep_num:02d}_ar.srt")
+            if extract_embedded_arabic_sub(raw_file, embedded_srt):
+                sub_to_use = embedded_srt
+            elif os.path.exists(ext_srt):
+                sub_to_use = ext_srt
+            else:
+                sub_to_use = None
+
+            print(
+                f"[E{ep_num:02d}/08] Compressing ({raw_mb:.1f} MB) | sub: {os.path.basename(sub_to_use) if sub_to_use else 'none'}",
+                flush=True,
+            )
+            compress_episode(raw_file, out_file, sub_to_use)
             size_mb = os.path.getsize(out_file) / (1024 * 1024)
             dl_url = upload_asset_to_release(release_id, out_file, asset_name)
             print(f"Uploaded: {asset_name} ({size_mb:.1f} MB) -> {dl_url}", flush=True)
