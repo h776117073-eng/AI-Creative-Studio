@@ -580,7 +580,7 @@ def upload_release_asset(release,headers,path):
 def main():
  t0=time.time()
  log("=== Rigged fight video production: audit -> retarget -> render -> audio -> compression -> QA ===")
- run([sys.executable,"-m","pip","install","-q","gdown>=5.2","numpy>=1.26","Pillow>=10","requests>=2.32"])
+ run([sys.executable,"-m","pip","install","-q","gdown>=5.2","numpy>=1.26","Pillow>=10","requests>=2.32","ultralytics>=8.3,<9"])
  video,pose,catalog,meta,assets,actual_fps=get_inputs()
  candidate_ids=read_candidates(catalog)
  rows,candidate_ids=read_track_data(pose,candidate_ids)
@@ -600,6 +600,7 @@ def main():
   render_frames=upsample_retarget_2x(render_frames)
   segment["tracking_fps"]=tracking_fps
   segment["source_start_frame"]=int(round(segment["source_start_seconds"]*fps))
+  segment["source_end_frame"]=segment["source_start_frame"]+int(round((len(raw_frames)-1)*fps/tracking_fps))
  segment["tracking_source"]=tracking_source
  # Fix output duration to the exact frame count; the audio is extracted from the same source interval.
  for rec in render_frames:
@@ -691,7 +692,13 @@ def main():
               "fps":out_fps,"duration_seconds":out_dur,"frames":int(v.get("nb_frames") or expected),
               "audio_codec":aus[0].get("codec_name"),"audio_sample_rate":aus[0].get("sample_rate"),
               "audio_mean_volume_db":mean_db,"bytes":final.stat().st_size}
- qa={"status":"passed_technical_video_audio_decode_gates","created_utc":datetime.now(timezone.utc).isoformat(),
+ qa_gates={"video_decode":True,"audio_present_and_non_silent":bool(mean_db is not None and mean_db>-60),
+           "size_reduction_at_least_80_percent":bool(reduction>=0.80),
+           "ssim_at_least_0_97":bool(ssim>=0.97),
+           "ik_mean_endpoint_error_under_20px":bool(bqa["ik_endpoint_error_px"]["mean"]<20),
+           "ik_p95_endpoint_error_under_35px":bool(bqa["ik_endpoint_error_px"]["p95"]<35)}
+ qa_status="complete_all_gates" if all(qa_gates.values()) else "rendered_but_quality_gates_need_review"
+ qa={"status":qa_status,"quality_gates":qa_gates,"created_utc":datetime.now(timezone.utc).isoformat(),
      "source":{"drive_id":SOURCE_VIDEO_ID,"sha256":sha256(video),"fps":fps,"duration_seconds":float(meta["duration"]),
                "resolution":[meta["width"],meta["height"]]},
      "segment":selection,"render":{"fps":FPS_OUT,"frames":expected,"resolution":[RENDER_WIDTH,RENDER_HEIGHT],
