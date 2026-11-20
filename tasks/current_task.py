@@ -3,6 +3,7 @@ import pathlib
 import subprocess
 import sys
 
+# Pipeline source is pinned by the current main commit; this is a deliberate new production attempt.
 REPO_URL = "https://github.com/h776117073-eng/AI-Creative-Studio.git"
 REPO_DIR = pathlib.Path("/content/AI-Creative-Studio")
 
