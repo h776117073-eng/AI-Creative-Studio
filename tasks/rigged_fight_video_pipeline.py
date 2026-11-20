@@ -645,13 +645,20 @@ for idx,rec in enumerate(frames,1):
    err=(tail-target).length/pixel_scale
    errors.append(err)
    all_bone_errors.append({"frame":idx,"character":ci+1,"bone":bone_name,"endpoint_error_px":float(err)})
- # Render one frame to a numbered PNG. 
- scene.render.filepath=str(out_dir/f"frame_{idx:05d}.png")
- bpy.ops.render.render(write_still=True)
- if idx%12==0 or idx==len(frames): print(f"BLENDER_RENDER_PROGRESS {idx}/{len(frames)}",flush=True)
+ if idx%12==0 or idx==len(frames): print(f"BLENDER_KEYFRAME_PROGRESS {idx}/{len(frames)}",flush=True)
+# Persist the fully rigged, keyed Blender scene before expensive rendering.
 blend_path=out_dir/"rigged_fight_scene.blend"
+scene.frame_set(1)
 scene.render.filepath=str(out_dir/"frame_")
 bpy.ops.wm.save_as_mainfile(filepath=str(blend_path))
+print("BLENDER_SCENE_CHECKPOINT "+str(blend_path)+" "+str(blend_path.stat().st_size),flush=True)
+# Render frames in a second pass. Existing frames are reusable after a partial render.
+for render_idx in range(1,len(frames)+1):
+ scene.frame_set(render_idx)
+ scene.render.filepath=str(out_dir/f"frame_{render_idx:05d}.png")
+ bpy.ops.render.render(write_still=True)
+ if render_idx%4==0 or render_idx==len(frames):
+  print(f"BLENDER_RENDER_PROGRESS {render_idx}/{len(frames)}",flush=True)
 report={"frames":len(frames),"fps":fps,"resolution":[width,height],"characters":[
  {"id":f"CHAR_{i+1:02d}","mesh_objects":len(ch["meshes"]),"armature":ch["arm"].name,
   "mesh_height_world":ch["height"],"bone_count":len(ch["arm"].data.bones),"required_bones":"passed"} for i,ch in enumerate(characters)],
