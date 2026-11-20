@@ -356,12 +356,33 @@ def choose_segment_framewise(rows,fps,total_frames,width):
   raise RuntimeError("No four-second window contains two credible people in at least half its sampled frames.")
  score,coverage,motion,start,observed,mean_distance=best
  end=start+wanted
- # Fill gaps using nearest simultaneously observed pair, preserving left/right screen order.
+ # Fill gaps between observed pairs by linear interpolation. Use nearest endpoint only
+ # outside the first/last observation; this avoids one-frame jumps and frozen long gaps.
  output=[]
+ def interpolate_person(pa,pb,t):
+  aa=normalize_person(pa); bb=normalize_person(pb)
+  bbox=[aa["bbox"][k]*(1-t)+bb["bbox"][k]*t for k in range(4)]
+  kps=[]
+  for j in range(17):
+   kps.append([aa["keypoints"][j][axis]*(1-t)+bb["keypoints"][j][axis]*t
+               for axis in (0,1)]+[min(aa["keypoints"][j][2],bb["keypoints"][j][2])])
+  return {"bbox":bbox,"keypoints":kps,"valid":min(aa["valid"],bb["valid"])}
  for f in range(start,end):
-  nearest=min(observed,key=lambda x:abs(x-f))
-  pair=persons_by_frame[nearest]
-  output.append({"frame":f,"actors":[normalize_person(pair[0]),normalize_person(pair[1])]})
+  before=[x for x in observed if x<=f]
+  after=[x for x in observed if x>=f]
+  if before and after:
+   f0=max(before); f1=min(after)
+   if f0==f1:
+    pair=persons_by_frame[f0]
+    actors=[normalize_person(pair[0]),normalize_person(pair[1])]
+   else:
+    t=(f-f0)/(f1-f0); p0=persons_by_frame[f0]; p1=persons_by_frame[f1]
+    actors=[interpolate_person(p0[k],p1[k],t) for k in range(2)]
+  else:
+   nearest=min(observed,key=lambda x:abs(x-f))
+   pair=persons_by_frame[nearest]
+   actors=[normalize_person(pair[0]),normalize_person(pair[1])]
+  output.append({"frame":f,"actors":actors})
  segment={"scene_id":0,"track_ids":["framewise-left","framewise-right"],
           "source_start_frame":int(round(start*(total_frames/(max(frames)+1)))),
           "source_end_frame":int(round((end-1)*(total_frames/(max(frames)+1)))),
@@ -369,7 +390,9 @@ def choose_segment_framewise(rows,fps,total_frames,width):
           "coverage":coverage,"motion_score":motion,"selection_score":score,
           "mean_normalized_inter_actor_distance":mean_distance,
           "assignment_basis":"per-frame left-to-right detection; no persistent identity claim",
-          "observed_two_person_frames":len(observed),"window_sample_frames":wanted}
+          "observed_two_person_frames":len(observed),"window_sample_frames":wanted,
+          "coverage_ratio":coverage,"tracking_frame_rate":fps,
+          "selection_policy":"framewise top-two credible person detections sorted by horizontal center"}
  log(f"Framewise segment chosen: sampled frames {start}-{end-1}; co-visibility={coverage:.3f}; observed={len(observed)}/{wanted}; motion={motion:.4f}.")
  return segment,output
 
@@ -533,7 +556,8 @@ def import_character(path,label):
  arm=arms[0]
  root=bpy.data.objects.new(label+"_Root",None); scene.collection.objects.link(root)
  root.empty_display_type="PLAIN_AXES"; root.empty_display_size=.5
- for obj in imported:\n  if obj.parent not in imported: parent_preserve(obj,root)
+ for obj in imported:
+  if obj.parent not in imported: parent_preserve(obj,root)
  bones=set(arm.data.bones.keys())
  required=["Pelvis","L_Hip","R_Hip","Spine1","L_Knee","R_Knee","Spine2","L_Ankle","R_Ankle","Spine3","Neck","Head",
            "L_Shoulder","R_Shoulder","L_Elbow","R_Elbow","L_Wrist","R_Wrist"]
@@ -544,7 +568,10 @@ def import_character(path,label):
   for c in obj.bound_box: corners.append(obj.matrix_world @ Vector(c))
  height=max(p.z for p in corners)-min(p.z for p in corners)
  if height<=.05: raise RuntimeError(f"{label}: invalid mesh height {height}")
- return {"root":root,"arm":arm,"meshes":meshes,"height":height,"imported":imported}
+ pelvis_world=arm.matrix_world @ arm.data.bones["Pelvis"].head_local
+ pelvis_local=root.matrix_world.inverted() @ pelvis_world
+ return {"root":root,"arm":arm,"meshes":meshes,"height":height,"imported":imported,
+         "pelvis_local":pelvis_local.copy()}
 characters=[import_character(char_paths[0],"CHAR_01"),import_character(char_paths[1],"CHAR_02")]
 # Targets are in camera/world coordinates; hidden from the final render.
 for ci,ch in enumerate(characters):
@@ -571,8 +598,9 @@ for idx,rec in enumerate(frames,1):
   root.rotation_euler=(0,0,float(actor["yaw"]))
   bpy.context.view_layer.update()
   pelvis_target=world_point(joints["Pelvis"],depth)
-  pelvis_head=arm.matrix_world @ arm.data.bones["Pelvis"].head_local
-  root.location += (pelvis_target-pelvis_head)
+  # Set translation from the rest-pose pelvis pivot deterministically. Incremental
+  # += accumulated offsets across frames and caused the character to drift away.
+  root.location=pelvis_target-(root.rotation_euler.to_matrix() @ (ch["pelvis_local"]*scale))
   for name,obj in ch["targets"].items():
    xy=joints.get(name,joints["Head"])
    obj.location=world_point(xy,depth)
@@ -667,13 +695,10 @@ def main():
  except RuntimeError as previous:
   log(f"AL-DIDAH tracks did not provide a continuous pair: {previous}")
   rows,candidate_ids,tracking_fps=fresh_pose_tracks(video,float(actual_fps))
-  try:
-   segment,raw_frames=choose_segment(rows,candidate_ids,tracking_fps,int(meta["frames"]),int(meta["width"]))
-   tracking_source="fresh YOLO11x-Pose tracked detections on source video (12 FPS sample)"
-  except RuntimeError as track_pair_error:
-   log(f"Persistent person IDs fragmented: {track_pair_error}; switching to framewise two-person detections.")
-   segment,raw_frames=choose_segment_framewise(rows,tracking_fps,int(meta["frames"]),int(meta["width"]))
-   tracking_source="fresh YOLO11x-Pose direct per-frame detections; left/right assignment (12 FPS sample)"
+  # The direct detector assigns box indices anew for each frame, not stable IDs.
+  # Always select actors framewise after this fallback; never interpret indices 0/1 as tracks.
+  segment,raw_frames=choose_segment_framewise(rows,tracking_fps,int(meta["frames"]),int(meta["width"]))
+  tracking_source="fresh YOLO11x-Pose direct per-frame detections; screen-left/right assignment (12 FPS sample)"
  fps=float(actual_fps); width=int(meta["width"]); height=int(meta["height"])
  render_frames=make_retarget_frames(raw_frames,width,height)
  if tracking_fps<fps-0.1:
