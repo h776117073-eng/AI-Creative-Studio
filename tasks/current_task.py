@@ -21,7 +21,7 @@ else:
     )
 
 sys.path.insert(0, str(REPO_DIR))
-# Blender Python syntax, root transform and ground-plane corrections verified; rerun framewise 3D render.
+# Fix None-valued occluded pose joints during framewise interpolation; retry Blender production render.
 from tasks.rigged_fight_video_pipeline import main
 
 if __name__ == "__main__":
