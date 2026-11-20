@@ -367,8 +367,19 @@ def choose_segment_framewise(rows,fps,total_frames,width):
   bbox=[aa["bbox"][k]*(1-t)+bb["bbox"][k]*t for k in range(4)]
   kps=[]
   for j in range(17):
-   kps.append([aa["keypoints"][j][axis]*(1-t)+bb["keypoints"][j][axis]*t
-               for axis in (0,1)]+[min(aa["keypoints"][j][2],bb["keypoints"][j][2])])
+   p0=aa["keypoints"][j]; p1=bb["keypoints"][j]
+   xy=[]
+   for axis in (0,1):
+    v0=p0[axis]; v1=p1[axis]
+    if v0 is not None and v1 is not None:
+     xy.append(v0*(1-t)+v1*t)
+    elif v0 is not None:
+     xy.append(v0)
+    elif v1 is not None:
+     xy.append(v1)
+    else:
+     xy.append(None)
+   kps.append(xy+[min(p0[2],p1[2])])
   return {"bbox":bbox,"keypoints":kps,"valid":min(aa["valid"],bb["valid"])}
  for f in range(start,end):
   before=[x for x in observed if x<=f]
