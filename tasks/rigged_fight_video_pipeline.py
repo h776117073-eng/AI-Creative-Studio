@@ -30,8 +30,8 @@ SEGMENT_SECONDS=4.0
 RENDER_WIDTH=1280
 RENDER_HEIGHT=720
 ORTHO_WIDTH=12.0
-MIN_KEYPOINTS=9
-CONF_MIN=0.12
+MIN_KEYPOINTS=5
+CONF_MIN=0.05
 MAX_CRF=28
 
 def log(msg):
@@ -249,34 +249,38 @@ def fresh_pose_tracks(video,source_fps):
  """Re-run higher-capacity pose tracking when the previous v2 tracks do not overlap."""
  from ultralytics import YOLO
  import numpy as np
- log("Previous analysis contains no eligible two-person overlap; starting YOLO11x-Pose + BoT-SORT on the exact reference video at 12 FPS.")
+ log("Previous analysis tracks have inadequate overlap. Running direct YOLO11x-Pose detection (no tracker IDs) on the exact reference at 12 FPS; selection will be framewise.")
  model=YOLO("yolo11x-pose.pt")
- rows={}; counts={}; frame_idx=0
- stream=model.track(source=str(video),stream=True,persist=True,tracker="botsort.yaml",
-                    vid_stride=2,imgsz=960,conf=0.12,iou=0.45,classes=[0],device=0,
-                    verbose=False,max_det=12)
+ rows={}; counts={}; frame_idx=0; simultaneous=0; max_people=0
+ stream=model.predict(source=str(video),stream=True,vid_stride=2,imgsz=1280,conf=0.05,iou=0.45,
+                      classes=[0],device=0,verbose=False,max_det=12)
  for result in stream:
   persons={}
   boxes=result.boxes
-  if boxes is not None and boxes.id is not None and result.keypoints is not None:
-   ids=boxes.id.detach().cpu().numpy().astype(int)
+  if boxes is not None and result.keypoints is not None and len(boxes)>0:
    xyxy=boxes.xyxy.detach().cpu().numpy()
+   scores=boxes.conf.detach().cpu().numpy()
    kxy=result.keypoints.xy.detach().cpu().numpy()
    kconf=(result.keypoints.conf.detach().cpu().numpy() if result.keypoints.conf is not None
           else np.ones(kxy.shape[:2],dtype=np.float32))
-   for i,tid in enumerate(ids):
+   for i in range(len(xyxy)):
     points=[{"x":float(kxy[i,j,0]),"y":float(kxy[i,j,1]),"confidence":float(kconf[i,j])} for j in range(17)]
     valid=int((kconf[i]>=CONF_MIN).sum())
     if valid<MIN_KEYPOINTS: continue
-    p={"track_id":int(tid),"bbox":[float(x) for x in xyxy[i]],"keypoints":points,
-       "_valid":valid,"_scene":0}
+    tid=i
+    box=[float(x) for x in xyxy[i]]
+    area=max(0,box[2]-box[0])*max(0,box[3]-box[1])
+    p={"track_id":int(tid),"bbox":box,"keypoints":points,"_valid":valid,
+       "_confidence":float(scores[i]),"_area":float(area),"_scene":0}
     persons[int(tid)]=p; counts[int(tid)]=counts.get(int(tid),0)+1
+  if len(persons)>=2: simultaneous+=1
+  max_people=max(max_people,len(persons))
   if persons: rows[frame_idx]=(0,persons)
   frame_idx+=1
-  if frame_idx%200==0: log(f"Fresh pose tracking: {frame_idx} sampled frames, {len(counts)} IDs so far.")
- if not rows: raise RuntimeError("YOLO11x-Pose + BoT-SORT produced no usable tracked people.")
+  if frame_idx%200==0: log(f"Direct pose detection: {frame_idx} sampled frames, frames with two or more people={simultaneous}, max people/frame={max_people}.")
+ if not rows: raise RuntimeError("YOLO11x-Pose direct detection produced no usable people.")
  candidates=sorted(counts,key=counts.get,reverse=True)
- log(f"Fresh tracking completed: {frame_idx} sampled frames, {len(candidates)} track IDs, top counts={[(x,counts[x]) for x in candidates[:10]]}.")
+ log(f"Direct detection completed: {frame_idx} sampled frames, {len(candidates)} per-frame detections, frames with >=2 people={simultaneous}, max people/frame={max_people}.")
  return rows,candidates,source_fps/2.0
 
 def upsample_retarget_2x(frames):
@@ -297,6 +301,77 @@ def upsample_retarget_2x(frames):
   result.append(copy.deepcopy(frame))
   result.append(midpoint(frame,frames[i+1]) if i+1<len(frames) else copy.deepcopy(frame))
  return result
+
+def choose_segment_framewise(rows,fps,total_frames,width):
+ """Choose a dense two-person interval without relying on unstable tracker IDs."""
+ wanted=max(48,int(round(SEGMENT_SECONDS*fps)))
+ frames=sorted(rows)
+ if not frames: raise RuntimeError("No pose-detection frames are available for framewise selection.")
+ persons_by_frame={}
+ for f in frames:
+  plist=list(rows[f][1].values())
+  # Keep only credible, reasonably sized person detections; score favors confident full-body observations.
+  ranked=[]
+  for p in plist:
+   box=p["bbox"]; area=max(0.0,(box[2]-box[0])*(box[3]-box[1]))
+   if int(p.get("_valid",0))<MIN_KEYPOINTS or area<max(2500.0,width*width*.0015): continue
+   sc=float(p.get("_confidence",.5))
+   ranked.append((sc*math.sqrt(area),p))
+  ranked.sort(key=lambda z:z[0],reverse=True)
+  if len(ranked)>=2:
+   two=[x[1] for x in ranked[:2]]
+   two.sort(key=lambda p:(p["bbox"][0]+p["bbox"][2])*.5)
+   persons_by_frame[f]=two
+ # Score windows by two-person co-visibility, observed motion, and spatial separation.
+ if len(persons_by_frame)<max(24,int(wanted*.5)):
+  hist={}
+  for f in frames:
+   n=len([p for p in rows[f][1].values() if int(p.get("_valid",0))>=MIN_KEYPOINTS])
+   hist[n]=hist.get(n,0)+1
+  raise RuntimeError(f"Only {len(persons_by_frame)} sampled frames contain two credible people; per-frame detection histogram={hist}.")
+ lo=min(persons_by_frame); hi=max(persons_by_frame)
+ step=max(1,int(round(fps*.35)))
+ best=None
+ for start in range(lo,max(lo+1,hi-wanted+2),step):
+  end=start+wanted
+  observed=[f for f in persons_by_frame if start<=f<end]
+  coverage=len(observed)/wanted
+  if coverage<.50: continue
+  motion=0.0; motion_n=0; distances=[]
+  previous={}
+  for f in observed:
+   pair=persons_by_frame[f]
+   centers=[center_and_height(p)[0] for p in pair]
+   distances.append(math.hypot(centers[1][0]-centers[0][0],centers[1][1]-centers[0][1])/max(1.0,width))
+   if f-1 in persons_by_frame:
+    prev=persons_by_frame[f-1]
+    for i in range(2):
+     motion+=activity(prev[i],pair[i]); motion_n+=1
+  mean_motion=motion/max(1,motion_n)
+  mean_distance=sum(distances)/max(1,len(distances))
+  score=coverage*2.0+min(mean_motion*8,1.5)+max(0,.8-mean_distance)*.25
+  if best is None or score>best[0]:
+   best=(score,coverage,mean_motion,start,observed,mean_distance)
+ if best is None:
+  raise RuntimeError("No four-second window contains two credible people in at least half its sampled frames.")
+ score,coverage,motion,start,observed,mean_distance=best
+ end=start+wanted
+ # Fill gaps using nearest simultaneously observed pair, preserving left/right screen order.
+ output=[]
+ for f in range(start,end):
+  nearest=min(observed,key=lambda x:abs(x-f))
+  pair=persons_by_frame[nearest]
+  output.append({"frame":f,"actors":[normalize_person(pair[0]),normalize_person(pair[1])]})
+ segment={"scene_id":0,"track_ids":["framewise-left","framewise-right"],
+          "source_start_frame":int(round(start*(total_frames/(max(frames)+1)))),
+          "source_end_frame":int(round((end-1)*(total_frames/(max(frames)+1)))),
+          "source_start_seconds":start/fps,"duration_seconds":wanted/fps,"fps":fps,
+          "coverage":coverage,"motion_score":motion,"selection_score":score,
+          "mean_normalized_inter_actor_distance":mean_distance,
+          "assignment_basis":"per-frame left-to-right detection; no persistent identity claim",
+          "observed_two_person_frames":len(observed),"window_sample_frames":wanted}
+ log(f"Framewise segment chosen: sampled frames {start}-{end-1}; co-visibility={coverage:.3f}; observed={len(observed)}/{wanted}; motion={motion:.4f}.")
+ return segment,output
 
 def normalize_person(p):
  kps=p.get("keypoints") or []
@@ -592,8 +667,13 @@ def main():
  except RuntimeError as previous:
   log(f"AL-DIDAH tracks did not provide a continuous pair: {previous}")
   rows,candidate_ids,tracking_fps=fresh_pose_tracks(video,float(actual_fps))
-  segment,raw_frames=choose_segment(rows,candidate_ids,tracking_fps,int(meta["frames"]),int(meta["width"]))
-  tracking_source="fresh YOLO11x-Pose + BoT-SORT on source video (12 FPS sample)"
+  try:
+   segment,raw_frames=choose_segment(rows,candidate_ids,tracking_fps,int(meta["frames"]),int(meta["width"]))
+   tracking_source="fresh YOLO11x-Pose tracked detections on source video (12 FPS sample)"
+  except RuntimeError as track_pair_error:
+   log(f"Persistent person IDs fragmented: {track_pair_error}; switching to framewise two-person detections.")
+   segment,raw_frames=choose_segment_framewise(rows,tracking_fps,int(meta["frames"]),int(meta["width"]))
+   tracking_source="fresh YOLO11x-Pose direct per-frame detections; left/right assignment (12 FPS sample)"
  fps=float(actual_fps); width=int(meta["width"]); height=int(meta["height"])
  render_frames=make_retarget_frames(raw_frames,width,height)
  if tracking_fps<fps-0.1:
