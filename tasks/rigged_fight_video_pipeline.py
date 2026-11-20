@@ -874,7 +874,7 @@ def main():
  try:
   run([str(blender),"--background","--factory-startup","--python-exit-code","1","--python",str(blender_py),"--",
        str(assets["CHAR_01"]),str(assets["CHAR_02"]),str(data_path),str(frame_dir),str(blender_qa),
-       str(FPS_OUT),str(RENDER_WIDTH),str(RENDER_HEIGHT),str(ORTHO_WIDTH)],timeout=2400)
+       str(FPS_OUT),str(RENDER_WIDTH),str(RENDER_HEIGHT),str(ORTHO_WIDTH)],timeout=4800)
  except Exception as blender_error:
   try:
    publish_blender_checkpoint(frame_dir,blender_qa,blender_error)
