@@ -51,6 +51,19 @@ class StaticTests(unittest.TestCase):
         self.assertIn('automatic_character_assignment',s)
         self.assertIn('"automatic_assignment":False',s)
         self.assertIn('candidate_for_manual_review',s)
+    def test_embedded_blender_script_compiles(self):
+        pipeline=ROOT/'tasks'/'rigged_fight_video_pipeline.py'
+        source=pipeline.read_text(encoding='utf-8')
+        marker="BLENDER_SCRIPT=r'''"
+        self.assertIn(marker,source)
+        start=source.index(marker)+len(marker)
+        end=source.index("\\n'''",start)
+        blender_source=source[start:end]
+        compile(blender_source,'render_rigged_fight.py','exec')
+        self.assertNotIn(r"for obj in imported:\\n",blender_source)
+        self.assertNotIn('root.location +=',blender_source)
+        self.assertIn('1.0-float(xy[1])/height',blender_source)
+
     def test_release_version(self): self.assertIn('al-didah-production-v2',SCRIPT.read_text(encoding='utf-8'))
 
 if __name__=='__main__': unittest.main(verbosity=2)
