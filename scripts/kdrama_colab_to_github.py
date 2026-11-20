@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-نظام السحب والترجمة والضغط التلقائي على Google Colab
-مع الرفع المباشر إلى GitHub Releases (بدون Google Drive).
+Automated K-Drama Torrent Download, Arabic Subtitle Fetch/Extract,
+480p HEVC 10-bit (CRF 29) + Opus 48k Compression, and GitHub Release Upload
+on Google Colab (Zero Google Drive).
 """
 import os
 import re
@@ -10,6 +11,7 @@ import json
 import zipfile
 import shutil
 import requests
+import subprocess
 from urllib.parse import quote
 from bs4 import BeautifulSoup
 
@@ -140,7 +142,7 @@ def find_best_magnet(query, alt_query=""):
 
         try:
             st_url = f"https://solidtorrents.to/api/v1/search?q={quote(q)}&category=Video&sort=seeders"
-            r = reque|�s.get(st_url, headers=HEADERS, timeout=15)
+            r = requests.get(st_url, headers=HEADERS, timeout=15)
             if r.status_code == 200:
                 for item in r.json().get("results", []):
                     if item.get("magnet"):
