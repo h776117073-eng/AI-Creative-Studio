@@ -21,7 +21,7 @@ else:
     )
 
 sys.path.insert(0, str(REPO_DIR))
-# Fix None-valued occluded pose joints during framewise interpolation; retry Blender production render.
+# Create Blender World in the headless scene and persist pose cache so render retries skip YOLO inference.
 from tasks.rigged_fight_video_pipeline import main
 
 if __name__ == "__main__":
