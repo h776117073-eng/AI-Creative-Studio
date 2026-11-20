@@ -21,6 +21,7 @@ else:
     )
 
 sys.path.insert(0, str(REPO_DIR))
+# Deliberate high-capacity pose re-detection attempt after legacy tracks had no overlapping pair.
 from tasks.rigged_fight_video_pipeline import main
 
 if __name__ == "__main__":
