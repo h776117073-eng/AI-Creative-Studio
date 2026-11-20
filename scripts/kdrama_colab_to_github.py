@@ -4,6 +4,7 @@ Automated K-Drama Torrent Download, Arabic Subtitle Fetch/Extract,
 480p HEVC 10-bit (CRF 29) + Opus 48k Compression, and GitHub Release Upload
 on Google Colab (Zero Google Drive).
 """
+import html
 import os
 import re
 import glob
@@ -42,24 +43,24 @@ subprocess.run("pip install -q requests beautifulsoup4 guessit", shell=True, che
 SERIES_LIST = [
     {
         "folder_name": "01_ONE_High_School_Heroes_2025",
-        "search_query": "ONE High School Heroes 1080p WEB-DL",
-        "alt_query": "ONE High School Heroes 720p",
+        "search_query": "ONE High School Heroes 1080p",
+        "alt_query": "ONE High School Heroes",
         "sub_search": "ONE High School Heroes",
         "manual_magnet": "",
         "manual_sub_zip": "",
     },
     {
         "folder_name": "02_High_School_Return_of_a_Gangster",
-        "search_query": "High School Return of a Gangster 1080p WEB-DL",
-        "alt_query": "High School Return of a Gangster 720p",
+        "search_query": "High School Return of a Gangster 1080p",
+        "alt_query": "High School Return of a Gangster",
         "sub_search": "High School Return of a Gangster",
         "manual_magnet": "",
         "manual_sub_zip": "",
     },
     {
         "folder_name": "03_Revenge_of_Others",
-        "search_query": "Revenge of Others S01 1080p DSNP WEB-DL",
-        "alt_query": "Revenge of Others 1080p WEB-DL",
+        "search_query": "Revenge of Others S01 1080p",
+        "alt_query": "Revenge of Others",
         "sub_search": "Revenge of Others",
         "manual_magnet": "",
         "manual_sub_zip": "",
@@ -141,6 +142,18 @@ def find_best_magnet(query, alt_query=""):
             print(f"Knaben error: {e}", flush=True)
 
         try:
+            nyaa_url = f"https://nyaa.si/?f=0&c=0_0&q={quote(q)}&s=seeders&o=desc"
+            r = requests.get(nyaa_url, headers=HEADERS, timeout=15)
+            if r.status_code == 200:
+                mags = re.findall(r'magnet:\?xt=urn:btih:[a-zA-Z0-9]+[^"\x27<>\s]*', r.text)
+                if mags:
+                    mag = html.unescape(mags[0])
+                    print("Found magnet via Nyaa", flush=True)
+                    return mag
+        except Exception as e:
+            print(f"Nyaa error: {e}", flush=True)
+
+        try:
             st_url = f"https://solidtorrents.to/api/v1/search?q={quote(q)}&category=Video&sort=seeders"
             r = requests.get(st_url, headers=HEADERS, timeout=15)
             if r.status_code == 200:
@@ -150,18 +163,6 @@ def find_best_magnet(query, alt_query=""):
                         return item["magnet"]
         except Exception as e:
             print(f"SolidTorrents error: {e}", flush=True)
-
-        try:
-            btdig_url = f"https://btdig.com/search?q={quote(q)}&order=0"
-            r = requests.get(btdig_url, headers=HEADERS, timeout=15)
-            if r.status_code == 200:
-                soup = BeautifulSoup(r.text, "html.parser")
-                for a in soup.find_all("a", href=True):
-                    if a["href"].startswith("magnet:?xt="):
-                        print("Found magnet via BTDigg", flush=True)
-                        return a["href"]
-        except Exception as e:
-            print(f"BTDigg error: {e}", flush=True)
     return None
 
 
