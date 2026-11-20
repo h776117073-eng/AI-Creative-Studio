@@ -136,7 +136,7 @@ jobs:
           TASK_CODE: ${{ inputs.task_code }}
           SCRIPT_PATH: ${{ inputs.script_path }}
           COLAB_GPU: ${{ inputs.accelerator || 'T4' }}
-          COLAB_TIMEOUT_SECONDS: ${{ inputs.timeout_seconds || 1800 }}
+          COLAB_TIMEOUT_SECONDS: ${{ inputs.timeout_seconds || 3000 }}
           GH_TOKEN: ${{ github.token }}
           CHAR_01_IMAGE_B64: ${{ secrets.CHAR_01_IMAGE_B64 }}
           CHAR_02_IMAGE_B64: ${{ secrets.CHAR_02_IMAGE_B64 }}
