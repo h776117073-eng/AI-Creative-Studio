@@ -21,7 +21,7 @@ else:
     )
 
 sys.path.insert(0, str(REPO_DIR))
-# Framewise two-person pose fallback after tracker IDs fragmented in the verified reference video.
+# Blender Python syntax, root transform and ground-plane corrections verified; rerun framewise 3D render.
 from tasks.rigged_fight_video_pipeline import main
 
 if __name__ == "__main__":
