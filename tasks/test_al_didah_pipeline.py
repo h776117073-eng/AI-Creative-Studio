@@ -57,10 +57,10 @@ class StaticTests(unittest.TestCase):
         marker="BLENDER_SCRIPT=r'''"
         self.assertIn(marker,source)
         start=source.index(marker)+len(marker)
-        end=source.index("\\n'''",start)
+        end=source.index("\n'''",start)
         blender_source=source[start:end]
         compile(blender_source,'render_rigged_fight.py','exec')
-        self.assertNotIn(r"for obj in imported:\\n",blender_source)
+        self.assertNotIn(r"for obj in imported:\n",blender_source)
         self.assertNotIn('root.location +=',blender_source)
         self.assertIn('1.0-float(xy[1])/height',blender_source)
 
