@@ -129,7 +129,6 @@ def read_track_data(pose_path,candidate_ids):
    persons={}
    for p in d.get("persons",[]):
     tid=int(p["track_id"])
-    if allowed and tid not in allowed: continue
     kps=p.get("keypoints") or []
     valid=sum(1 for x in kps if x and float(x.get("confidence",0))>=CONF_MIN)
     if valid<MIN_KEYPOINTS: continue
@@ -164,11 +163,13 @@ def choose_segment(rows,candidate_ids,fps,total_frames,width):
   by_track={}
   for f in scene_frames:
    for tid,p in rows[f][1].items(): by_track.setdefault(tid,{})[f]=p
-  tids=[t for t in candidate_ids if t in by_track]
-  if len(tids)<2: tids=sorted(by_track,key=lambda t:len(by_track[t]),reverse=True)[:12]
+  # Candidate tracks are a ranking hint, not a hard identity filter. Include other long-lived
+  # tracks so two people observed in different shots are not incorrectly treated as a pair.
+  all_tids=sorted(by_track,key=lambda t:len(by_track[t]),reverse=True)[:20]
+  tids=list(dict.fromkeys([t for t in candidate_ids if t in by_track]+all_tids))
   for a,b in combinations(tids,2):
    common=sorted(set(by_track[a])&set(by_track[b]))
-   if len(common)<48: continue
+   if len(common)<36: continue
    lo,hi=common[0],common[-1]
    length=min(wanted,hi-lo+1)
    if length<48: continue
@@ -188,13 +189,22 @@ def choose_segment(rows,candidate_ids,fps,total_frames,width):
       if prev and curr:
        motion+=activity(prev,curr); motion_n+=1
     coverage=valid/length
-    if coverage<0.58: continue
+    if coverage<0.50: continue
     mean_motion=motion/max(1,motion_n)
     mean_distance=sum(dist)/max(1,len(dist))
     score=coverage*2.0+min(mean_motion*10,1.5)+max(0,0.9-mean_distance)*0.25
     possible.append((score,coverage,mean_motion,scene,a,b,start,length))
  if not possible:
-  raise RuntimeError("No continuous two-person overlap window was found in the analyzed reference. Identity/track review is required before rendering.")
+  diagnostics=[]
+  for scene in sorted(set(s for s,_ in rows.values())):
+   sf=sorted(f for f,(s,_) in rows.items() if s==scene); bt={}
+   for f in sf:
+    for tid,p in rows[f][1].items(): bt.setdefault(tid,set()).add(f)
+   ranked=sorted(bt,key=lambda tid:len(bt[tid]),reverse=True)[:12]
+   overlaps=sorted((len(bt[x]&bt[y]),x,y) for x,y in combinations(ranked,2),reverse=True)[:5]
+   diagnostics.append({"scene":scene,"frames":len(sf),"tracks":len(bt),"top_track_counts":{str(t):len(bt[t]) for t in ranked[:8]},"top_pair_overlaps":overlaps})
+  log("No eligible segment. Track diagnostics: "+json.dumps(diagnostics[:20]))
+  raise RuntimeError("No sufficiently continuous two-person pose window was found; track diagnostics were logged. No arbitrary video was substituted.")
  best=max(possible,key=lambda x:x[0])
  score,coverage,motion,scene,a,b,start,length=best
  log(f"Selected scene {scene}, tracks {a}/{b}, frames {start}-{start+length-1}, coverage {coverage:.3f}, normalized motion {motion:.4f}.")
@@ -521,6 +531,7 @@ def main():
  video,pose,catalog,meta,assets,actual_fps=get_inputs()
  candidate_ids=read_candidates(catalog)
  rows,candidate_ids=read_track_data(pose,candidate_ids)
+ log(f"Pose audit: candidate IDs={candidate_ids[:12]}; frames with people={len(rows)}; distinct visible tracks={len({t for _,ps in rows.values() for t in ps})}.")
  segment,raw_frames=choose_segment(rows,candidate_ids,actual_fps,int(meta["frames"]),int(meta["width"]))
  fps=float(actual_fps); width=int(meta["width"]); height=int(meta["height"])
  render_frames=make_retarget_frames(raw_frames,width,height)
