@@ -156,7 +156,7 @@ def activity(p0,p1):
    vals.append(math.hypot(float(b["x"])-float(a["x"]),float(b["y"])-float(a["y"]))/h)
  return sum(vals)/len(vals) if vals else 0.0
 
-def choose_segment(rows,candidate_ids,fps,total_frames):
+def choose_segment(rows,candidate_ids,fps,total_frames,width):
  wanted=max(48,int(round(SEGMENT_SECONDS*fps)))
  possible=[]
  for scene in sorted(set(s for s,_ in rows.values())):
@@ -181,7 +181,7 @@ def choose_segment(rows,candidate_ids,fps,total_frames):
      if pa["_valid"]<MIN_KEYPOINTS or pb["_valid"]<MIN_KEYPOINTS: continue
      valid+=1
      ca,ha=center_and_height(pa); cb,hb=center_and_height(pb)
-     dist.append(math.hypot(ca[0]-cb[0],ca[1]-cb[1])/max(1,float(meta_width if False else 1280)))
+     dist.append(math.hypot(ca[0]-cb[0],ca[1]-cb[1])/max(1.0,float(width)))
      for tid,track in ((a,by_track[a]),(b,by_track[b])):
       prev=track.get(f-1)
       curr=track.get(f)
@@ -203,15 +203,20 @@ def choose_segment(rows,candidate_ids,fps,total_frames):
   if f in rows and rows[f][0]==scene:
    persons=rows[f][1]
    if a in persons and b in persons: selected[f]=(persons[a],persons[b])
- # Fill missing frames from nearest valid observations, then linearly interpolate keypoints per joint.
+ # Fill each actor independently from its own valid observations; do not let one
+ # actor's missing slot overwrite the other actor's track.
+ valid_by_actor=[]
  for tidx,tid in enumerate((a,b)):
-  valid=[(f,selected[f][tidx]) for f in selected]
+  valid=[(f,selected[f][tidx]) for f in list(selected) if selected[f][tidx] is not None]
   if not valid: raise RuntimeError(f"Track {tid} has no observations in selected window.")
-  for f in range(start,start+length):
-   if f not in selected:
-    nearest=min(valid,key=lambda q:abs(q[0]-f))[1]
-    arr=list(selected.get(f,(None,None)))
-    arr[tidx]=nearest; selected[f]=tuple(arr)
+  valid_by_actor.append(valid)
+ for f in range(start,start+length):
+  cur=list(selected.get(f,(None,None)))
+  for tidx in range(2):
+   if cur[tidx] is None:
+    valid=valid_by_actor[tidx]
+    cur[tidx]=min(valid,key=lambda q:abs(q[0]-f))[1]
+  selected[f]=tuple(cur)
  # Restore left/right assignment by screen x at start; no face identity claim.
  first=selected[start]
  centers=[center_and_height(p)[0][0] for p in first]
@@ -248,12 +253,26 @@ def interpolate_points(frames):
    for axis in (0,1):
     vals=[(i,a["actors"][actor_idx]["keypoints"][j][axis]) for i,a in enumerate(frames)
           if a["actors"][actor_idx]["keypoints"][j][axis] is not None]
-    if not vals:
-     raise RuntimeError(f"Joint {j} has no visible observations for actor {actor_idx}.")
-    xs=np.array([v[0] for v in vals],dtype=float); ys=np.array([v[1] for v in vals],dtype=float)
+    if vals:
+     xs=np.array([v[0] for v in vals],dtype=float); ys=np.array([v[1] for v in vals],dtype=float)
+     filled=[float(np.interp(i,xs,ys)) for i in range(len(frames))]
+    else:
+     filled=[]
+     for a in frames:
+      x1,y1,x2,y2=a["actors"][actor_idx]["bbox"]
+      bw=max(1.0,x2-x1); bh=max(1.0,y2-y1); cx=(x1+x2)/2
+      # Conservative COCO-17 fallback for joints never visible in this short shot.
+      fallback_x=[cx,cx-.025*bw,cx+.025*bw,cx-.10*bw,cx+.10*bw,
+                  cx-.18*bw,cx+.18*bw,cx-.25*bw,cx+.25*bw,
+                  cx-.28*bw,cx+.28*bw,cx-.10*bw,cx+.10*bw,
+                  cx-.10*bw,cx+.10*bw,cx-.10*bw,cx+.10*bw]
+      fallback_y=[y1+.12*bh,y1+.075*bh,y1+.075*bh,y1+.13*bh,y1+.13*bh,
+                  y1+.25*bh,y1+.25*bh,y1+.42*bh,y1+.42*bh,y1+.56*bh,y1+.56*bh,
+                  y1+.58*bh,y1+.58*bh,y1+.78*bh,y1+.78*bh,y2-.02*bh,y2-.02*bh]
+      filled.append(float((fallback_x if axis==0 else fallback_y)[j]))
     for i,a in enumerate(frames):
      if a["actors"][actor_idx]["keypoints"][j][axis] is None:
-      a["actors"][actor_idx]["keypoints"][j][axis]=float(np.interp(i,xs,ys))
+      a["actors"][actor_idx]["keypoints"][j][axis]=filled[i]
  return frames
 
 def make_retarget_frames(frames,width,height):
@@ -376,7 +395,7 @@ def import_character(path,label):
  arm=arms[0]
  root=bpy.data.objects.new(label+"_Root",None); scene.collection.objects.link(root)
  root.empty_display_type="PLAIN_AXES"; root.empty_display_size=.5
- for obj in imported: parent_preserve(obj,root)
+ for obj in imported:\n  if obj.parent not in imported: parent_preserve(obj,root)
  bones=set(arm.data.bones.keys())
  required=["Pelvis","L_Hip","R_Hip","Spine1","L_Knee","R_Knee","Spine2","L_Ankle","R_Ankle","Spine3","Neck","Head",
            "L_Shoulder","R_Shoulder","L_Elbow","R_Elbow","L_Wrist","R_Wrist"]
@@ -502,7 +521,7 @@ def main():
  video,pose,catalog,meta,assets,actual_fps=get_inputs()
  candidate_ids=read_candidates(catalog)
  rows,candidate_ids=read_track_data(pose,candidate_ids)
- segment,raw_frames=choose_segment(rows,candidate_ids,actual_fps,int(meta["frames"]))
+ segment,raw_frames=choose_segment(rows,candidate_ids,actual_fps,int(meta["frames"]),int(meta["width"]))
  fps=float(actual_fps); width=int(meta["width"]); height=int(meta["height"])
  render_frames=make_retarget_frames(raw_frames,width,height)
  # Fix output duration to the exact frame count; the audio is extracted from the same source interval.
