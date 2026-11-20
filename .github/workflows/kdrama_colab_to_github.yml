@@ -1,0 +1,90 @@
+name: K-Drama 480p HEVC (Colab to GitHub Release)
+
+on:
+  workflow_dispatch:
+    inputs:
+      accelerator:
+        description: "Colab accelerator"
+        required: true
+        type: choice
+        options: ["T4", "L4", "none"]
+        default: "T4"
+      timeout_seconds:
+        description: "Maximum execution time in seconds"
+        required: true
+        type: number
+        default: 14400
+
+permissions:
+  contents: write
+
+concurrency:
+  group: kdrama-colab-to-github-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  run-kdrama-colab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 260
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install official Google Colab CLI
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade google-colab-cli google-auth
+          colab --help
+
+      - name: Configure Google ADC credentials safely
+        env:
+          COLAB_CREDENTIALS: ${{ secrets.COLAB_CREDENTIALS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/gcloud" output
+          if [ -z "${COLAB_CREDENTIALS:-}" ]; then
+            echo "::error::COLAB_CREDENTIALS secret is missing or empty."
+            exit 1
+          fi
+          python - <<'PY'
+          import json, os, pathlib
+          raw = os.environ.get("COLAB_CREDENTIALS", "")
+          target = pathlib.Path.home() / ".config/gcloud/application_default_credentials.json"
+          json.loads(raw)
+          target.write_text(raw, encoding="utf-8")
+          target.chmod(0o600)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
+              env_file.write(f"GOOGLE_APPLICATION_CREDENTIALS={target}\n")
+          PY
+
+      - name: Execute K-Drama pipeline on Google Colab (GitHub output only)
+        env:
+          SCRIPT_PATH: scripts/kdrama_colab_to_github.py
+          COLAB_GPU: ${{ inputs.accelerator || 'T4' }}
+          COLAB_TIMEOUT_SECONDS: ${{ inputs.timeout_seconds || 14400 }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python scripts/colab_bridge.py
+
+      - name: Upload Colab logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kdrama-colab-log-${{ github.run_id }}
+          path: output/**
+          if-no-files-found: warn
+          retention-days: 14
