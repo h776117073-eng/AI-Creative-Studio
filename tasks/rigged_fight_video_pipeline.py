@@ -336,7 +336,10 @@ def choose_segment_framewise(rows,fps,total_frames,width):
   end=start+wanted
   observed=[f for f in persons_by_frame if start<=f<end]
   coverage=len(observed)/wanted
-  if coverage<.50: continue
+  if coverage<.65: continue
+  # Reject windows with long stretches where one or both actors are not detected.
+  gaps=[observed[0]-start] + [observed[i]-observed[i-1]-1 for i in range(1,len(observed))] + [end-1-observed[-1]]
+  if max(gaps)>5: continue
   motion=0.0; motion_n=0; distances=[]
   previous={}
   for f in observed:
@@ -511,7 +514,7 @@ def cube(name,loc,scale,material):
  bpy.ops.mesh.primitive_cube_add(size=1,location=loc); o=bpy.context.object; o.name=name
  o.dimensions=scale; bpy.ops.object.transform_apply(location=False,rotation=False,scale=True)
  o.data.materials.append(material); return o
-cube("Ground",(0,3,-.12),(15,30,.24),floor_mat)
+cube("Ground",(0,3,-.10),(15,30,.20),floor_mat)
 cube("RearWall",(0,13,3.4),(15,.25,7),wall_mat)
 for x in (-6.5,6.5):
  cube("SideWall",(x,5,3.4),(.25,17,7),wall_mat)
@@ -538,7 +541,8 @@ scene.camera.data.clip_end=100
 world_h=ortho_width*height/width
 pixel_scale=ortho_width/width
 def world_point(xy,depth):
- return Vector(((float(xy[0])/width-.5)*ortho_width,depth,(.5-float(xy[1])/height)*world_h))
+ # Map source-frame bottom edge to the stage floor (Z=0), not to Z=-world_h/2.
+ return Vector(((float(xy[0])/width-.5)*ortho_width,depth,(1.0-float(xy[1])/height)*world_h))
 def add_empty(name,hide=True):
  o=bpy.data.objects.new(name,None); scene.collection.objects.link(o)
  o.empty_display_type="SPHERE"; o.empty_display_size=.05; o.hide_render=hide
