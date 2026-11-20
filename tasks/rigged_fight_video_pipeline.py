@@ -509,6 +509,8 @@ scene.render.fps=fps; scene.frame_start=1; scene.frame_end=len(frames)
 scene.render.film_transparent=False
 scene.view_settings.view_transform="AgX"
 scene.render.filepath=str(out_dir/"frame_")
+if scene.world is None:
+ scene.world=bpy.data.worlds.new("FightWorld")
 scene.world.color=(0.025,0.025,0.03)
 scene.render.image_settings.color_mode="RGB"
 
@@ -695,46 +697,120 @@ def upload_release_asset(release,headers,path):
  log(f"Published {item['name']} ({item['size']} bytes): {item['browser_download_url']}")
  return item
 
+def load_pose_cache(source_sha, work_dir):
+ """Reuse previously published retarget frames for the exact reference video."""
+ api=f"https://api.github.com/repos/{OWNER}/{REPO}"
+ prefix="rigged-fight-pose-cache-"+source_sha[:12]+"-"
+ try:
+  response=requests.get(api+"/releases?per_page=100",headers={"Accept":"application/vnd.github+json"},timeout=40)
+  response.raise_for_status()
+  releases=response.json()
+ except Exception as exc:
+  log(f"Pose cache lookup unavailable: {type(exc).__name__}: {exc}")
+  return None
+ for release in releases:
+  if not str(release.get("tag_name","")).startswith(prefix): continue
+  assets={a.get("name"):a.get("browser_download_url") for a in release.get("assets",[])}
+  if "retarget_frames.json" not in assets or "segment_selection.json" not in assets:
+   continue
+  try:
+   selection_response=requests.get(assets["segment_selection.json"],timeout=60)
+   selection_response.raise_for_status()
+   selection=selection_response.json()
+   if selection.get("cache_schema")!=1 or selection.get("reference_video_sha256")!=source_sha:
+    continue
+   frames_response=requests.get(assets["retarget_frames.json"],timeout=120)
+   frames_response.raise_for_status()
+   frames=frames_response.json()
+   if not isinstance(frames,list) or not frames or any(len(x.get("actors",[]))!=2 for x in frames):
+    continue
+   log(f"Reusing pose cache {release.get('tag_name')} with {len(frames)} retargeted frames.")
+   return selection,frames
+  except Exception as exc:
+   log(f"Ignoring invalid pose cache {release.get('tag_name')}: {type(exc).__name__}: {exc}")
+ return None
+
+def publish_pose_cache(data_path,selection_path,source_sha):
+ token=os.getenv("GH_TOKEN","").strip() or os.getenv("GITHUB_TOKEN","").strip()
+ if not token:
+  log("GH_TOKEN is missing; pose cache will remain local for this execution.")
+  return None
+ api=f"https://api.github.com/repos/{OWNER}/{REPO}"
+ headers={"Authorization":f"Bearer {token}","Accept":"application/vnd.github+json",
+          "X-GitHub-Api-Version":"2022-11-28"}
+ tag="rigged-fight-pose-cache-"+source_sha[:12]+"-"+datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+ response=requests.post(api+"/releases",headers=headers,json={
+  "tag_name":tag,"name":"Rigged fight pose cache — "+source_sha[:12],
+  "body":"Reusable, source-hash-verified COCO-17 to SMPL22 retarget frames and segment selection. This is an intermediate cache, not a finished video.",
+  "draft":False,"prerelease":True},timeout=60)
+ response.raise_for_status()
+ release=response.json()
+ for path in (data_path,selection_path):
+  upload=release["upload_url"].split("{",1)[0]
+  with path.open("rb") as stream:
+   res=requests.post(upload+"?name="+path.name,
+    headers={**headers,"Content-Type":"application/json"},data=stream,timeout=(60,300))
+  res.raise_for_status()
+  log(f"Persisted reusable pose cache asset: {res.json().get('name')}.")
+ return release.get("html_url")
+
 def main():
  t0=time.time()
  log("=== Rigged fight video production: audit -> retarget -> render -> audio -> compression -> QA ===")
  run([sys.executable,"-m","pip","install","-q","gdown>=5.2","numpy>=1.26","Pillow>=10","requests>=2.32","ultralytics>=8.3,<9"])
  video,pose,catalog,meta,assets,actual_fps=get_inputs()
- candidate_ids=read_candidates(catalog)
- rows,candidate_ids=read_track_data(pose,candidate_ids)
- log(f"Pose audit: candidate IDs={candidate_ids[:12]}; frames with people={len(rows)}; distinct visible tracks={len({t for _,ps in rows.values() for t in ps})}.")
- tracking_fps=float(actual_fps)
- try:
-  segment,raw_frames=choose_segment(rows,candidate_ids,tracking_fps,int(meta["frames"]),int(meta["width"]))
-  tracking_source="AL-DIDAH v2 pose_tracks.jsonl.gz"
- except RuntimeError as previous:
-  log(f"AL-DIDAH tracks did not provide a continuous pair: {previous}")
-  rows,candidate_ids,tracking_fps=fresh_pose_tracks(video,float(actual_fps))
-  # The direct detector assigns box indices anew for each frame, not stable IDs.
-  # Always select actors framewise after this fallback; never interpret indices 0/1 as tracks.
-  segment,raw_frames=choose_segment_framewise(rows,tracking_fps,int(meta["frames"]),int(meta["width"]))
-  tracking_source="fresh YOLO11x-Pose direct per-frame detections; screen-left/right assignment (12 FPS sample)"
  fps=float(actual_fps); width=int(meta["width"]); height=int(meta["height"])
- render_frames=make_retarget_frames(raw_frames,width,height)
- if tracking_fps<fps-0.1:
-  render_frames=upsample_retarget_2x(render_frames)
-  segment["tracking_fps"]=tracking_fps
-  segment["source_start_frame"]=int(round(segment["source_start_seconds"]*fps))
-  segment["source_end_frame"]=segment["source_start_frame"]+int(round((len(raw_frames)-1)*fps/tracking_fps))
- segment["tracking_source"]=tracking_source
- # Fix output duration to the exact frame count; the audio is extracted from the same source interval.
- for rec in render_frames:
-  for actor in rec["actors"]:
-   bh=max(1.0,actor["bbox"][3]-actor["bbox"][1])
-   actor["target_height_world"]=bh*ORTHO_WIDTH/width
+ source_sha=sha256(video)
+ cached=load_pose_cache(source_sha,WORK)
+ if cached:
+  selection,render_frames=cached
+  segment=dict(selection)
+  tracking_source=selection.get("tracking_source","cached retarget frames")
+  log("Using the hash-verified pose cache; skipping YOLO re-detection.")
+ else:
+  candidate_ids=read_candidates(catalog)
+  rows,candidate_ids=read_track_data(pose,candidate_ids)
+  log(f"Pose audit: candidate IDs={candidate_ids[:12]}; frames with people={len(rows)}; distinct visible tracks={len({t for _,ps in rows.values() for t in ps})}.")
+  tracking_fps=float(actual_fps)
+  try:
+   segment,raw_frames=choose_segment(rows,candidate_ids,tracking_fps,int(meta["frames"]),int(meta["width"]))
+   tracking_source="AL-DIDAH v2 pose_tracks.jsonl.gz"
+  except RuntimeError as previous:
+   log(f"AL-DIDAH tracks did not provide a continuous pair: {previous}")
+   rows,candidate_ids,tracking_fps=fresh_pose_tracks(video,float(actual_fps))
+   # Direct detections do not have persistent IDs; choose each frame independently.
+   segment,raw_frames=choose_segment_framewise(rows,tracking_fps,int(meta["frames"]),int(meta["width"]))
+   tracking_source="fresh YOLO11x-Pose direct per-frame detections; screen-left/right assignment (12 FPS sample)"
+  render_frames=make_retarget_frames(raw_frames,width,height)
+  if tracking_fps<fps-0.1:
+   render_frames=upsample_retarget_2x(render_frames)
+   segment["tracking_fps"]=tracking_fps
+   segment["source_start_frame"]=int(round(segment["source_start_seconds"]*fps))
+   segment["source_end_frame"]=segment["source_start_frame"]+int(round((len(raw_frames)-1)*fps/tracking_fps))
+  segment["tracking_source"]=tracking_source
+  # Fix output duration to the exact frame count; audio uses the same source interval.
+  for rec in render_frames:
+   for actor in rec["actors"]:
+    bh=max(1.0,actor["bbox"][3]-actor["bbox"][1])
+    actor["target_height_world"]=bh*ORTHO_WIDTH/width
+  selection={**segment,"source_fps":fps,"frame_count":len(render_frames),"reference_video_sha256":source_sha,
+             "cache_schema":1,
+             "character_assets":{k:{"path":str(v),"sha256":sha256(v),"bytes":v.stat().st_size} for k,v in assets.items()},
+             "retarget_method":"COCO-17 -> canonical SMPL22 target points; Blender armature IK for wrists/ankles; screen-space orthographic mapping",
+             "known_limits":["single-image character reconstruction on unseen sides","COCO-17 does not provide fingers/toes or full head orientation",
+                             "source track assignment is provisional by screen side","monocular pose tracks do not recover ground-truth 3D depth"]}
  data_path=WORK/"retarget_frames.json"
  data_path.write_text(json.dumps(render_frames,separators=(",",":")),encoding="utf-8")
- selection={**segment,"source_fps":fps,"frame_count":len(render_frames),"reference_video_sha256":sha256(video),
-            "character_assets":{k:{"path":str(v),"sha256":sha256(v),"bytes":v.stat().st_size} for k,v in assets.items()},
-            "retarget_method":"COCO-17 -> canonical SMPL22 target points; Blender armature IK for wrists/ankles; screen-space orthographic mapping",
-            "known_limits":["single-image character reconstruction on unseen sides","COCO-17 does not provide fingers/toes or full head orientation",
-                            "source track assignment is provisional by screen side","monocular pose tracks do not recover ground-truth 3D depth"]}
  (OUT/"segment_selection.json").write_text(json.dumps(selection,indent=2),encoding="utf-8")
+ if not cached:
+  # Preserve the costly pose-analysis result before Blender starts so a later render fix
+  # can reuse the selected frames without repeating YOLO11x inference.
+  try:
+   cache_url=publish_pose_cache(data_path,OUT/"segment_selection.json",source_sha)
+   if cache_url: log(f"Pose cache release: {cache_url}")
+  except Exception as exc:
+   log(f"Pose cache publication failed (render will continue): {type(exc).__name__}: {exc}")
+ segment=selection
  # Install Blender headless.
  blender_root=WORK/"blender-4.2.3-linux-x64"
  blender=blender_root/"blender"
