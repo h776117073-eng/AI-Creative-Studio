@@ -669,7 +669,7 @@ def _upload_checkpoint(name,payload,content_type):
 def _png_is_valid(path):
  try:
   with path.open("rb") as stream: head=stream.read(24)
-  if len(head)<24 or head[:8]!=b"\\x89PNG\\r\\n\\x1a\\n": return False
+  if len(head)<24 or head[:8]!=b"\x89PNG\r\n\x1a\n": return False
   return struct.unpack(">II",head[16:24])==(width,height)
  except Exception:
   return False
@@ -836,7 +836,7 @@ def _restore_frame_zip(data,frame_dir):
    if "/" in item.filename or "\\\\" in item.filename or name in {"",".",".."}: continue
    target=frame_dir/name
    payload=archive.read(item)
-   if len(payload)<24 or payload[:8]!=b"\\x89PNG\\r\\n\\x1a\\n": continue
+   if len(payload)<24 or payload[:8]!=b"\x89PNG\r\n\x1a\n": continue
    target.write_bytes(payload)
    restored.append(target)
  return restored
@@ -903,9 +903,13 @@ def publish_blender_checkpoint(frame_dir,qa_file,run_error=None,recovery_release
   log("No stable recovery release was supplied; incremental checkpoint release remains the authoritative fallback.")
   return None
  items=_release_assets(recovery_release,headers)
+ scene_path=frame_dir/"rigged_fight_scene.blend"
+ if scene_path.is_file() and not any(x.get("name","").endswith(".blend") for x in items):
+  _upload_release_bytes(recovery_release,headers,"rigged_fight_scene.blend",scene_path.read_bytes())
+  items=_release_assets(recovery_release,headers)
  covered=set()
  for item in items:
-  match=re.match(r"frame_batch_(\\d+)_(\\d+)\\.zip$",item.get("name",""))
+  match=re.match(r"frame_batch_(\d+)_(\d+)\.zip$",item.get("name",""))
   if match:
    covered.update(range(int(match.group(1)),int(match.group(2))+1))
  frames=[]
