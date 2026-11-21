@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ONE: High School Heroes (2025) S01E01 - Pixar 3D Stylization Pipeline (Colab T4)
-# Architecture: Adaptive Keyframes + SDXL-Lightning ControlNet Img2Img + Bidirectional DIS Optical Flow + 24fps + 1080p
+# Architecture: Adaptive Keyframes + SDXL-Lightning 8-step LoRA + ControlNet Canny + Bidirectional DIS Optical Flow + 24fps + 1080p
 # Storage: Chunked Checkpointing + state.json on GitHub Release `kdrama-pixar-ep01`
 
 import gc
@@ -15,6 +15,10 @@ import time
 from urllib.parse import quote, urljoin
 
 import requests
+
+# Prevent huggingface_hub from hanging 15s on Colab UI secret vault lookup
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+os.environ.setdefault("HF_TOKEN", "")
 
 GITHUB_OWNER = os.environ.get("GITHUB_OWNER", "h776117073-eng")
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "AI-Creative-Studio")
@@ -84,6 +88,7 @@ def ensure_dependencies():
         "accelerate>=0.30.0",
         "safetensors",
         "huggingface_hub",
+        "peft",
     ]
     run_cmd([sys.executable, "-m", "pip", "install", "-q", "--upgrade"] + pkgs, check=True)
     log("Dependencies installed successfully.")
@@ -247,7 +252,6 @@ def fetch_arabic_subtitle(raw_file, release_id, assets_map, state):
             state["subtitle_url"] = assets_map["S01E01_ar.srt"]["browser_download_url"]
             return srt_path
 
-    # 1) Try embedded Arabic subtitle track
     try:
         probe = subprocess.check_output(
             [
@@ -269,7 +273,6 @@ def fetch_arabic_subtitle(raw_file, release_id, assets_map, state):
     except Exception:
         pass
 
-    # 2) Fetch from SubtitleCat
     try:
         r = requests.get(
             "https://www.subtitlecat.com/index.php?search=one+high+school+heroes",
@@ -361,33 +364,35 @@ def load_stylizer_pipeline():
         ControlNetModel,
         EulerDiscreteScheduler,
         StableDiffusionXLControlNetImg2ImgPipeline,
-        UNet2DConditionModel,
     )
     from huggingface_hub import hf_hub_download
-    from safetensors.torch import load_file
 
-    log("Loading SDXL-Lightning (8-step) + ControlNet Canny on T4 (fp16)...")
+    log("Loading SDXL-Lightning (8-step LoRA) + ControlNet Canny (fp16, low_cpu_mem_usage)...")
     base_model = "stabilityai/stable-diffusion-xl-base-1.0"
     controlnet = ControlNetModel.from_pretrained(
         "diffusers/controlnet-canny-sdxl-1.0",
         torch_dtype=torch.float16,
+        variant="fp16",
+        use_safetensors=True,
+        low_cpu_mem_usage=True,
     )
-    unet = UNet2DConditionModel.from_config(base_model, subfolder="unet").to("cuda", torch.float16)
-    ckpt_path = hf_hub_download("ByteDance/SDXL-Lightning", "sdxl_lightning_8step_unet.safetensors")
-    unet.load_state_dict(load_file(ckpt_path, device="cuda"))
-
     pipe = StableDiffusionXLControlNetImg2ImgPipeline.from_pretrained(
         base_model,
-        unet=unet,
         controlnet=controlnet,
         torch_dtype=torch.float16,
         variant="fp16",
+        use_safetensors=True,
+        low_cpu_mem_usage=True,
     )
+    lora_path = hf_hub_download("ByteDance/SDXL-Lightning", "sdxl_lightning_8step_lora.safetensors")
+    pipe.load_lora_weights(lora_path)
+    pipe.fuse_lora()
     pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing")
     pipe.enable_model_cpu_offload()
     pipe.enable_vae_tiling()
     pipe.enable_vae_slicing()
     pipe.set_progress_bar_config(disable=True)
+    gc.collect()
     log("SDXL-Lightning + ControlNet Canny pipeline ready.")
     return pipe
 
@@ -742,34 +747,4 @@ def main():
         os.remove(pilot_mp4)
         log(f"Pilot Test complete! flicker={flicker_score:.4f}, passed={pilot_passed}, url={pilot_url}")
 
-    for c_idx in range(total_chunks):
-        if c_idx in state["completed_chunks"]:
-            continue
-        elapsed = time.monotonic() - START_MONOTONIC
-        if elapsed > MAX_WALL_SEC:
-            log(f"Approaching wall-clock budget ({elapsed:.0f}s/{MAX_WALL_SEC}s); pausing cleanly for resume.")
-            break
-        start_s = c_idx * CHUNK_DURATION_SEC
-        dur_s = min(CHUNK_DURATION_SEC, max(1.0, total_dur - start_s))
-        cname = f"ep01_chunk_{c_idx:02d}"
-        log(f"Processing chunk {c_idx + 1}/{total_chunks} ({start_s}s -> {start_s + dur_s:.1f}s)...")
-        chunk_mp4, c_flicker, _ = process_segment(pipe, raw_file, start_s, dur_s, cname, build_qa=False)
-        chunk_url = upload_asset(release_id, assets_map, chunk_mp4, f"{cname}.mp4", "video/mp4")
-        state["completed_chunks"].append(c_idx)
-        state["completed_chunks"] = sorted(set(state["completed_chunks"]))
-        state["chunk_urls"][str(c_idx)] = chunk_url
-        save_state(release_id, assets_map, state)
-        os.remove(chunk_mp4)
-        log(f"Uploaded {cname}.mp4 (flicker={c_flicker:.4f}) -> {chunk_url}")
-
-    del pipe
-    gc.collect()
-
-    if len(state["completed_chunks"]) >= total_chunks and not state.get("final_video_url"):
-        assemble_final_episode(release_id, assets_map, state, raw_file, srt_path)
-
-    print("SUMMARY_JSON:" + json.dumps(state, ensure_ascii=False), flush=True)
-
-
-if __name__ == "__main__":
-    main()
+    for c_idx in range(total_chunks)*\:
