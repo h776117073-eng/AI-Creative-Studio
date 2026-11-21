@@ -53,7 +53,7 @@ EPISODE_PAGES = [
     (3, "https://downloadwella.com/4mxdmxs5geeu/One.High.School.Heroes.S01E03.(NKIRI.COM).mkv.html"),
     (4, "https://downloadwella.com/m9cazxiijjjz/One.High.School.Heroes.S01E04.(NKIRI.COM).mkv.html"),
     (5, "https://downloadwella.com/1vhxq8l0gtge/One.High.School.Heroes.S01E05.(NKIRI.COM).mkv.html"),
-    (6, "https://downloadwella.com/1wws0o5s2y51/One.High.School.Heroes.S01E06.(NKIRI.COM).mkv.html"),
+    (6, "https://downloadwella.com/u7ws0o5s2y51/One.High.School.Heroes.S01E06.(NKIRI.COM).mkv.html"),
     (7, "https://downloadwella.com/dz7537wbkgm8/One.High.School.Heroes.S01E07.(NKIRI.COM).mkv.html"),
     (8, "https://downloadwella.com/lcwqri6nmquf/One.High.School.Heroes.S01E08.(NKIRI.COM).mkv.html"),
 ]
