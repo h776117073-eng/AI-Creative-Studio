@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-ONE: High School Heroes (2025) - Automated Colab Pipeline
+ONE: High School Heroes (2025) - Accelerated Automated Colab Pipeline
 Downloads E01-E08 via direct HTTP (downloadwella.com), fetches Arabic subtitles from SubtitleCat,
-compresses to 480p HEVC 10-bit (CRF 29) + Opus 48k with Cairo font,
-and uploads directly to GitHub Releases (Zero Google Drive).
+compresses to 480p HEVC (auto-uses GPU hevc_nvenc if available, otherwise libx265 veryfast 10-bit CRF 29) + Opus 48k with Cairo font,
+skips already-uploaded episodes, and uploads directly to GitHub Releases.
 """
 import os
 import re
-import glob
 import json
 import shutil
 import requests
@@ -41,6 +40,9 @@ subprocess.run(
 subprocess.run("fc-cache -f -v > /dev/null", shell=True, check=False)
 subprocess.run("pip install -q requests beautifulsoup4", shell=True, check=False)
 
+HAS_GPU = subprocess.run("nvidia-smi > /dev/null 2>&1", shell=True).returncode == 0
+print(f"Hardware acceleration detected: {'GPU (NVIDIA)' if HAS_GPU else 'CPU (libx265 veryfast)'}", flush=True)
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"
 }
@@ -51,7 +53,7 @@ EPISODE_PAGES = [
     (3, "https://downloadwella.com/4mxdmxs5geeu/One.High.School.Heroes.S01E03.(NKIRI.COM).mkv.html"),
     (4, "https://downloadwella.com/m9cazxiijjjz/One.High.School.Heroes.S01E04.(NKIRI.COM).mkv.html"),
     (5, "https://downloadwella.com/1vhxq8l0gtge/One.High.School.Heroes.S01E05.(NKIRI.COM).mkv.html"),
-    (6, "https://downloadwella.com/u7ws0o5s2y51/One.High.School.Heroes.S01E06.(NKIRI.COM).mkv.html"),
+    (6, "https://downloadwella.com/1wws0o5s2y51/One.High.School.Heroes.S01E06.(NKIRI.COM).mkv.html"),
     (7, "https://downloadwella.com/dz7537wbkgm8/One.High.School.Heroes.S01E07.(NKIRI.COM).mkv.html"),
     (8, "https://downloadwella.com/lcwqri6nmquf/One.High.School.Heroes.S01E08.(NKIRI.COM).mkv.html"),
 ]
@@ -107,7 +109,7 @@ def get_or_create_release():
     payload = {
         "tag_name": RELEASE_TAG,
         "name": "Korean Drama 480p HEVC 10-bit (Arabic Sub)",
-        "body": "ONE: High School Heroes (2025) - 480p HEVC 10-bit (CRF 29) + Opus 48k with Arabic subtitles.",
+        "body": "ONE: High School Heroes (2025) - 480p HEVC (CRF 29) + Opus 48k with Arabic subtitles.",
         "draft": False,
         "prerelease": False,
     }
@@ -208,35 +210,40 @@ def compress_episode(input_path, output_path, sub_path=None):
         escaped_sub = sub_path.replace(bs, "/").replace(":", bs + ":").replace("'", bs + "'")
         style = "FontName=Cairo,FontSize=21,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1.6,Shadow=0.6,MarginV=16"
         vf_chain.append(f"subtitles='{escaped_sub}':force_style='{style}'")
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-i",
-        input_path,
-        "-vf",
-        ",".join(vf_chain),
-        "-c:v",
-        "libx265",
-        "-pix_fmt",
-        "yuv420p10le",
-        "-crf",
-        "29",
-        "-preset",
-        "medium",
-        "-x265-params",
-        "aq-mode=3:strong-intra-smoothing=0:no-open-gop=1",
-        "-c:a",
-        "libopus",
-        "-b:a",
-        "48k",
-        "-ac",
-        "2",
+    vf_str = ",".join(vf_chain)
+
+    if HAS_GPU:
+        gpu_cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-i", input_path,
+            "-vf", vf_str,
+            "-c:v", "hevc_nvenc",
+            "-preset", "p4",
+            "-rc", "vbr",
+            "-cq", "29",
+            "-b:v", "0",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "libopus", "-b:a", "48k", "-ac", "2",
+            output_path,
+        ]
+        res = subprocess.run(gpu_cmd, check=False)
+        if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 5 * 1024 * 1024:
+            return
+        print("NVENC fallback -> using libx265 veryfast on CPU...", flush=True)
+
+    cpu_cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-i", input_path,
+        "-vf", vf_str,
+        "-c:v", "libx265",
+        "-pix_fmt", "yuv420p10le",
+        "-crf", "29",
+        "-preset", "veryfast",
+        "-x265-params", "aq-mode=3:strong-intra-smoothing=0:no-open-gop=1",
+        "-c:a", "libopus", "-b:a", "48k", "-ac", "2",
         output_path,
     ]
-    subprocess.run(cmd, check=True)
+    subprocess.run(cpu_cmd, check=True)
 
 
 def main():
