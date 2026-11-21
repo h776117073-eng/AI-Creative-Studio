@@ -131,6 +131,37 @@ jobs:
               env_file.write(f"GOOGLE_APPLICATION_CREDENTIALS={target}\n")
           PY
 
+      - name: Validate Python and embedded Blender script
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          pipeline_path = Path("tasks/rigged_fight_video_pipeline.py")
+          pipeline_text = pipeline_path.read_text(encoding="utf-8")
+          tree = ast.parse(pipeline_text, filename=str(pipeline_path))
+          embedded = [
+              node.value
+              for node in tree.body
+              if isinstance(node, ast.Assign)
+              and any(isinstance(target, ast.Name) and target.id == "BLENDER_SCRIPT"
+                      for target in node.targets)
+          ]
+          if len(embedded) != 1:
+              raise SystemExit("Expected exactly one embedded BLENDER_SCRIPT assignment.")
+          blender_source = ast.literal_eval(embedded[0])
+          compile(blender_source, "render_rigged_fight.py", "exec")
+          required = [
+              "BLENDER_RENDER_RESUME_SKIP",
+              "BLENDER_DURABLE_CHECKPOINT_UPLOADED",
+              "frame_batch_",
+          ]
+          for marker in required:
+              if marker not in blender_source:
+                  raise SystemExit(f"Missing resumable-render safeguard: {marker}")
+          print("PASS: production Python and embedded Blender code compile; resume/checkpoint guards exist.")
+          PY
+
       - name: Execute task on a remote Colab runtime
         env:
           TASK_CODE: ${{ inputs.task_code }}
