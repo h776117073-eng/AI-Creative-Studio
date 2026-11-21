@@ -3,7 +3,7 @@ import pathlib
 import subprocess
 import sys
 
-# Production retry: 120-minute Colab allocation window; publish the Blender checkpoint before frame rendering.
+# Recovery-first production retry: restore verified PNGs, upload every 4 rendered frames, and continue from the first missing frame.
 REPO_URL = "https://github.com/h776117073-eng/AI-Creative-Studio.git"
 REPO_DIR = pathlib.Path("/content/AI-Creative-Studio")
 
