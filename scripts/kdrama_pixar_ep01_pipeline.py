@@ -361,14 +361,21 @@ def select_adaptive_keyframes(frame_paths, scene_bounds):
 def load_stylizer_pipeline():
     import torch
     from diffusers import (
+        AutoencoderKL,
         ControlNetModel,
         EulerDiscreteScheduler,
         StableDiffusionXLControlNetImg2ImgPipeline,
     )
     from huggingface_hub import hf_hub_download
 
-    log("Loading SDXL-Lightning (8-step LoRA) + ControlNet Canny (fp16, low_cpu_mem_usage)...")
+    log("Loading SDXL-Lightning (8-step LoRA) + ControlNet Canny + fp16 VAE directly to T4 GPU...")
     base_model = "stabilityai/stable-diffusion-xl-base-1.0"
+    vae = AutoencoderKL.from_pretrained(
+        "madebyollin/sdxl-vae-fp16-fix",
+        torch_dtype=torch.float16,
+        use_safetensors=True,
+        low_cpu_mem_usage=True,
+    )
     controlnet = ControlNetModel.from_pretrained(
         "diffusers/controlnet-canny-sdxl-1.0",
         torch_dtype=torch.float16,
@@ -378,6 +385,7 @@ def load_stylizer_pipeline():
     )
     pipe = StableDiffusionXLControlNetImg2ImgPipeline.from_pretrained(
         base_model,
+        vae=vae,
         controlnet=controlnet,
         torch_dtype=torch.float16,
         variant="fp16",
@@ -387,8 +395,9 @@ def load_stylizer_pipeline():
     lora_path = hf_hub_download("ByteDance/SDXL-Lightning", "sdxl_lightning_8step_lora.safetensors")
     pipe.load_lora_weights(lora_path)
     pipe.fuse_lora()
+    pipe.unload_lora_weights()
     pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing")
-    pipe.enable_model_cpu_offload()
+    pipe.to("cuda")
     if hasattr(pipe, "enable_vae_tiling"):
         pipe.enable_vae_tiling()
     elif hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_tiling"):
@@ -425,21 +434,24 @@ def stylize_keyframes(pipe, frame_paths, kf_by_scene, stylized_dir):
             ctrl_img = Image.fromarray(edges_rgb)
             init_img = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
 
-            gen = torch.Generator(device="cpu").manual_seed(scene_seed)
-            res = pipe(
-                prompt=PIXAR_PROMPT,
-                negative_prompt=PIXAR_NEG_PROMPT,
-                image=init_img,
-                control_image=ctrl_img,
-                strength=0.58,
-                controlnet_conditioning_scale=0.65,
-                guidance_scale=1.5,
-                num_inference_steps=8,
-                generator=gen,
-            ).images[0]
+            gen = torch.Generator(device="cuda").manual_seed(scene_seed)
+            with torch.inference_mode():
+                res = pipe(
+                    prompt=PIXAR_PROMPT,
+                    negative_prompt=PIXAR_NEG_PROMPT,
+                    image=init_img,
+                    control_image=ctrl_img,
+                    strength=0.58,
+                    controlnet_conditioning_scale=0.65,
+                    guidance_scale=1.5,
+                    num_inference_steps=8,
+                    generator=gen,
+                ).images[0]
             res.save(out_path)
             done += 1
             if done % 10 == 0 or done == total_kfs:
+                gc.collect()
+                torch.cuda.empty_cache()
                 log(f"  Stylized {done}/{total_kfs} keyframes")
 
 
@@ -476,7 +488,7 @@ def propagate_and_interpolate_24fps(frame_paths, kf_by_scene, stylized_dir, out_
                 prev_gray = cv2.cvtColor(cv2.imread(frame_paths[k0]), cv2.COLOR_BGR2GRAY)
                 for f_idx in range(k0 + 1, e_idx + 1):
                     cur_gray = cv2.cvtColor(cv2.imread(frame_paths[f_idx]), cv2.COLOR_BGR2GRAY)
-                    flow = dis.calc(cur_gray, prev_gray, None)
+                    flow = dis.calc(cur_gray, prev_g, None)
                     cur_style = warp_frame(cur_style, flow)
                     prop_12[f_idx] = cur_style
                     prev_gray = cur_gray
@@ -655,6 +667,10 @@ def process_segment(pipe, raw_file, start_sec, duration_sec, seg_name, build_qa=
 
     shutil.rmtree(seg_dir, ignore_errors=True)
     return out_mp4, flicker_score, qa_grid_path
+
+
+def is_numeric_chunk_done(state, c_idx):
+    return c_idx in state["completed_chunks"]
 
 
 def assemble_final_episode(release_id, assets_map, state, raw_file, srt_path):
