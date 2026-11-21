@@ -389,8 +389,14 @@ def load_stylizer_pipeline():
     pipe.fuse_lora()
     pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing")
     pipe.enable_model_cpu_offload()
-    pipe.enable_vae_tiling()
-    pipe.enable_vae_slicing()
+    if hasattr(pipe, "enable_vae_tiling"):
+        pipe.enable_vae_tiling()
+    elif hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_tiling"):
+        pipe.vae.enable_tiling()
+    if hasattr(pipe, "enable_vae_slicing"):
+        pipe.enable_vae_slicing()
+    elif hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_slicing"):
+        pipe.vae.enable_slicing()
     pipe.set_progress_bar_config(disable=True)
     gc.collect()
     log("SDXL-Lightning + ControlNet Canny pipeline ready.")
