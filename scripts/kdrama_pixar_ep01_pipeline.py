@@ -747,4 +747,34 @@ def main():
         os.remove(pilot_mp4)
         log(f"Pilot Test complete! flicker={flicker_score:.4f}, passed={pilot_passed}, url={pilot_url}")
 
-    for c_idx in range(total_chunks)*\:
+    for c_idx in range(total_chunks):
+        if c_idx in state["completed_chunks"]:
+            continue
+        elapsed = time.monotonic() - START_MONOTONIC
+        if elapsed > MAX_WALL_SEC:
+            log(f"Approaching wall-clock budget ({elapsed:.0f}s/{MAX_WALL_SEC}s); pausing cleanly for resume.")
+            break
+        start_s = c_idx * CHUNK_DURATION_SEC
+        dur_s = min(CHUNK_DURATION_SEC, max(1.0, total_dur - start_s))
+        cname = f"ep01_chunk_{c_idx:02d}"
+        log(f"Processing chunk {c_idx + 1}/{total_chunks} ({start_s}s -> {start_s + dur_s:.1f}s)...")
+        chunk_mp4, c_flicker, _ = process_segment(pipe, raw_file, start_s, dur_s, cname, build_qa=False)
+        chunk_url = upload_asset(release_id, assets_map, chunk_mp4, f"{cname}.mp4", "video/mp4")
+        state["completed_chunks"].append(c_idx)
+        state["completed_chunks"] = sorted(set(state["completed_chunks"]))
+        state["chunk_urls"][str(c_idx)] = chunk_url
+        save_state(release_id, assets_map, state)
+        os.remove(chunk_mp4)
+        log(f"Uploaded {cname}.mp4 (flicker={c_flicker:.4f}) -> {chunk_url}")
+
+    del pipe
+    gc.collect()
+
+    if len(state["completed_chunks"]) >= total_chunks and not state.get("final_video_url"):
+        assemble_final_episode(release_id, assets_map, state, raw_file, srt_path)
+
+    print("SUMMARY_JSON:" + json.dumps(state, ensure_ascii=False), flush=True)
+
+
+if __name__ == "__main__":
+    main()
