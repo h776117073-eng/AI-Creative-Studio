@@ -652,13 +652,52 @@ scene.frame_set(1)
 scene.render.filepath=str(out_dir/"frame_")
 bpy.ops.wm.save_as_mainfile(filepath=str(blend_path))
 print("BLENDER_SCENE_CHECKPOINT "+str(blend_path)+" "+str(blend_path.stat().st_size),flush=True)
-# Render frames in a second pass. Existing frames are reusable after a partial render.
+# Render frames in restartable batches. Every completed batch is uploaded to GitHub immediately.
+checkpoint_upload_url=a[9]
+upload_scene=(a[10]=="1")
+import io, urllib.parse, urllib.request, zipfile, struct
+checkpoint_token=os.environ.get("GH_TOKEN","").strip() or os.environ.get("GITHUB_TOKEN","").strip()
+def _upload_checkpoint(name,payload,content_type):
+ if not checkpoint_upload_url or not checkpoint_token:
+  raise RuntimeError("Durable checkpoint upload URL/token is missing; refusing to render without recovery.")
+ req=urllib.request.Request(checkpoint_upload_url.split("{",1)[0]+"?name="+urllib.parse.quote(name),
+  data=payload,headers={"Authorization":"Bearer "+checkpoint_token,"Accept":"application/vnd.github+json",
+  "Content-Type":content_type,"X-GitHub-Api-Version":"2022-11-28"},method="POST")
+ with urllib.request.urlopen(req,timeout=1200) as response:
+  response.read()
+ print("BLENDER_DURABLE_CHECKPOINT_UPLOADED "+name,flush=True)
+def _png_is_valid(path):
+ try:
+  with path.open("rb") as stream: head=stream.read(24)
+  if len(head)<24 or head[:8]!=b"\\x89PNG\\r\\n\\x1a\\n": return False
+  return struct.unpack(">II",head[16:24])==(width,height)
+ except Exception:
+  return False
+blend_path=out_dir/"rigged_fight_scene.blend"
+if upload_scene:
+ _upload_checkpoint("rigged_fight_scene.blend",blend_path.read_bytes(),"application/octet-stream")
+new_batch=[]
+rendered_now=0
 for render_idx in range(1,len(frames)+1):
+ frame_path=out_dir/f"frame_{render_idx:05d}.png"
+ if _png_is_valid(frame_path):
+  print(f"BLENDER_RENDER_RESUME_SKIP {render_idx}/{len(frames)}",flush=True)
+  continue
+ if frame_path.exists(): frame_path.unlink()
  scene.frame_set(render_idx)
- scene.render.filepath=str(out_dir/f"frame_{render_idx:05d}.png")
+ scene.render.filepath=str(frame_path)
  bpy.ops.render.render(write_still=True)
- if render_idx%4==0 or render_idx==len(frames):
-  print(f"BLENDER_RENDER_PROGRESS {render_idx}/{len(frames)}",flush=True)
+ if not _png_is_valid(frame_path):
+  raise RuntimeError(f"Rendered frame {render_idx} is missing or failed PNG validation.")
+ new_batch.append(frame_path); rendered_now+=1
+ if len(new_batch)>=4 or render_idx==len(frames):
+  buffer=io.BytesIO()
+  with zipfile.ZipFile(buffer,"w",zipfile.ZIP_STORED) as archive:
+   for path in new_batch: archive.write(path,arcname=path.name)
+  first=int(new_batch[0].stem.split("_")[-1]); last=int(new_batch[-1].stem.split("_")[-1])
+  _upload_checkpoint(f"frame_batch_{first:06d}_{last:06d}.zip",buffer.getvalue(),"application/zip")
+  print(f"BLENDER_RENDER_PROGRESS {render_idx}/{len(frames)}; newly_rendered={rendered_now}",flush=True)
+  new_batch=[]
 report={"frames":len(frames),"fps":fps,"resolution":[width,height],"characters":[
  {"id":f"CHAR_{i+1:02d}","mesh_objects":len(ch["meshes"]),"armature":ch["arm"].name,
   "mesh_height_world":ch["height"],"bone_count":len(ch["arm"].data.bones),"required_bones":"passed"} for i,ch in enumerate(characters)],
@@ -761,45 +800,133 @@ def publish_pose_cache(data_path,selection_path,source_sha):
   log(f"Persisted reusable pose cache asset: {res.json().get('name')}.")
  return release.get("html_url")
 
-def publish_blender_checkpoint(frame_dir, qa_file, run_error=None):
- """Publish recoverable Blender scene and any rendered frames even if later stages fail."""
+LEGACY_CHECKPOINT_TAG="rigged-fight-blender-checkpoint-20261121-000902"
+
+def _github_api_context():
  token=os.getenv("GH_TOKEN","").strip() or os.getenv("GITHUB_TOKEN","").strip()
- blend=frame_dir/"rigged_fight_scene.blend"
- frames=sorted(frame_dir.glob("frame_*.png"))
- if not blend.is_file():
-  log("No Blender scene checkpoint exists; cannot publish a Blender recovery point.")
-  return None
- if not token:
-  log("GH_TOKEN missing; cannot publish Blender checkpoint.")
-  return None
+ if not token: raise RuntimeError("GH_TOKEN/GITHUB_TOKEN is required for durable render checkpoints.")
  api=f"https://api.github.com/repos/{OWNER}/{REPO}"
  headers={"Authorization":f"Bearer {token}","Accept":"application/vnd.github+json",
           "X-GitHub-Api-Version":"2022-11-28"}
- tag="rigged-fight-blender-checkpoint-"+datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
- payload={"tag_name":tag,"name":"Blender render checkpoint — "+tag,
-          "body":"Recoverable rigged Blender scene saved before rendering, plus available IK QA and any successfully rendered PNG frames. This is an intermediate checkpoint, not the final MP4.",
-          "draft":False,"prerelease":True}
- response=requests.post(api+"/releases",headers=headers,json=payload,timeout=60)
+ return api,headers
+
+def _release_assets(release,headers):
+ r=requests.get(release["assets_url"],headers=headers,params={"per_page":100},timeout=60)
+ r.raise_for_status()
+ return r.json()
+
+def _upload_release_bytes(release,headers,name,data,content_type="application/octet-stream"):
+ upload=release["upload_url"].split("{",1)[0]
+ r=requests.post(upload+"?name="+name,headers={**headers,"Content-Type":content_type},
+                 data=data,timeout=(60,1200))
+ if r.status_code==422:
+  # An identical named checkpoint may already have reached GitHub before a connection reset.
+  assets=_release_assets(release,headers)
+  if any(x.get("name")==name for x in assets): return next(x for x in assets if x.get("name")==name)
+ r.raise_for_status()
+ return r.json()
+
+def _restore_frame_zip(data,frame_dir):
+ import io
+ restored=[]
+ with zipfile.ZipFile(io.BytesIO(data)) as archive:
+  for item in archive.infolist():
+   name=pathlib.PurePosixPath(item.filename).name
+   if not name.startswith("frame_") or not name.endswith(".png"): continue
+   if "/" in item.filename or "\\\\" in item.filename or name in {"",".",".."}: continue
+   target=frame_dir/name
+   payload=archive.read(item)
+   if len(payload)<24 or payload[:8]!=b"\\x89PNG\\r\\n\\x1a\\n": continue
+   target.write_bytes(payload)
+   restored.append(target)
+ return restored
+
+def prepare_render_recovery(source_sha,data_path,selection,assets,frame_dir,frame_count):
+ """Create/reuse a source-bound GitHub recovery release and restore all valid prior frames."""
+ api,headers=_github_api_context()
+ identity={"source_sha256":source_sha,"retarget_sha256":sha256(data_path),
+           "selection":{k:selection.get(k) for k in ("scene_id","track_ids","source_start_frame","source_end_frame","source_start_seconds","duration_seconds")},
+           "character_sha256":{k:sha256(v) for k,v in assets.items()},
+           "fps":FPS_OUT,"width":RENDER_WIDTH,"height":RENDER_HEIGHT,"frame_count":frame_count}
+ fingerprint=hashlib.sha256(json.dumps(identity,sort_keys=True,separators=(",",":")).encode()).hexdigest()[:12]
+ tag=f"rigged-fight-recovery-{source_sha[:12]}-{fingerprint}"
+ response=requests.get(api+"/releases/tags/"+tag,headers=headers,timeout=60)
+ if response.status_code==404:
+  response=requests.post(api+"/releases",headers=headers,json={
+   "tag_name":tag,"name":"Resumable 3D fight render — "+tag,
+   "body":"Durable, source-hash-bound render checkpoint. Contains the Blender scene and incrementally uploaded PNG frame batches; safe to resume without re-rendering verified frames.",
+   "draft":False,"prerelease":True},timeout=60)
  response.raise_for_status()
  release=response.json()
- files=[blend]
- if qa_file.is_file(): files.append(qa_file)
- frame_zip=frame_dir/"partial_render_frames.zip"
+ frame_dir.mkdir(parents=True,exist_ok=True)
+ items=_release_assets(release,headers)
+ frame_assets=[x for x in items if x.get("name","").startswith(("frame_batch_","partial_render_frames")) and x.get("name","").endswith(".zip")]
+ restored=[]
+ for asset in frame_assets:
+  r=requests.get(asset["browser_download_url"],headers=headers,timeout=(60,1200))
+  r.raise_for_status()
+  restored.extend(_restore_frame_zip(r.content,frame_dir))
+  log(f"Restored checkpoint asset {asset['name']}: {len(restored)} cumulative frame files.")
+ # Migrate the known 72-frame checkpoint from the previous attempt exactly once.
+ if not frame_assets:
+  legacy=requests.get(api+"/releases/tags/"+LEGACY_CHECKPOINT_TAG,headers=headers,timeout=60)
+  if legacy.ok:
+   legacy_release=legacy.json()
+   legacy_assets=_release_assets(legacy_release,headers)
+   seed=next((x for x in legacy_assets if x.get("name")=="partial_render_frames.zip"),None)
+   if seed:
+    r=requests.get(seed["browser_download_url"],headers=headers,timeout=(60,1200))
+    r.raise_for_status()
+    restored.extend(_restore_frame_zip(r.content,frame_dir))
+    valid=sorted(p for p in frame_dir.glob("frame_*.png") if p.is_file() and p.stat().st_size>24)
+    if valid:
+     batch=frame_dir/"recovery_seed.zip"
+     with zipfile.ZipFile(batch,"w",zipfile.ZIP_STORED) as archive:
+      for path in valid: archive.write(path,arcname=path.name)
+     lo=int(valid[0].stem.split("_")[-1]); hi=int(valid[-1].stem.split("_")[-1])
+     _upload_release_bytes(release,headers,f"frame_batch_{lo:06d}_{hi:06d}.zip",batch.read_bytes(),"application/zip")
+     log(f"Migrated previous checkpoint: {len(valid)} verified frame files ({lo}-{hi}) into resumable release.")
+ # Write a recovery manifest once; the release identity already binds it to the exact input hashes.
+ if not any(x.get("name")=="recovery_manifest.json" for x in items):
+  manifest={**identity,"fingerprint":fingerprint,"tag":tag,"created_utc":datetime.now(timezone.utc).isoformat()}
+  _upload_release_bytes(release,headers,"recovery_manifest.json",json.dumps(manifest,indent=2).encode(),"application/json")
+ items=_release_assets(release,headers)
+ scene_needed=not any(x.get("name","").endswith(".blend") for x in items)
+ valid_frames=sorted(p for p in frame_dir.glob("frame_*.png") if p.is_file() and p.stat().st_size>24)
+ log(f"Recovery ready: {len(valid_frames)}/{frame_count} frame images restored; next missing frame will be rendered; release={release['html_url']}.")
+ return release,scene_needed
+
+def publish_blender_checkpoint(frame_dir,qa_file,run_error=None,recovery_release=None):
+ """Flush any uncommitted frames/QA to the same durable release, including on graceful timeout."""
+ api,headers=_github_api_context()
+ if recovery_release is None:
+  log("No stable recovery release was supplied; incremental checkpoint release remains the authoritative fallback.")
+  return None
+ items=_release_assets(recovery_release,headers)
+ covered=set()
+ for item in items:
+  match=re.match(r"frame_batch_(\\d+)_(\\d+)\\.zip$",item.get("name",""))
+  if match:
+   covered.update(range(int(match.group(1)),int(match.group(2))+1))
+ frames=[]
+ for path in sorted(frame_dir.glob("frame_*.png")):
+  try: idx=int(path.stem.split("_")[-1])
+  except ValueError: continue
+  if idx not in covered and path.is_file() and path.stat().st_size>24:
+   frames.append((idx,path))
  if frames:
-  with zipfile.ZipFile(frame_zip,"w",zipfile.ZIP_DEFLATED,compresslevel=1) as archive:
-   for path in frames: archive.write(path,arcname=path.name)
-  files.append(frame_zip)
- receipt=[]
- for path in files:
-  upload=release["upload_url"].split("{",1)[0]
-  with path.open("rb") as stream:
-   res=requests.post(upload+"?name="+path.name,headers={**headers,"Content-Type":"application/octet-stream"},
-                     data=stream,timeout=(60,1200))
-  res.raise_for_status()
-  item=res.json()
-  receipt.append({"name":item["name"],"size":item["size"],"url":item["browser_download_url"]})
- log("BLENDER_CHECKPOINT_RELEASE "+json.dumps({"url":release["html_url"],"rendered_png_count":len(frames),"assets":receipt,"error":str(run_error) if run_error else None}))
- return {"url":release["html_url"],"assets":receipt,"rendered_png_count":len(frames)}
+  first,last=frames[0][0],frames[-1][0]
+  batch=frame_dir/"failure_flush.zip"
+  with zipfile.ZipFile(batch,"w",zipfile.ZIP_STORED) as archive:
+   for _,path in frames: archive.write(path,arcname=path.name)
+  name=f"frame_batch_{first:06d}_{last:06d}.zip"
+  _upload_release_bytes(recovery_release,headers,name,batch.read_bytes(),"application/zip")
+  log(f"Flushed {len(frames)} not-yet-published PNG frames to {name}.")
+ items=_release_assets(recovery_release,headers)
+ if qa_file.is_file() and not any(x.get("name")=="blender_ik_qa.json" for x in items):
+  _upload_release_bytes(recovery_release,headers,"blender_ik_qa.json",qa_file.read_bytes(),"application/json")
+ log("BLENDER_RECOVERY_RELEASE "+json.dumps({"url":recovery_release["html_url"],"run_error":str(run_error) if run_error else None}))
+ return recovery_release.get("html_url")
 
 def main():
  t0=time.time()
@@ -869,20 +996,22 @@ def main():
   raise RuntimeError("Blender executable was not found after installation.")
  run([str(blender),"--version"])
  frame_dir=OUT/"rendered_frames"; frame_dir.mkdir(parents=True,exist_ok=True)
+ recovery_release,scene_upload_needed=prepare_render_recovery(source_sha,data_path,selection,assets,frame_dir,len(render_frames))
  blender_py=WORK/"render_rigged_fight.py"; blender_py.write_text(BLENDER_SCRIPT,encoding="utf-8")
  blender_qa=OUT/"blender_ik_qa.json"
  try:
   run([str(blender),"--background","--factory-startup","--python-exit-code","1","--python",str(blender_py),"--",
        str(assets["CHAR_01"]),str(assets["CHAR_02"]),str(data_path),str(frame_dir),str(blender_qa),
-       str(FPS_OUT),str(RENDER_WIDTH),str(RENDER_HEIGHT),str(ORTHO_WIDTH)],timeout=4800)
+       str(FPS_OUT),str(RENDER_WIDTH),str(RENDER_HEIGHT),str(ORTHO_WIDTH),
+       recovery_release["upload_url"],"1" if scene_upload_needed else "0"],timeout=6600)
  except Exception as blender_error:
   try:
-   publish_blender_checkpoint(frame_dir,blender_qa,blender_error)
+   publish_blender_checkpoint(frame_dir,blender_qa,blender_error,recovery_release)
   except Exception as checkpoint_error:
-   log(f"Blender checkpoint upload failed: {type(checkpoint_error).__name__}: {checkpoint_error}")
+   log(f"Blender checkpoint flush failed: {type(checkpoint_error).__name__}: {checkpoint_error}")
   raise
- # Publish an early recovery point before FFmpeg/audio/encoding steps.
- publish_blender_checkpoint(frame_dir,blender_qa)
+ # Preserve QA into the same stable recovery release before downstream encoding.
+ publish_blender_checkpoint(frame_dir,blender_qa,None,recovery_release)
  if not blender_qa.exists(): raise RuntimeError("Blender did not produce the IK QA report.")
  with blender_qa.open(encoding="utf-8") as f: bqa=json.load(f)
  if not all((frame_dir/f"frame_{i:05d}.png").is_file() for i in range(1,len(render_frames)+1)):
