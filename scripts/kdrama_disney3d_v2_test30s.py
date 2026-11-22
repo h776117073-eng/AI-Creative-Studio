@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-High-Quality Frame-by-Frame Disney 3D Video-to-Video Pipeline (v2 — 30-Second Quality Test)
-==========================================================================================
+High-Quality Frame-by-Frame Disney 3D Video-to-Video Pipeline (v2.1 — 30-Second Quality Test)
+============================================================================================
 Target: ONE: High School Heroes (2025) S01E01 — 30-second showcase (08:30 -> 09:00, 24 fps)
-Architecture (ZERO optical-flow warping, ZERO sparse keyframe melting):
+Architecture (ZERO optical-flow warping, ZERO sparse keyframe melting, T4 System-RAM-Safe):
   1. Dedicated Disney/Pixar 3D CGI checkpoint: liamhvn/disney-pixar-cartoon-b (SD1.5 safetensors)
+     loaded component-by-component directly onto T4 GPU (FP16) so System RAM never exceeds ~4 GB.
   2. AnimateDiff v3 Motion Adapter (guoyww/animatediff-motion-adapter-v1-5-3) for native 3D
      temporal self-attention across every frame in each shot.
   3. FreeNoise sliding-window temporal attention (context_length=16, context_stride=4) per
@@ -33,8 +34,8 @@ from pathlib import Path
 from urllib.parse import quote, urljoin
 
 # Prevent huggingface_hub from hanging on Colab UI secret vault lookup
-os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
-os.environ.setdefault("HF_TOKEN", "")
+os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+os.environ["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
 
 OWNER = os.environ.get("GITHUB_OWNER", "h776117073-eng")
 REPO = os.environ.get("GITHUB_REPO", "AI-Creative-Studio")
@@ -221,7 +222,7 @@ def download_clean_source_and_sub(requests_mod, work_dir: Path):
 
 
 # ---------------------------------------------------------------------------
-# 4. Clip Extraction, Scene Detection & Preprocessors (Depth + Soft Canny)
+# 4. Clip Extraction, Scene Detection & Disk-Backed Preprocessors
 # ---------------------------------------------------------------------------
 def extract_clip_and_frames(raw_video: Path, work_dir: Path):
     clip_mp4 = work_dir / "source_30s.mp4"
@@ -265,8 +266,8 @@ def detect_scenes(clip_mp4: Path, total_frames: int):
 
     ranges = []
     for start_tc, end_tc in scenes:
-        s = max(0, start_tc.get_frames())
-        e = min(total_frames, end_tc.get_frames())
+        s = max(0, int(start_tc.frame_num))
+        e = min(total_frames, int(end_tc.frame_num))
         if e > s:
             ranges.append((s, e))
 
@@ -286,84 +287,124 @@ def detect_scenes(clip_mp4: Path, total_frames: int):
     return cleaned
 
 
-def build_conditioning_maps(frame_files):
+def build_conditioning_maps_to_disk(frame_files, work_dir: Path):
     import cv2
     import numpy as np
     import torch
     from PIL import Image
     from transformers import pipeline as hf_pipeline
 
-    log("Computing Depth-Anything-V2 + Soft Canny maps for EVERY frame...")
+    depth_dir = work_dir / "depth_frames"
+    canny_dir = work_dir / "canny_frames"
+    depth_dir.mkdir(parents=True, exist_ok=True)
+    canny_dir.mkdir(parents=True, exist_ok=True)
+
+    log("Computing Depth-Anything-V2 + Soft Canny maps for EVERY frame (saved to disk to keep System RAM clean)...")
     depth_pipe = hf_pipeline(
         task="depth-estimation",
         model="depth-anything/Depth-Anything-V2-Small-hf",
         device=0,
-        torch_dtype=torch.float16,
+        dtype=torch.float16,
     )
 
-    pil_frames = [Image.open(p).convert("RGB") for p in frame_files]
-    depth_maps = []
-    canny_maps = []
-
     batch_size = 16
-    for i in range(0, len(pil_frames), batch_size):
-        batch = pil_frames[i : i + batch_size]
-        preds = depth_pipe(batch)
-        for img, pred in zip(batch, preds):
+    total = len(frame_files)
+    for i in range(0, total, batch_size):
+        batch_paths = frame_files[i : i + batch_size]
+        batch_imgs = [Image.open(p).convert("RGB") for p in batch_paths]
+        preds = depth_pipe(batch_imgs)
+        for j, (img, pred) in enumerate(zip(batch_imgs, preds)):
+            f_idx = i + j + 1
             d_img = pred["depth"].resize((GEN_W, GEN_H), Image.BICUBIC).convert("RGB")
-            depth_maps.append(d_img)
+            d_img.save(str(depth_dir / f"frame_{f_idx:05d}.png"))
 
             arr = np.array(img)
             gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
             blur = cv2.GaussianBlur(gray, (3, 3), 0)
             edges = cv2.Canny(blur, 95, 195)
-            canny_maps.append(Image.fromarray(cv2.cvtColor(edges, cv2.COLOR_GRAY2RGB)))
+            Image.fromarray(cv2.cvtColor(edges, cv2.COLOR_GRAY2RGB)).save(
+                str(canny_dir / f"frame_{f_idx:05d}.png")
+            )
 
-        if (i // batch_size) % 5 == 0:
-            log(f"  Preprocessed {min(i + batch_size, len(pil_frames))}/{len(pil_frames)} frames")
+        del batch_imgs, preds
+        if (i // batch_size) % 5 == 0 or i + batch_size >= total:
+            log(f"  Preprocessed {min(i + batch_size, total)}/{total} frames")
 
     del depth_pipe
     gc.collect()
     torch.cuda.empty_cache()
-    return pil_frames, depth_maps, canny_maps
+    return depth_dir, canny_dir
 
 
 # ---------------------------------------------------------------------------
-# 5. True Per-Frame Disney 3D Rendering (AnimateDiff v3 + FreeNoise + Multi-ControlNet)
+# 5. True Per-Frame Disney 3D Rendering (Sequential GPU Load + AnimateDiff v3 + FreeNoise)
 # ---------------------------------------------------------------------------
-def render_disney3d_frames(pil_frames, depth_maps, canny_maps, scenes):
+def render_disney3d_frames(frame_files, depth_dir: Path, canny_dir: Path, scenes, work_dir: Path):
     import numpy as np
     import torch
     from PIL import Image
+    from transformers import CLIPTextModel, CLIPTokenizer
     from diffusers import (
         AnimateDiffVideoToVideoControlNetPipeline,
         AutoencoderKL,
         ControlNetModel,
         DDIMScheduler,
         MotionAdapter,
+        UNet2DConditionModel,
+        UNetMotionModel,
     )
+
+    stylized_dir = work_dir / "stylized_frames"
+    stylized_dir.mkdir(parents=True, exist_ok=True)
 
     dtype = torch.float16
     base_model = "liamhvn/disney-pixar-cartoon-b"
     motion_id = "guoyww/animatediff-motion-adapter-v1-5-3"
     vae_id = "stabilityai/sd-vae-ft-mse"
 
-    log(f"Loading Disney Pixar 3D checkpoint ({base_model}) + AnimateDiff v3 + Multi-ControlNet...")
-    motion_adapter = MotionAdapter.from_pretrained(motion_id, torch_dtype=dtype, low_cpu_mem_usage=True)
-    vae = AutoencoderKL.from_pretrained(vae_id, torch_dtype=dtype, low_cpu_mem_usage=True)
-    cn_depth = ControlNetModel.from_pretrained("lllyasviel/control_v11f1p_sd15_depth", torch_dtype=dtype, low_cpu_mem_usage=True)
-    cn_canny = ControlNetModel.from_pretrained("lllyasviel/control_v11p_sd15_canny", torch_dtype=dtype, low_cpu_mem_usage=True)
-
-    pipe = AnimateDiffVideoToVideoControlNetPipeline.from_pretrained(
+    log("Step 5.1: Loading UNet2D + AnimateDiff v3 MotionAdapter and fusing into UNetMotionModel...")
+    unet_2d = UNet2DConditionModel.from_pretrained(
         base_model,
-        motion_adapter=motion_adapter,
-        controlnet=[cn_depth, cn_canny],
-        vae=vae,
+        subfolder="unet",
         torch_dtype=dtype,
-        safety_checker=None,
+        use_safetensors=True,
         low_cpu_mem_usage=True,
     )
-    pipe.scheduler = DDIMScheduler.from_pretrained(
+    motion_adapter = MotionAdapter.from_pretrained(
+        motion_id,
+        torch_dtype=dtype,
+        use_safetensors=True,
+        low_cpu_mem_usage=True,
+    )
+    unet = UNetMotionModel.from_unet2d(unet_2d, motion_adapter)
+    del unet_2d
+    gc.collect()
+    unet = unet.to(device="cuda", dtype=dtype)
+    motion_adapter = motion_adapter.to(device="cuda", dtype=dtype)
+    gc.collect()
+    torch.cuda.empty_cache()
+    log(f"  UNetMotionModel on GPU ({torch.cuda.memory_allocated() / 1e9:.2f} GB VRAM)")
+
+    log("Step 5.2: Loading VAE, CLIPTextModel, and Multi-ControlNet (Depth + Canny) sequentially to GPU...")
+    vae = AutoencoderKL.from_pretrained(
+        vae_id,
+        torch_dtype=dtype,
+        use_safetensors=True,
+        low_cpu_mem_usage=True,
+    ).to(device="cuda", dtype=dtype)
+    gc.collect()
+
+    text_encoder = CLIPTextModel.from_pretrained(
+        base_model,
+        subfolder="text_encoder",
+        torch_dtype=dtype,
+        use_safetensors=True,
+        low_cpu_mem_usage=True,
+    ).to(device="cuda", dtype=dtype)
+    gc.collect()
+
+    tokenizer = CLIPTokenizer.from_pretrained(base_model, subfolder="tokenizer")
+    scheduler = DDIMScheduler.from_pretrained(
         base_model,
         subfolder="scheduler",
         clip_sample=False,
@@ -371,7 +412,34 @@ def render_disney3d_frames(pil_frames, depth_maps, canny_maps, scenes):
         beta_schedule="linear",
         steps_offset=1,
     )
-    pipe.to("cuda")
+
+    cn_depth = ControlNetModel.from_pretrained(
+        "lllyasviel/control_v11f1p_sd15_depth",
+        torch_dtype=dtype,
+        use_safetensors=True,
+        low_cpu_mem_usage=True,
+    ).to(device="cuda", dtype=dtype)
+    gc.collect()
+
+    cn_canny = ControlNetModel.from_pretrained(
+        "lllyasviel/control_v11p_sd15_canny",
+        torch_dtype=dtype,
+        use_safetensors=True,
+        low_cpu_mem_usage=True,
+    ).to(device="cuda", dtype=dtype)
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    pipe = AnimateDiffVideoToVideoControlNetPipeline(
+        vae=vae,
+        text_encoder=text_encoder,
+        tokenizer=tokenizer,
+        unet=unet,
+        motion_adapter=motion_adapter,
+        controlnet=[cn_depth, cn_canny],
+        scheduler=scheduler,
+    ).to("cuda")
+
     pipe.vae.enable_slicing()
     pipe.vae.enable_tiling()
 
@@ -381,6 +449,8 @@ def render_disney3d_frames(pil_frames, depth_maps, canny_maps, scenes):
         pipe.enable_free_noise_split_inference(spatial_split_size=256, temporal_split_size=16)
     if hasattr(pipe.unet, "enable_forward_chunking"):
         pipe.unet.enable_forward_chunking(16)
+
+    log(f"Pipeline ready on T4 GPU! Allocated VRAM: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
     prompt = (
         "authentic walt disney animation studios 3d cgi movie still, disney pixar 3d animated character, "
@@ -393,14 +463,23 @@ def render_disney3d_frames(pil_frames, depth_maps, canny_maps, scenes):
         "artifacts, lowres, bad anatomy, 2d flat sketch, watermark, text, subtitles"
     )
 
-    out_frames = [None] * len(pil_frames)
-    max_window = 48
-    overlap = 8
+    max_window = 24
+    overlap = 6
+
+    def load_triplet_slice(s_idx_0: int, e_idx_0: int):
+        v_list, d_list, c_list = [], [], []
+        for idx0 in range(s_idx_0, e_idx_0):
+            f_num = idx0 + 1
+            v_list.append(Image.open(frame_files[idx0]).convert("RGB"))
+            d_list.append(Image.open(depth_dir / f"frame_{f_num:05d}.png").convert("RGB"))
+            c_list.append(Image.open(canny_dir / f"frame_{f_num:05d}.png").convert("RGB"))
+        return v_list, d_list, c_list
 
     def run_segment(seg_video, seg_depth, seg_canny, seed_val):
         orig_len = len(seg_video)
-        if orig_len < 8:
-            pad_n = 8 - orig_len
+        # FreeNoise context_length=16 requires at least 16 frames
+        if orig_len < 16:
+            pad_n = 16 - orig_len
             seg_video = seg_video + [seg_video[-1]] * pad_n
             seg_depth = seg_depth + [seg_depth[-1]] * pad_n
             seg_canny = seg_canny + [seg_canny[-1]] * pad_n
@@ -414,12 +493,12 @@ def render_disney3d_frames(pil_frames, depth_maps, canny_maps, scenes):
                 negative_prompt=negative_prompt,
                 width=GEN_W,
                 height=GEN_H,
-                num_inference_steps=30,
+                num_inference_steps=25,
                 guidance_scale=8.0,
                 strength=0.72,
                 controlnet_conditioning_scale=[0.60, 0.30],
                 generator=gen,
-                decode_chunk_size=8,
+                decode_chunk_size=4,
             ).frames[0]
         return res[:orig_len]
 
@@ -427,56 +506,60 @@ def render_disney3d_frames(pil_frames, depth_maps, canny_maps, scenes):
         shot_len = end_f - start_f
         log(f"Rendering Scene {s_idx + 1}/{len(scenes)}: frames [{start_f}..{end_f - 1}] ({shot_len} frames)")
         seed_val = 4200 + s_idx
+        scene_out = [None] * shot_len
 
         if shot_len <= max_window:
-            rendered = run_segment(
-                pil_frames[start_f:end_f],
-                depth_maps[start_f:end_f],
-                canny_maps[start_f:end_f],
-                seed_val,
-            )
+            v_seg, d_seg, c_seg = load_triplet_slice(start_f, end_f)
+            rendered = run_segment(v_seg, d_seg, c_seg, seed_val)
             for k, img in enumerate(rendered):
-                out_frames[start_f + k] = img
+                scene_out[k] = img
+            del v_seg, d_seg, c_seg, rendered
         else:
             pos = start_f
             while pos < end_f:
                 w_end = min(pos + max_window, end_f)
-                rendered = run_segment(
-                    pil_frames[pos:w_end],
-                    depth_maps[pos:w_end],
-                    canny_maps[pos:w_end],
-                    seed_val,
-                )
+                # Ensure tail window has at least 16 frames if shot_len >= 16
+                if w_end - pos < 16 and end_f - start_f >= 16:
+                    pos = max(start_f, end_f - 16)
+                v_seg, d_seg, c_seg = load_triplet_slice(pos, w_end)
+                rendered = run_segment(v_seg, d_seg, c_seg, seed_val)
                 for k, img in enumerate(rendered):
-                    g_idx = pos + k
-                    if out_frames[g_idx] is None:
-                        out_frames[g_idx] = img
+                    rel_idx = (pos - start_f) + k
+                    if scene_out[rel_idx] is None:
+                        scene_out[rel_idx] = img
                     else:
                         alpha = 0.5 * (1.0 - math.cos(math.pi * (k + 1) / (overlap + 1)))
-                        prev_arr = np.array(out_frames[g_idx], dtype=np.float32)
+                        prev_arr = np.array(scene_out[rel_idx], dtype=np.float32)
                         cur_arr = np.array(img, dtype=np.float32)
                         blended = np.clip((1.0 - alpha) * prev_arr + alpha * cur_arr, 0, 255).astype(np.uint8)
-                        out_frames[g_idx] = Image.fromarray(blended)
+                        scene_out[rel_idx] = Image.fromarray(blended)
+                del v_seg, d_seg, c_seg, rendered
                 if w_end >= end_f:
                     break
                 pos = w_end - overlap
 
+        for k, img in enumerate(scene_out):
+            f_num = start_f + k + 1
+            img.save(str(stylized_dir / f"frame_{f_num:05d}.png"))
+
+        del scene_out
         gc.collect()
         torch.cuda.empty_cache()
 
-    del pipe, motion_adapter, vae, cn_depth, cn_canny
+    del pipe, unet, motion_adapter, vae, text_encoder, cn_depth, cn_canny
     gc.collect()
     torch.cuda.empty_cache()
-    return out_frames
+    return stylized_dir
 
 
 # ---------------------------------------------------------------------------
 # 6. Neural 4x Upscaling to Crisp 1920x1080 (RealESRGAN_x4plus_anime_6B via spandrel)
 # ---------------------------------------------------------------------------
-def upscale_frames_to_1080p(stylized_frames, out_dir: Path):
+def upscale_frames_to_1080p(stylized_dir: Path, total_frames: int, out_dir: Path):
     import cv2
     import numpy as np
     import torch
+    from PIL import Image
     from spandrel import ModelLoader
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -491,7 +574,8 @@ def upscale_frames_to_1080p(stylized_frames, out_dir: Path):
     sr_model = model_desc.model.eval().cuda().half()
 
     t0 = time.time()
-    for idx, pil_img in enumerate(stylized_frames):
+    for idx in range(total_frames):
+        pil_img = Image.open(stylized_dir / f"frame_{idx + 1:05d}.png").convert("RGB")
         rgb = np.array(pil_img, dtype=np.float32) / 255.0
         inp = torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0).cuda().half()
         with torch.inference_mode():
@@ -503,8 +587,8 @@ def upscale_frames_to_1080p(stylized_frames, out_dir: Path):
             interpolation=cv2.INTER_AREA,
         )
         cv2.imwrite(str(out_dir / f"frame_{idx + 1:05d}.png"), bgr_1080)
-        if (idx + 1) % 100 == 0 or idx + 1 == len(stylized_frames):
-            log(f"  Upscaled {idx + 1}/{len(stylized_frames)} frames to 1080p ({time.time() - t0:.1f}s)")
+        if (idx + 1) % 100 == 0 or idx + 1 == total_frames:
+            log(f"  Upscaled {idx + 1}/{total_frames} frames to 1080p ({time.time() - t0:.1f}s)")
 
     del sr_model, model_desc
     gc.collect()
@@ -614,11 +698,11 @@ def main():
     src_clip, frame_files = extract_clip_and_frames(raw_video, WORK_DIR)
     scenes = detect_scenes(src_clip, len(frame_files))
 
-    pil_frames, depth_maps, canny_maps = build_conditioning_maps(frame_files)
-    stylized_frames = render_disney3d_frames(pil_frames, depth_maps, canny_maps, scenes)
+    depth_dir, canny_dir = build_conditioning_maps_to_disk(frame_files, WORK_DIR)
+    stylized_dir = render_disney3d_frames(frame_files, depth_dir, canny_dir, scenes, WORK_DIR)
 
     up_dir = WORK_DIR / "upscaled_1080p"
-    upscale_frames_to_1080p(stylized_frames, up_dir)
+    upscale_frames_to_1080p(stylized_dir, len(frame_files), up_dir)
 
     grid_path = WORK_DIR / "disney3d_v2_test30s_comparison.png"
     build_comparison_grid(frame_files, up_dir, grid_path)
@@ -634,7 +718,7 @@ def main():
     grid_url = upload_asset(requests, rel, grid_path, content_type="image/png")
 
     summary = {
-        "pipeline": "disney3d_v2_animatediff_freenoise_realesrgan_1080p",
+        "pipeline": "disney3d_v2.1_animatediff_freenoise_realesrgan_1080p",
         "start_sec": START_SEC,
         "duration_sec": DURATION_SEC,
         "fps": TARGET_FPS,
