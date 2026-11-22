@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-High-Quality Frame-by-Frame Disney 3D Video-to-Video Pipeline (v2.2 — 30-Second Quality Test)
+High-Quality Frame-by-Frame Disney 3D Video-to-Video Pipeline (v2.3 — 30-Second Quality Test)
 ============================================================================================
 Target: ONE: High School Heroes (2025) S01E01 — 30-second showcase (08:30 -> 09:00, 24 fps)
 Architecture (ZERO optical-flow warping, ZERO sparse keyframe melting, T4 System-RAM-Safe):
@@ -443,10 +443,8 @@ def render_disney3d_frames(frame_files, depth_dir: Path, canny_dir: Path, scenes
     pipe.vae.enable_slicing()
     pipe.vae.enable_tiling()
 
-    # Native FreeNoise sliding-window 3D temporal attention + split inference for T4 16GB VRAM
+    # Native FreeNoise sliding-window 3D temporal attention (no buggy FreeNoiseSplitHook)
     pipe.enable_free_noise(context_length=16, context_stride=4)
-    if hasattr(pipe, "enable_free_noise_split_inference"):
-        pipe.enable_free_noise_split_inference(spatial_split_size=128, temporal_split_size=16)
 
     log(f"Pipeline ready on T4 GPU! Allocated VRAM: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
@@ -461,8 +459,8 @@ def render_disney3d_frames(frame_files, depth_dir: Path, canny_dir: Path, scenes
         "artifacts, lowres, bad anatomy, 2d flat sketch, watermark, text, subtitles"
     )
 
-    max_window = 24
-    overlap = 6
+    max_window = 16
+    overlap = 4
 
     def load_triplet_slice(s_idx_0: int, e_idx_0: int):
         v_list, d_list, c_list = [], [], []
@@ -717,7 +715,7 @@ def main():
     grid_url = upload_asset(requests, rel, grid_path, content_type="image/png")
 
     summary = {
-        "pipeline": "disney3d_v2.2_animatediff_freenoise_realesrgan_1080p",
+        "pipeline": "disney3d_v2.3_animatediff_freenoise_realesrgan_1080p",
         "start_sec": START_SEC,
         "duration_sec": DURATION_SEC,
         "fps": TARGET_FPS,
