@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-High-Quality Frame-by-Frame Disney 3D Video-to-Video Pipeline (v2.1 — 30-Second Quality Test)
+High-Quality Frame-by-Frame Disney 3D Video-to-Video Pipeline (v2.2 — 30-Second Quality Test)
 ============================================================================================
 Target: ONE: High School Heroes (2025) S01E01 — 30-second showcase (08:30 -> 09:00, 24 fps)
 Architecture (ZERO optical-flow warping, ZERO sparse keyframe melting, T4 System-RAM-Safe):
@@ -446,9 +446,7 @@ def render_disney3d_frames(frame_files, depth_dir: Path, canny_dir: Path, scenes
     # Native FreeNoise sliding-window 3D temporal attention + split inference for T4 16GB VRAM
     pipe.enable_free_noise(context_length=16, context_stride=4)
     if hasattr(pipe, "enable_free_noise_split_inference"):
-        pipe.enable_free_noise_split_inference(spatial_split_size=256, temporal_split_size=16)
-    if hasattr(pipe.unet, "enable_forward_chunking"):
-        pipe.unet.enable_forward_chunking(16)
+        pipe.enable_free_noise_split_inference(spatial_split_size=128, temporal_split_size=16)
 
     log(f"Pipeline ready on T4 GPU! Allocated VRAM: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
@@ -542,6 +540,7 @@ def render_disney3d_frames(frame_files, depth_dir: Path, canny_dir: Path, scenes
             f_num = start_f + k + 1
             img.save(str(stylized_dir / f"frame_{f_num:05d}.png"))
 
+        log(f"  Completed Scene {s_idx + 1}/{len(scenes)} (peak VRAM: {torch.cuda.max_memory_allocated() / 1e9:.2f} GB)")
         del scene_out
         gc.collect()
         torch.cuda.empty_cache()
@@ -718,7 +717,7 @@ def main():
     grid_url = upload_asset(requests, rel, grid_path, content_type="image/png")
 
     summary = {
-        "pipeline": "disney3d_v2.1_animatediff_freenoise_realesrgan_1080p",
+        "pipeline": "disney3d_v2.2_animatediff_freenoise_realesrgan_1080p",
         "start_sec": START_SEC,
         "duration_sec": DURATION_SEC,
         "fps": TARGET_FPS,
