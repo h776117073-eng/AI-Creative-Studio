@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-High-Quality Frame-by-Frame Disney 3D Video-to-Video Pipeline (v2.3 — 30-Second Quality Test)
+High-Quality Frame-by-Frame Disney 3D Video-to-Video Pipeline (v2.4 — 30-Second Quality Test with Durable Scene Checkpointing)
 ============================================================================================
 Target: ONE: High School Heroes (2025) S01E01 — 30-second showcase (08:30 -> 09:00, 24 fps)
 Architecture (ZERO optical-flow warping, ZERO sparse keyframe melting, T4 System-RAM-Safe):
@@ -128,6 +128,48 @@ def get_release(requests_mod):
     if r.status_code == 200:
         return r.json()
     raise RuntimeError(f"Release {RELEASE_TAG} not found (HTTP {r.status_code}): {r.text[:300]}")
+
+
+def download_existing_scene_checkpoint(requests_mod, release_obj, s_idx: int, start_f: int, end_f: int, stylized_dir: Path) -> bool:
+    import tarfile
+    ckpt_name = f"disney3d_v2_scene_{s_idx + 1:02d}.tar"
+    asset_url = None
+    for a in release_obj.get("assets", []):
+        if a.get("name") == ckpt_name and a.get("size", 0) > 10_000:
+            asset_url = a.get("browser_download_url")
+            break
+    if not asset_url:
+        return False
+    tar_path = WORK_DIR / ckpt_name
+    try:
+        log(f"Found durable checkpoint {ckpt_name} on release! Downloading from {asset_url}...")
+        r = requests_mod.get(asset_url, timeout=120)
+        r.raise_for_status()
+        tar_path.write_bytes(r.content)
+        with tarfile.open(tar_path, "r") as tf:
+            tf.extractall(path=stylized_dir)
+        tar_path.unlink(missing_ok=True)
+        for f_num in range(start_f + 1, end_f + 1):
+            if not (stylized_dir / f"frame_{f_num:05d}.png").exists():
+                return False
+        log(f"Restored Scene {s_idx + 1} frames [{start_f}..{end_f - 1}] from durable checkpoint!")
+        return True
+    except Exception as exc:
+        log(f"Warning: failed to restore {ckpt_name}: {exc}")
+        return False
+
+
+def save_scene_checkpoint(requests_mod, s_idx: int, start_f: int, end_f: int, stylized_dir: Path) -> None:
+    import tarfile
+    ckpt_name = f"disney3d_v2_scene_{s_idx + 1:02d}.tar"
+    tar_path = WORK_DIR / ckpt_name
+    with tarfile.open(tar_path, "w") as tf:
+        for f_num in range(start_f + 1, end_f + 1):
+            fp = stylized_dir / f"frame_{f_num:05d}.png"
+            tf.add(fp, arcname=fp.name)
+    rel_fresh = get_release(requests_mod)
+    upload_asset(requests_mod, rel_fresh, tar_path, content_type="application/x-tar")
+    tar_path.unlink(missing_ok=True)
 
 
 def upload_asset(requests_mod, release_obj, file_path: Path, content_type="application/octet-stream"):
@@ -339,7 +381,7 @@ def build_conditioning_maps_to_disk(frame_files, work_dir: Path):
 # ---------------------------------------------------------------------------
 # 5. True Per-Frame Disney 3D Rendering (Sequential GPU Load + AnimateDiff v3 + FreeNoise)
 # ---------------------------------------------------------------------------
-def render_disney3d_frames(frame_files, depth_dir: Path, canny_dir: Path, scenes, work_dir: Path):
+def render_disney3d_frames(requests_mod, frame_files, depth_dir: Path, canny_dir: Path, scenes, work_dir: Path):
     import numpy as np
     import torch
     from PIL import Image
@@ -348,7 +390,7 @@ def render_disney3d_frames(frame_files, depth_dir: Path, canny_dir: Path, scenes
         AnimateDiffVideoToVideoControlNetPipeline,
         AutoencoderKL,
         ControlNetModel,
-        DDIMScheduler,
+        DPMSolverMultistepScheduler,
         MotionAdapter,
         UNet2DConditionModel,
         UNetMotionModel,
@@ -404,13 +446,11 @@ def render_disney3d_frames(frame_files, depth_dir: Path, canny_dir: Path, scenes
     gc.collect()
 
     tokenizer = CLIPTokenizer.from_pretrained(base_model, subfolder="tokenizer")
-    scheduler = DDIMScheduler.from_pretrained(
+    scheduler = DPMSolverMultistepScheduler.from_pretrained(
         base_model,
         subfolder="scheduler",
-        clip_sample=False,
-        timestep_spacing="linspace",
-        beta_schedule="linear",
-        steps_offset=1,
+        use_karras_sigmas=True,
+        algorithm_type="dpmsolver++",
     )
 
     cn_depth = ControlNetModel.from_pretrained(
@@ -489,7 +529,7 @@ def render_disney3d_frames(frame_files, depth_dir: Path, canny_dir: Path, scenes
                 negative_prompt=negative_prompt,
                 width=GEN_W,
                 height=GEN_H,
-                num_inference_steps=25,
+                num_inference_steps=16,
                 guidance_scale=8.0,
                 strength=0.72,
                 controlnet_conditioning_scale=[0.60, 0.30],
@@ -498,8 +538,11 @@ def render_disney3d_frames(frame_files, depth_dir: Path, canny_dir: Path, scenes
             ).frames[0]
         return res[:orig_len]
 
+    rel_initial = get_release(requests_mod)
     for s_idx, (start_f, end_f) in enumerate(scenes):
         shot_len = end_f - start_f
+        if download_existing_scene_checkpoint(requests_mod, rel_initial, s_idx, start_f, end_f, stylized_dir):
+            continue
         log(f"Rendering Scene {s_idx + 1}/{len(scenes)}: frames [{start_f}..{end_f - 1}] ({shot_len} frames)")
         seed_val = 4200 + s_idx
         scene_out = [None] * shot_len
@@ -538,7 +581,8 @@ def render_disney3d_frames(frame_files, depth_dir: Path, canny_dir: Path, scenes
             f_num = start_f + k + 1
             img.save(str(stylized_dir / f"frame_{f_num:05d}.png"))
 
-        log(f"  Completed Scene {s_idx + 1}/{len(scenes)} (peak VRAM: {torch.cuda.max_memory_allocated() / 1e9:.2f} GB)")
+        save_scene_checkpoint(requests_mod, s_idx, start_f, end_f, stylized_dir)
+        log(f"  Completed & Checkpointed Scene {s_idx + 1}/{len(scenes)} (peak VRAM: {torch.cuda.max_memory_allocated() / 1e9:.2f} GB)")
         del scene_out
         gc.collect()
         torch.cuda.empty_cache()
@@ -696,7 +740,7 @@ def main():
     scenes = detect_scenes(src_clip, len(frame_files))
 
     depth_dir, canny_dir = build_conditioning_maps_to_disk(frame_files, WORK_DIR)
-    stylized_dir = render_disney3d_frames(frame_files, depth_dir, canny_dir, scenes, WORK_DIR)
+    stylized_dir = render_disney3d_frames(requests, frame_files, depth_dir, canny_dir, scenes, WORK_DIR)
 
     up_dir = WORK_DIR / "upscaled_1080p"
     upscale_frames_to_1080p(stylized_dir, len(frame_files), up_dir)
@@ -715,7 +759,7 @@ def main():
     grid_url = upload_asset(requests, rel, grid_path, content_type="image/png")
 
     summary = {
-        "pipeline": "disney3d_v2.3_animatediff_freenoise_realesrgan_1080p",
+        "pipeline": "disney3d_v2.4_animatediff_freenoise_realesrgan_1080p",
         "start_sec": START_SEC,
         "duration_sec": DURATION_SEC,
         "fps": TARGET_FPS,
