@@ -163,16 +163,35 @@ def main() -> int:
         print("\n".join(log), flush=True)
 
         try:
-            proc = subprocess.run(
-                command,
-                cwd=str(ROOT),
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=timeout,
-                check=False,
-                env=os.environ.copy(),
-            )
+            max_assign_retries = 12
+            retry_wait_sec = 90
+            proc = None
+            for attempt in range(1, max_assign_retries + 1):
+                t_attempt = time.monotonic()
+                proc = subprocess.run(
+                    command,
+                    cwd=str(ROOT),
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=timeout,
+                    check=False,
+                    env=os.environ.copy(),
+                )
+                combined_out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+                elapsed_attempt = time.monotonic() - t_attempt
+                if (
+                    proc.returncode != 0
+                    and elapsed_attempt < 180
+                    and ("Service Unavailable" in combined_out or "Connection was lost" in combined_out)
+                    and attempt < max_assign_retries
+                ):
+                    msg = f"[colab_bridge] Transient Colab GPU allocation/WS drop (attempt {attempt}/{max_assign_retries}, {elapsed_attempt:.1f}s). Retrying in {retry_wait_sec}s..."
+                    print(msg, flush=True)
+                    log.append(msg)
+                    time.sleep(retry_wait_sec)
+                    continue
+                break
             stdout = proc.stdout or ""
             stderr = proc.stderr or ""
             for secret_value in redaction_values:
