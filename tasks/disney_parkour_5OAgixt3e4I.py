@@ -140,7 +140,7 @@ print(f"✂️ تم تقسيم الفيديو إلى {len(chunk_files)} مقاط
 # ==========================================
 # 3. تثبيت ComfyUI والعقد والموديلات الاحترافية
 # ==========================================
-print("⚙️ جاري تثبيت ComfyUI والإضافات (AnimateDiff + ControlNet Depth + VHS)...", flush=True)
+print("⚙️ جاري تثبيت ComfyUI والإضافات (AnimateDiff + Advanced ControlNet + VHS)...", flush=True)
 COMFY_DIR = "/content/ComfyUI"
 if not os.path.exists(COMFY_DIR):
     subprocess.run(["git", "clone", "https://github.com/comfyanonymous/ComfyUI.git", COMFY_DIR], check=True)
@@ -154,6 +154,7 @@ for c_path in chunk_files:
 CUSTOM_NODES = f"{COMFY_DIR}/custom_nodes"
 nodes = [
     "https://github.com/Kosinkadink/ComfyUI-AnimateDiff-Evolved.git",
+    "https://github.com/Kosinkadink/ComfyUI-Advanced-ControlNet.git",
     "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git",
     "https://github.com/Fannovel16/comfyui_controlnet_aux.git",
 ]
@@ -292,6 +293,8 @@ def sanitize_workflow(wf):
 
 
 def build_workflow(input_video_name, output_prefix):
+    cn_loader = "ControlNetLoaderAdvanced" if "ControlNetLoaderAdvanced" in obj_info else "ControlNetLoader"
+    cn_apply = "ACN_AdvancedControlNetApply" if "ACN_AdvancedControlNetApply" in obj_info else "ControlNetApplyAdvanced"
     wf = {
         "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "disney_pixar_3d.safetensors"}},
         "2": {"class_type": "VAELoader", "inputs": {"vae_name": "vae-ft-mse-840000-ema-pruned.safetensors"}},
@@ -307,7 +310,7 @@ def build_workflow(input_video_name, output_prefix):
             "class_type": "DepthAnythingV2Preprocessor",
             "inputs": {"ckpt_name": "depth_anything_v2_vitl.pth", "resolution": 576, "image": ["3", 0]},
         },
-        "5": {"class_type": "ControlNetLoader", "inputs": {"control_net_name": "control_v11f1p_sd15_depth.pth"}},
+        "5": {"class_type": cn_loader, "inputs": {"control_net_name": "control_v11f1p_sd15_depth.pth"}},
         "6": {
             "class_type": "CLIPTextEncode",
             "inputs": {
@@ -323,7 +326,7 @@ def build_workflow(input_video_name, output_prefix):
             },
         },
         "8": {
-            "class_type": "ControlNetApplyAdvanced",
+            "class_type": cn_apply,
             "inputs": {
                 "strength": 0.85, "start_percent": 0.0, "end_percent": 0.95,
                 "positive": ["6", 0], "negative": ["7", 0], "control_net": ["5", 0], "image": ["4", 0],
