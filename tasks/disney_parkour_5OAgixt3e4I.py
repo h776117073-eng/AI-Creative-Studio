@@ -67,46 +67,54 @@ def push_progress_to_github(file_path, commit_msg):
 # ==========================================
 # 2. تحميل الفيديو وتقسيمه إلى مقاطع متداخلة (24fps)
 # ==========================================
-print("🎬 جاري تحميل الفيديو الأصلي بأعلى جودة...", flush=True)
-subprocess.run([sys.executable, "-m", "pip", "install", "-U", "yt-dlp"], check=True)
-
 RAW_VIDEO = f"{WORK_DIR}/raw_video.mp4"
 CLEAN_VIDEO = f"{WORK_DIR}/clean_24fps.mp4"
 CHUNKS_DIR = f"{WORK_DIR}/chunks"
 os.makedirs(CHUNKS_DIR, exist_ok=True)
 
-yt_attempts = [
-    ["yt-dlp", "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best", "--merge-output-format", "mp4", "-o", RAW_VIDEO, VIDEO_URL],
-    ["yt-dlp", "--extractor-args", "youtube:player_client=web_creator,tv_embedded", "-f", "best", "--merge-output-format", "mp4", "-o", RAW_VIDEO, VIDEO_URL],
-    ["yt-dlp", "--extractor-args", "youtube:player_client=android,ios", "-f", "best", "--merge-output-format", "mp4", "-o", RAW_VIDEO, VIDEO_URL],
-]
-for cmd in yt_attempts:
-    if os.path.exists(RAW_VIDEO) and os.path.getsize(RAW_VIDEO) > 10000:
-        break
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    if res.returncode != 0:
-        print(f"⚠️ محاولة yt-dlp فشلت: {res.stderr[-300:]}", flush=True)
+CACHED_RAW = os.path.join(DEST_DIR, "raw_video.mp4")
+if os.path.exists(CACHED_RAW) and os.path.getsize(CACHED_RAW) > 10000:
+    print("♻️ تم العثور على الفيديو الأصلي محفوظاً مسبقاً في GitHub، جاري استخدامه...", flush=True)
+    shutil.copy(CACHED_RAW, RAW_VIDEO)
+else:
+    print("🎬 جاري تحميل الفيديو الأصلي بأعلى جودة...", flush=True)
+    subprocess.run([sys.executable, "-m", "pip", "install", "-U", "yt-dlp"], check=True)
 
-if not os.path.exists(RAW_VIDEO) or os.path.getsize(RAW_VIDEO) < 10000:
-    print("🔄 جاري المحاولة عبر pytubefix...", flush=True)
-    subprocess.run([sys.executable, "-m", "pip", "install", "pytubefix"], check=True)
-    from pytubefix import YouTube
-    for client in ["WEB", "ANDROID_VR", "ANDROID", "TV", "WEB_CREATOR"]:
-        try:
-            yt = YouTube(VIDEO_URL, client=client)
-            stream = yt.streams.filter(progressive=True, file_extension="mp4").order_by("resolution").desc().first()
-            if stream is None:
-                stream = yt.streams.filter(file_extension="mp4").order_by("resolution").desc().first()
-            if stream is not None:
-                stream.download(output_path=WORK_DIR, filename="raw_video.mp4")
-                if os.path.exists(RAW_VIDEO) and os.path.getsize(RAW_VIDEO) > 10000:
-                    print(f"✅ تم التحميل عبر pytubefix ({client})", flush=True)
-                    break
-        except Exception as e:
-            print(f"⚠️ pytubefix ({client}) فشل: {type(e).__name__}: {e}", flush=True)
+    yt_attempts = [
+        ["yt-dlp", "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best", "--merge-output-format", "mp4", "-o", RAW_VIDEO, VIDEO_URL],
+        ["yt-dlp", "--extractor-args", "youtube:player_client=web_creator,tv_embedded", "-f", "best", "--merge-output-format", "mp4", "-o", RAW_VIDEO, VIDEO_URL],
+        ["yt-dlp", "--extractor-args", "youtube:player_client=android,ios", "-f", "best", "--merge-output-format", "mp4", "-o", RAW_VIDEO, VIDEO_URL],
+    ]
+    for cmd in yt_attempts:
+        if os.path.exists(RAW_VIDEO) and os.path.getsize(RAW_VIDEO) > 10000:
+            break
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode != 0:
+            print(f"⚠️ محاولة yt-dlp فشلت: {res.stderr[-300:]}", flush=True)
 
-if not os.path.exists(RAW_VIDEO) or os.path.getsize(RAW_VIDEO) < 10000:
-    raise RuntimeError("فشل تحميل الفيديو الأصلي من يوتيوب على هذا الخادم.")
+    if not os.path.exists(RAW_VIDEO) or os.path.getsize(RAW_VIDEO) < 10000:
+        print("🔄 جاري المحاولة عبر pytubefix...", flush=True)
+        subprocess.run([sys.executable, "-m", "pip", "install", "pytubefix"], check=True)
+        from pytubefix import YouTube
+        for client in ["WEB", "ANDROID_VR", "ANDROID", "TV", "WEB_CREATOR"]:
+            try:
+                yt = YouTube(VIDEO_URL, client=client)
+                stream = yt.streams.filter(progressive=True, file_extension="mp4").order_by("resolution").desc().first()
+                if stream is None:
+                    stream = yt.streams.filter(file_extension="mp4").order_by("resolution").desc().first()
+                if stream is not None:
+                    stream.download(output_path=WORK_DIR, filename="raw_video.mp4")
+                    if os.path.exists(RAW_VIDEO) and os.path.getsize(RAW_VIDEO) > 10000:
+                        print(f"✅ تم التحميل عبر pytubefix ({client})", flush=True)
+                        break
+            except Exception as e:
+                print(f"⚠️ pytubefix ({client}) فشل: {type(e).__name__}: {e}", flush=True)
+
+    if not os.path.exists(RAW_VIDEO) or os.path.getsize(RAW_VIDEO) < 10000:
+        raise RuntimeError("فشل تحميل الفيديو الأصلي من يوتيوب على هذا الخادم.")
+
+    if os.path.getsize(RAW_VIDEO) < 45 * 1024 * 1024:
+        push_progress_to_github(RAW_VIDEO, "Cache raw source video for 5OAgixt3e4I")
 
 subprocess.run(
     [
