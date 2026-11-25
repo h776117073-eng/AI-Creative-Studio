@@ -6,6 +6,7 @@ import shutil
 import time
 import json
 import urllib.request
+import urllib.error
 
 # ==========================================
 # 1. إعدادات الفيديو ومسار المستودع المربوط
@@ -222,9 +223,49 @@ for _ in range(90):
 if not ready:
     raise RuntimeError("ComfyUI server failed to become ready in time.")
 
+obj_info = json.loads(urllib.request.urlopen("http://127.0.0.1:8188/object_info", timeout=15).read().decode("utf-8"))
+print(f"ℹ️ عدد العقد المحملة في ComfyUI: {len(obj_info)}", flush=True)
+
+
+def sanitize_workflow(wf):
+    """مواءمة حقول العقد مع تعريفات /object_info الفعلية في ComfyUI"""
+    # Check depth preprocessor availability
+    depth_node = wf["4"]["class_type"]
+    if depth_node not in obj_info:
+        for alt in ["DepthAnythingPreprocessor", "MiDaS-DepthMapPreprocessor", "Zoe-DepthMapPreprocessor"]:
+            if alt in obj_info:
+                print(f"🔄 استبدال {depth_node} بـ {alt}", flush=True)
+                wf["4"]["class_type"] = alt
+                break
+
+    for node_id, node in wf.items():
+        ct = node["class_type"]
+        if ct not in obj_info:
+            print(f"⚠️ العقدة {ct} غير موجودة في object_info!", flush=True)
+            continue
+        spec = obj_info[ct].get("input", {})
+        allowed = {}
+        allowed.update(spec.get("required", {}))
+        allowed.update(spec.get("optional", {}))
+        filtered = {}
+        for k, v in node["inputs"].items():
+            if k in allowed:
+                filtered[k] = v
+            else:
+                print(f"ℹ️ إزالة الحقل غير المدعوم {ct}.{k}", flush=True)
+        # Fill any missing required fields with defaults if available
+        for req_k, req_spec in spec.get("required", {}).items():
+            if req_k not in filtered and isinstance(req_spec, list) and len(req_spec) > 1 and isinstance(req_spec[1], dict):
+                if "default" in req_spec[1]:
+                    filtered[req_k] = req_spec[1]["default"]
+            elif req_k not in filtered and isinstance(req_spec, list) and isinstance(req_spec[0], list) and req_spec[0]:
+                filtered[req_k] = req_spec[0][0]
+        node["inputs"] = filtered
+    return wf
+
 
 def build_workflow(input_video_path, output_prefix):
-    return {
+    wf = {
         "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "disney_pixar_3d.safetensors"}},
         "2": {"class_type": "VAELoader", "inputs": {"vae_name": "vae-ft-mse-840000-ema-pruned.safetensors"}},
         "3": {
@@ -296,6 +337,7 @@ def build_workflow(input_video_path, output_prefix):
             },
         },
     }
+    return sanitize_workflow(wf)
 
 
 # ==========================================
@@ -320,13 +362,26 @@ for i, chunk_path in enumerate(chunk_files):
         data=json.dumps({"prompt": workflow}).encode("utf-8"),
         headers={"Content-Type": "application/json"},
     )
-    resp = json.loads(urllib.request.urlopen(req).read().decode("utf-8"))
+    try:
+        resp = json.loads(urllib.request.urlopen(req).read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace")
+        print(f"❌ خطأ ComfyUI /prompt ({e.code}): {err_body}", flush=True)
+        comfy_log.flush()
+        print("📋 آخر سطور comfyui.log:\n" + open(f"{WORK_DIR}/comfyui.log").read()[-2500:], flush=True)
+        raise
     prompt_id = resp["prompt_id"]
 
     while True:
         hist_req = urllib.request.urlopen(f"http://127.0.0.1:8188/history/{prompt_id}")
         hist = json.loads(hist_req.read().decode("utf-8"))
         if prompt_id in hist:
+            status_obj = hist[prompt_id].get("status", {})
+            if status_obj.get("status_str") == "error":
+                print(f"❌ فشل تنفيذ المقطع {i+1}: {json.dumps(status_obj)}", flush=True)
+                comfy_log.flush()
+                print("📋 آخر سطور comfyui.log:\n" + open(f"{WORK_DIR}/comfyui.log").read()[-2500:], flush=True)
+                raise RuntimeError(f"ComfyUI execution error on chunk {i+1}")
             break
         time.sleep(5)
 
