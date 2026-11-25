@@ -68,19 +68,37 @@ def push_progress_to_github(file_path, commit_msg):
 # 2. تحميل الفيديو وتقسيمه إلى مقاطع متداخلة (24fps)
 # ==========================================
 print("🎬 جاري تحميل الفيديو الأصلي بأعلى جودة...", flush=True)
-subprocess.run([sys.executable, "-m", "pip", "install", "yt-dlp"], check=True)
+subprocess.run([sys.executable, "-m", "pip", "install", "-U", "yt-dlp"], check=True)
 
 RAW_VIDEO = f"{WORK_DIR}/raw_video.mp4"
 CLEAN_VIDEO = f"{WORK_DIR}/clean_24fps.mp4"
 CHUNKS_DIR = f"{WORK_DIR}/chunks"
 os.makedirs(CHUNKS_DIR, exist_ok=True)
 
-dl_res = subprocess.run(
-    ["yt-dlp", "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]", "-o", RAW_VIDEO, VIDEO_URL],
-    check=False,
-)
-if dl_res.returncode != 0 or not os.path.exists(RAW_VIDEO):
-    subprocess.run(["yt-dlp", "-f", "best", "--merge-output-format", "mp4", "-o", RAW_VIDEO, VIDEO_URL], check=True)
+yt_attempts = [
+    ["yt-dlp", "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best", "--merge-output-format", "mp4", "-o", RAW_VIDEO, VIDEO_URL],
+    ["yt-dlp", "--extractor-args", "youtube:player_client=android,ios", "-f", "best", "--merge-output-format", "mp4", "-o", RAW_VIDEO, VIDEO_URL],
+    ["yt-dlp", "--extractor-args", "youtube:player_client=tv_embedded,web", "-f", "best", "--merge-output-format", "mp4", "-o", RAW_VIDEO, VIDEO_URL],
+]
+for cmd in yt_attempts:
+    if os.path.exists(RAW_VIDEO) and os.path.getsize(RAW_VIDEO) > 10000:
+        break
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        print(f"⚠️ محاولة yt-dlp فشلت: {res.stderr[-400:]}", flush=True)
+
+if not os.path.exists(RAW_VIDEO) or os.path.getsize(RAW_VIDEO) < 10000:
+    print("🔄 جاري المحاولة عبر pytubefix...", flush=True)
+    subprocess.run([sys.executable, "-m", "pip", "install", "pytubefix"], check=True)
+    from pytubefix import YouTube
+    yt = YouTube(VIDEO_URL)
+    stream = yt.streams.filter(progressive=True, file_extension="mp4").order_by("resolution").desc().first()
+    if stream is None:
+        stream = yt.streams.filter(file_extension="mp4").order_by("resolution").desc().first()
+    stream.download(output_path=WORK_DIR, filename="raw_video.mp4")
+
+if not os.path.exists(RAW_VIDEO) or os.path.getsize(RAW_VIDEO) < 10000:
+    raise RuntimeError("فشل تحميل الفيديو الأصلي من يوتيوب.")
 
 subprocess.run(
     [
@@ -229,7 +247,6 @@ print(f"ℹ️ عدد العقد المحملة في ComfyUI: {len(obj_info)}", 
 
 def sanitize_workflow(wf):
     """مواءمة حقول العقد مع تعريفات /object_info الفعلية في ComfyUI"""
-    # Check depth preprocessor availability
     depth_node = wf["4"]["class_type"]
     if depth_node not in obj_info:
         for alt in ["DepthAnythingPreprocessor", "MiDaS-DepthMapPreprocessor", "Zoe-DepthMapPreprocessor"]:
@@ -253,7 +270,6 @@ def sanitize_workflow(wf):
                 filtered[k] = v
             else:
                 print(f"ℹ️ إزالة الحقل غير المدعوم {ct}.{k}", flush=True)
-        # Fill any missing required fields with defaults if available
         for req_k, req_spec in spec.get("required", {}).items():
             if req_k not in filtered and isinstance(req_spec, list) and len(req_spec) > 1 and isinstance(req_spec[1], dict):
                 if "default" in req_spec[1]:
