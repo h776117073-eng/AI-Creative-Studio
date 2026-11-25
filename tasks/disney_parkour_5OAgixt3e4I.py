@@ -93,24 +93,6 @@ else:
             print(f"⚠️ محاولة yt-dlp فشلت: {res.stderr[-300:]}", flush=True)
 
     if not os.path.exists(RAW_VIDEO) or os.path.getsize(RAW_VIDEO) < 10000:
-        print("🔄 جاري المحاولة عبر pytubefix...", flush=True)
-        subprocess.run([sys.executable, "-m", "pip", "install", "pytubefix"], check=True)
-        from pytubefix import YouTube
-        for client in ["WEB", "ANDROID_VR", "ANDROID", "TV", "WEB_CREATOR"]:
-            try:
-                yt = YouTube(VIDEO_URL, client=client)
-                stream = yt.streams.filter(progressive=True, file_extension="mp4").order_by("resolution").desc().first()
-                if stream is None:
-                    stream = yt.streams.filter(file_extension="mp4").order_by("resolution").desc().first()
-                if stream is not None:
-                    stream.download(output_path=WORK_DIR, filename="raw_video.mp4")
-                    if os.path.exists(RAW_VIDEO) and os.path.getsize(RAW_VIDEO) > 10000:
-                        print(f"✅ تم التحميل عبر pytubefix ({client})", flush=True)
-                        break
-            except Exception as e:
-                print(f"⚠️ pytubefix ({client}) فشل: {type(e).__name__}: {e}", flush=True)
-
-    if not os.path.exists(RAW_VIDEO) or os.path.getsize(RAW_VIDEO) < 10000:
         raise RuntimeError("فشل تحميل الفيديو الأصلي من يوتيوب على هذا الخادم.")
 
     if os.path.getsize(RAW_VIDEO) < 45 * 1024 * 1024:
@@ -164,6 +146,11 @@ if not os.path.exists(COMFY_DIR):
     subprocess.run(["git", "clone", "https://github.com/comfyanonymous/ComfyUI.git", COMFY_DIR], check=True)
     subprocess.run([sys.executable, "-m", "pip", "install", "-r", f"{COMFY_DIR}/requirements.txt"], check=True)
 
+COMFY_INPUT = f"{COMFY_DIR}/input"
+os.makedirs(COMFY_INPUT, exist_ok=True)
+for c_path in chunk_files:
+    shutil.copy(c_path, os.path.join(COMFY_INPUT, os.path.basename(c_path)))
+
 CUSTOM_NODES = f"{COMFY_DIR}/custom_nodes"
 nodes = [
     "https://github.com/Kosinkadink/ComfyUI-AnimateDiff-Evolved.git",
@@ -181,53 +168,61 @@ for repo in nodes:
 subprocess.run([sys.executable, "-m", "pip", "install", "aria2"], check=True)
 
 
-def download_model(url, folder, filename):
+def download_model(url, folder, filename, min_bytes=10_000_000):
     os.makedirs(folder, exist_ok=True)
     filepath = os.path.join(folder, filename)
-    if not os.path.exists(filepath):
-        print(f"⬇️ تحميل {filename}...", flush=True)
-        subprocess.run(
-            ["aria2c", "--console-log-level=error", "-c", "-x", "16", "-s", "16", "-k", "1M", url, "-d", folder, "-o", filename],
-            check=False,
-        )
+    if os.path.exists(filepath) and os.path.getsize(filepath) >= min_bytes:
+        return True
+    if os.path.exists(filepath):
+        os.remove(filepath)
+    print(f"⬇️ تحميل {filename}...", flush=True)
+    subprocess.run(
+        ["aria2c", "--console-log-level=error", "-c", "-x", "16", "-s", "16", "-k", "1M", url, "-d", folder, "-o", filename],
+        check=False,
+    )
+    return os.path.exists(filepath) and os.path.getsize(filepath) >= min_bytes
 
 
 # 1. نموذج Disney Pixar Cartoon 3D
-download_model(
-    "https://civitai.com/api/download/models/798204?type=Model&format=SafeTensor&size=pruned&fp=fp16",
-    f"{COMFY_DIR}/models/checkpoints",
-    "disney_pixar_3d.safetensors",
-)
-ckpt_path = f"{COMFY_DIR}/models/checkpoints/disney_pixar_3d.safetensors"
-if not os.path.exists(ckpt_path) or os.path.getsize(ckpt_path) < 1000000:
-    if os.path.exists(ckpt_path):
-        os.remove(ckpt_path)
-    download_model(
-        "https://huggingface.co/stablediffusionapi/disney-pixar-cartoon/resolve/main/disneyPixarCartoon_v10.safetensors",
-        f"{COMFY_DIR}/models/checkpoints",
-        "disney_pixar_3d.safetensors",
-    )
+ckpt_urls = [
+    "https://huggingface.co/casque/disneyPixarCartoon_v10/resolve/main/disneyPixarCartoon_v10.safetensors",
+    "https://huggingface.co/ckpt/disney-pixar-cartoon-type-a/resolve/main/disneyPixarCartoon_v10.safetensors",
+    "https://huggingface.co/HAttORi/Disney-Pixar-Cartoon-Type-A/resolve/main/disneyPixarCartoon_v10.safetensors",
+]
+ckpt_ok = False
+for u in ckpt_urls:
+    if download_model(u, f"{COMFY_DIR}/models/checkpoints", "disney_pixar_3d.safetensors", min_bytes=500_000_000):
+        ckpt_ok = True
+        break
+if not ckpt_ok:
+    raise RuntimeError("فشل تحميل نموذج disney_pixar_3d.safetensors من جميع المرايا.")
 
 # 2. وحدة الحركة AnimateDiff v3
-download_model(
+if not download_model(
     "https://huggingface.co/guoyww/animatediff/resolve/main/v3_sd15_mm.ckpt",
     f"{COMFY_DIR}/custom_nodes/ComfyUI-AnimateDiff-Evolved/models",
     "v3_sd15_mm.ckpt",
-)
+    min_bytes=500_000_000,
+):
+    raise RuntimeError("فشل تحميل v3_sd15_mm.ckpt")
 
 # 3. وحدة ControlNet Depth للحفاظ على هندسة المشهد والحركة
-download_model(
+if not download_model(
     "https://huggingface.co/lllyasviel/ControlNet-v1-1/resolve/main/control_v11f1p_sd15_depth.pth",
     f"{COMFY_DIR}/models/controlnet",
     "control_v11f1p_sd15_depth.pth",
-)
+    min_bytes=500_000_000,
+):
+    raise RuntimeError("فشل تحميل control_v11f1p_sd15_depth.pth")
 
 # 4. VAE لتحسين الألوان والإضاءة
-download_model(
+if not download_model(
     "https://huggingface.co/stabilityai/sd-vae-ft-mse-original/resolve/main/vae-ft-mse-840000-ema-pruned.safetensors",
     f"{COMFY_DIR}/models/vae",
     "vae-ft-mse-840000-ema-pruned.safetensors",
-)
+    min_bytes=100_000_000,
+):
+    raise RuntimeError("فشل تحميل vae-ft-mse-840000-ema-pruned.safetensors")
 
 # ==========================================
 # 4. تشغيل خادم ComfyUI في الخلفية وتجهيز مسار العمل (Workflow)
@@ -296,14 +291,14 @@ def sanitize_workflow(wf):
     return wf
 
 
-def build_workflow(input_video_path, output_prefix):
+def build_workflow(input_video_name, output_prefix):
     wf = {
         "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "disney_pixar_3d.safetensors"}},
         "2": {"class_type": "VAELoader", "inputs": {"vae_name": "vae-ft-mse-840000-ema-pruned.safetensors"}},
         "3": {
             "class_type": "VHS_LoadVideo",
             "inputs": {
-                "video": input_video_path, "force_rate": 24, "force_size": "Disabled",
+                "video": input_video_name, "force_rate": 24,
                 "custom_width": 576, "custom_height": 1024, "frame_load_cap": 0,
                 "skip_first_frames": 0, "select_every_nth": 1,
             },
@@ -363,8 +358,7 @@ def build_workflow(input_video_path, output_prefix):
             "class_type": "VHS_VideoCombine",
             "inputs": {
                 "frame_rate": 24, "loop_count": 0, "filename_prefix": output_prefix,
-                "format": "video/h264-mp4", "pix_fmt": "yuv420p", "crf": 17,
-                "save_metadata": False, "trim_to_audio": False, "pingpong": False,
+                "format": "video/h264-mp4", "pingpong": False,
                 "save_output": True, "images": ["15", 0],
             },
         },
@@ -388,7 +382,7 @@ for i, chunk_path in enumerate(chunk_files):
         continue
 
     print(f"🎨 جاري رندر المقطع {i+1} من {len(chunk_files)} بأسلوب ديزني 3D...", flush=True)
-    workflow = build_workflow(chunk_path, chunk_name)
+    workflow = build_workflow(os.path.basename(chunk_path), chunk_name)
     req = urllib.request.Request(
         "http://127.0.0.1:8188/prompt",
         data=json.dumps({"prompt": workflow}).encode("utf-8"),
